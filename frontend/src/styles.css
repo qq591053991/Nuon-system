@@ -1,0 +1,33 @@
+:root {
+  --bg: #f4f5fb;
+  --muted: #8c8c9e;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; }
+.brand { display: flex; align-items: center; gap: 10px; height: 64px; padding: 0 18px; cursor: pointer; color: #fff; }
+.brand img { width: 30px; height: 30px; flex: none; }
+.brand-title { font-weight: 700; font-size: 16px; line-height: 1.2; }
+.brand-sub { font-size: 11px; opacity: 0.6; }
+.app-header { display: flex; align-items: center; gap: 12px; padding: 0 16px !important; box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08); position: sticky; top: 0; z-index: 10; }
+.user-chip { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 0 8px; }
+.app-content { padding: 20px; min-width: 0; }
+.page-header { margin-bottom: 16px; }
+.kpi-card .ant-statistic-title { font-size: 13px; }
+.mono { font-family: 'SFMono-Regular', Consolas, Menlo, monospace; }
+.login-bg { min-height: 100vh; display: flex; align-items: center; justify-content: center; gap: 64px; padding: 24px; flex-wrap: wrap;
+  background: radial-gradient(circle at 15% 20%, rgba(255, 77, 79, 0.35), transparent 40%), radial-gradient(circle at 80% 80%, rgba(114, 46, 209, 0.45), transparent 45%), #160f2c; }
+.login-hero { color: #fff; max-width: 440px; }
+.login-hero h1 { font-size: 40px; margin: 16px 0 8px; }
+.login-hero p { font-size: 18px; opacity: 0.85; margin: 0 0 24px; }
+.login-hero li { opacity: 0.75; line-height: 2; }
+.login-card { width: 380px; max-width: 100%; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35); }
+/* 工位终端：大字号、大按钮，适配车间触摸屏 */
+.station .ant-input-lg { font-size: 22px; height: 56px; }
+.station-op { font-size: 28px; font-weight: 700; }
+.station-result-pass { background: #f6ffed; border: 2px solid #52c41a; }
+.station-result-fail { background: #fff1f0; border: 2px solid #ff4d4f; }
+@media print {
+  .ant-layout-sider, .app-header, .no-print { display: none !important; }
+  .app-content { padding: 0; }
+  body { background: #fff; }
+}
