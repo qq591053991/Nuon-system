@@ -9,6 +9,8 @@ export interface CurrentUser {
   role_names: string[];
   department?: string;
   permissions: string[];
+  /** LOCAL 本系统账号 / KINGDEE 金蝶云星空账号 */
+  auth_source?: string;
 }
 
 interface AuthCtx {

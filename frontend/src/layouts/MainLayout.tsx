@@ -70,11 +70,13 @@ function GlobalSearch() {
 
 function Todos() {
   const nav = useNavigate();
+  const { user } = useAuth();
   const [items, setItems] = useState<Rec[]>([]);
   const loc = useLocation();
   useEffect(() => {
+    if (!user?.roles.length) return;
     get('/todos', undefined, true).then(setItems).catch(() => undefined);
-  }, [loc.pathname]);
+  }, [loc.pathname, user]);
   const total = items.reduce((s, i) => s + i.count, 0);
   return (
     <Popover
@@ -127,13 +129,16 @@ export default function MainLayout() {
   const [collapsed, setCollapsed] = useState(window.innerWidth < 1000);
   const [pwd, setPwd] = useState(false);
 
+  const { user: me } = useAuth();
+  const noRole = !me?.roles.length;
   const items = useMemo(() => {
+    if (noRole) return [{ key: '/', icon: menu[0].icon, label: menu[0].label }];
     const conv = (m: MenuDef): any =>
       m.perm && !can(...m.perm)
         ? null
         : { key: m.key, icon: m.icon, label: m.label, children: m.children?.map(conv).filter(Boolean) };
     return menu.map(conv).filter(Boolean);
-  }, [can]);
+  }, [can, noRole]);
 
   // 当前路由对应的菜单项（详情页高亮其列表菜单）
   const selected = useMemo(() => {
@@ -163,7 +168,9 @@ export default function MainLayout() {
           <Dropdown
             menu={{
               items: [
-                { key: 'pwd', icon: <LockOutlined />, label: '修改密码', onClick: () => setPwd(true) },
+                me?.auth_source === 'KINGDEE'
+                  ? { key: 'pwd', icon: <LockOutlined />, label: '修改密码（请在金蝶云星空中修改）', disabled: true }
+                  : { key: 'pwd', icon: <LockOutlined />, label: '修改密码', onClick: () => setPwd(true) },
                 { type: 'divider' },
                 { key: 'logout', icon: <LogoutOutlined />, label: '退出登录', onClick: logout },
               ],

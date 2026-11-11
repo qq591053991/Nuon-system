@@ -57,7 +57,7 @@ export function useESign(): [(o: Opts) => Promise<Signature>, JSX.Element] {
       />
       <Typography.Paragraph>签名人：<b>{user?.full_name}</b>（{user?.username}）</Typography.Paragraph>
       <Form form={form} layout="vertical">
-        <Form.Item name="password" label="请输入登录密码" rules={[{ required: true, message: '请输入密码' }]}>
+        <Form.Item name="password" label={user?.auth_source === 'KINGDEE' ? '请输入金蝶云星空登录密码' : '请输入登录密码'} rules={[{ required: true, message: '请输入密码' }]}>
           <Input.Password autoFocus autoComplete="current-password" />
         </Form.Item>
         <Form.Item name="reason" label="签名理由/意见" rules={[{ required: !!opts?.reasonRequired, message: '请填写理由' }]}>

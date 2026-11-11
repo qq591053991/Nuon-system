@@ -1,4 +1,4 @@
-import { Alert, Button, Card, Col, Form, Input, Modal, Result, Row, Select, Space, Switch, Table, Tag, Tooltip, Typography, message, type TableColumnsType } from 'antd';
+import { Alert, Button, Card, Col, Form, Input, Modal, Radio, Result, Row, Select, Space, Switch, Table, Tag, Tooltip, Typography, message, type TableColumnsType } from 'antd';
 import { CheckOutlined, EditOutlined, ReloadOutlined, UserAddOutlined } from '@ant-design/icons';
 import { useEffect, useMemo, useState } from 'react';
 import { get, post, put, type Rec } from '../../api/http';
@@ -19,18 +19,20 @@ function UserModal({ user, open, roles, onClose, onDone }: { user: Rec | null; o
   const [form] = Form.useForm();
   const [saving, setSaving] = useState(false);
   const { user: me } = useAuth();
+  const source = Form.useWatch('auth_source', form) || 'LOCAL';
+  const kingdee = source === 'KINGDEE';
 
   useEffect(() => {
     if (!open) return;
     form.resetFields();
     form.setFieldsValue(user
-      ? { username: user.username, full_name: user.full_name, roles: user.role_list || [], department: user.department, email: user.email, is_active: user.is_active }
-      : { roles: [], is_active: true });
+      ? { username: user.username, full_name: user.full_name, roles: user.role_list || [], department: user.department, email: user.email, is_active: user.is_active, auth_source: user.auth_source || 'LOCAL' }
+      : { roles: [], is_active: true, auth_source: 'LOCAL' });
   }, [open, user, form]);
 
   const submit = async () => {
     const v = await form.validateFields();
-    const body = { ...v, password: v.password || null, is_active: !!v.is_active };
+    const body = { ...v, password: v.auth_source === 'KINGDEE' ? null : v.password || null, is_active: !!v.is_active };
     if (user && user.username === me?.username && (!body.is_active || !body.roles.includes('admin'))) {
       const ok = await new Promise<boolean>((resolve) => Modal.confirm({
         title: '确认修改自己的账号？',
@@ -66,9 +68,14 @@ function UserModal({ user, open, roles, onClose, onDone }: { user: Rec | null; o
     >
       <Form form={form} layout="vertical">
         <Row gutter={16}>
+          <Col span={24}>
+            <Form.Item name="auth_source" label="登录方式" extra={kingdee ? '使用金蝶云星空的账号和密码登录（本系统不保存其密码）；登录账号须与金蝶用户名一致。' : '使用本系统设置的密码登录。'}>
+              <Radio.Group optionType="button" buttonStyle="solid" options={[{ value: 'LOCAL', label: '本系统账号' }, { value: 'KINGDEE', label: '金蝶云星空账号' }]} />
+            </Form.Item>
+          </Col>
           <Col span={12}>
-            <Form.Item name="username" label="登录账号" rules={[{ required: true, message: '请输入账号' }, { pattern: /^[A-Za-z0-9_.-]+$/, message: '仅限字母、数字、下划线、点、横线' }]}>
-              <Input disabled={!!user} placeholder="如 zhangsan" autoComplete="off" />
+            <Form.Item name="username" label={kingdee ? '金蝶用户名' : '登录账号'} rules={[{ required: true, message: '请输入账号' }, { pattern: /^[\w.\-\u4e00-\u9fa5]+$/, message: '仅限中文、字母、数字、下划线、点、横线' }]}>
+              <Input disabled={!!user} placeholder={kingdee ? '与金蝶用户名一致' : '如 zhangsan'} autoComplete="off" />
             </Form.Item>
           </Col>
           <Col span={12}>
@@ -76,16 +83,18 @@ function UserModal({ user, open, roles, onClose, onDone }: { user: Rec | null; o
               <Input placeholder="电子签名时显示的姓名" />
             </Form.Item>
           </Col>
-          <Col span={12}>
-            <Form.Item
-              name="password"
-              label={user ? '重置密码' : '初始密码'}
-              rules={[{ required: !user, message: '请设置初始密码' }, { min: 6, message: '密码至少 6 位' }]}
-              extra={user ? '留空则不修改密码' : '请通知用户首次登录后自行修改'}
-            >
-              <Input.Password autoComplete="new-password" placeholder={user ? '留空不修改' : '至少 6 位'} />
-            </Form.Item>
-          </Col>
+          {!kingdee && (
+            <Col span={12}>
+              <Form.Item
+                name="password"
+                label={user && user.auth_source !== 'KINGDEE' ? '重置密码' : '初始密码'}
+                rules={[{ required: !user || user.auth_source === 'KINGDEE', message: '请设置初始密码' }, { min: 6, message: '密码至少 6 位' }]}
+                extra={user && user.auth_source !== 'KINGDEE' ? '留空则不修改密码' : '请通知用户首次登录后自行修改'}
+              >
+                <Input.Password autoComplete="new-password" placeholder={user && user.auth_source !== 'KINGDEE' ? '留空不修改' : '至少 6 位'} />
+              </Form.Item>
+            </Col>
+          )}
           <Col span={12}>
             <Form.Item name="is_active" label="账号状态" valuePropName="checked">
               <Switch checkedChildren="启用" unCheckedChildren="停用" />
@@ -132,6 +141,7 @@ function UsersAdmin() {
   const columns: TableColumnsType<Rec> = [
     { title: '账号', dataIndex: 'username', width: 120, render: (v) => <b className="mono">{v}</b> },
     { title: '姓名', dataIndex: 'full_name', width: 110 },
+    { title: '登录方式', dataIndex: 'auth_source', width: 110, render: (v) => (v === 'KINGDEE' ? <Tag color="blue">金蝶云星空</Tag> : <Tag>本系统</Tag>) },
     {
       title: '角色', dataIndex: 'role_list', width: 260,
       render: (v: string[] | undefined) => (
@@ -145,7 +155,8 @@ function UsersAdmin() {
     },
     { title: '部门', dataIndex: 'department', width: 110, render: (v) => v || '-' },
     { title: '邮箱', dataIndex: 'email', width: 180, render: (v) => v || '-' },
-    { title: '状态', dataIndex: 'is_active', width: 80, render: (v) => (v ? <Tag color="green">启用</Tag> : <Tag>停用</Tag>) },
+    { title: '状态', dataIndex: 'is_active', width: 80, render: (v, r) => (!v ? <Tag>停用</Tag> : !(r.role_list || []).length ? <Tag color="orange">待分配角色</Tag> : <Tag color="green">启用</Tag>) },
+    { title: '最近登录', dataIndex: 'last_login_at', width: 140, render: (v) => fmtDateTime(v) },
     { title: '创建时间', dataIndex: 'created_at', width: 140, render: (v) => fmtDateTime(v) },
     {
       title: '操作', key: '_op', width: 80, fixed: 'right',

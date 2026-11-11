@@ -14,17 +14,20 @@ datasource db {
 // ============================ 系统 ============================
 
 model User {
-  id            Int      @id @default(autoincrement())
-  username      String   @unique @db.VarChar(64)
-  full_name     String   @db.VarChar(64)
-  password_hash String   @db.VarChar(128)
-  roles         String   @default("") @db.VarChar(256) // 逗号分隔
-  department    String?  @db.VarChar(64)
-  email         String?  @db.VarChar(128)
-  is_active     Boolean  @default(true)
-  created_at    DateTime @default(now())
-  updated_at    DateTime @default(now()) @updatedAt
-  created_by    String?  @db.VarChar(64)
+  id            Int       @id @default(autoincrement())
+  username      String    @unique @db.VarChar(64)
+  full_name     String    @db.VarChar(64)
+  password_hash String    @db.VarChar(128)
+  roles         String    @default("") @db.VarChar(256) // 逗号分隔
+  department    String?   @db.VarChar(64)
+  email         String?   @db.VarChar(128)
+  is_active     Boolean   @default(true)
+  auth_source   String    @default("LOCAL") @db.VarChar(16) // LOCAL=本系统密码；KINGDEE=金蝶云星空账号密码校验（本系统不保存其密码）
+  external_id   String?   @db.VarChar(64) // 金蝶用户 ID
+  last_login_at DateTime?
+  created_at    DateTime  @default(now())
+  updated_at    DateTime  @default(now()) @updatedAt
+  created_by    String?   @db.VarChar(64)
 
   @@map("sys_user")
 }

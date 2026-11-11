@@ -1,5 +1,5 @@
 import { Controller, ForbiddenException, Post } from '@nestjs/common';
-import { Public } from '../auth';
+import { Public, resetLoginFailures } from '../auth';
 import { config } from '../config';
 import { PrismaService } from '../common/prisma.service';
 import { resetDatabase, seedBase } from '../seed/seed-base';
@@ -13,6 +13,7 @@ export class TestSupportController {
   @Post('reset')
   async reset() {
     if (!config.enableTestReset) throw new ForbiddenException();
+    resetLoginFailures();
     await resetDatabase(this.db);
     await seedBase(this.db);
     return { ok: true };

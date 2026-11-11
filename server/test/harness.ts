@@ -10,6 +10,7 @@ import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { PrismaService } from '../src/common/prisma.service';
+import { resetLoginFailures } from '../src/auth/auth.service';
 import { DEMO_PASSWORD, resetDatabase, seedBase } from '../src/seed/seed-base';
 
 export const SIG = { password: DEMO_PASSWORD, reason: '测试' };
@@ -95,6 +96,7 @@ export async function bootApp() {
     api: new Api(app, tokens),
     async reset() {
       tokens.clear();
+      resetLoginFailures();
       await resetDatabase(db);
       await seedBase(db);
     },

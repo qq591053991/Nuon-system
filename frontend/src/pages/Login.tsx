@@ -1,6 +1,7 @@
-import { Button, Card, Form, Input, Typography, Select } from 'antd';
+import { Alert, Button, Card, Form, Input, Typography, Select } from 'antd';
 import { LockOutlined, UserOutlined } from '@ant-design/icons';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { get } from '../api/http';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../auth';
 
@@ -15,6 +16,10 @@ export default function Login() {
   const [sp] = useSearchParams();
   const [loading, setLoading] = useState(false);
   const [form] = Form.useForm();
+  const [kingdee, setKingdee] = useState(false);
+  useEffect(() => {
+    get('/auth/options', undefined, true).then((o) => setKingdee(!!o.kingdee_enabled)).catch(() => undefined);
+  }, []);
   return (
     <div className="login-bg">
       <div className="login-hero">
@@ -29,6 +34,9 @@ export default function Login() {
       </div>
       <Card className="login-card" variant="borderless">
         <Typography.Title level={3} style={{ marginTop: 0 }}>登录</Typography.Title>
+        {kingdee && (
+          <Alert type="info" showIcon style={{ marginBottom: 16 }} message="支持金蝶云星空账号登录" description="可直接使用您在金蝶云星空的用户名和密码登录。" />
+        )}
         <Form form={form} size="large" initialValues={{ username: 'admin' }} onFinish={async (v) => {
           setLoading(true);
           try {
@@ -39,7 +47,7 @@ export default function Login() {
           }
         }}>
           <Form.Item name="username" rules={[{ required: true, message: '请输入用户名' }]}>
-            <Input prefix={<UserOutlined />} placeholder="用户名" autoComplete="username" />
+            <Input prefix={<UserOutlined />} placeholder={kingdee ? '用户名（本系统或金蝶云星空）' : '用户名'} autoComplete="username" />
           </Form.Item>
           <Form.Item name="password" rules={[{ required: true, message: '请输入密码' }]}>
             <Input.Password prefix={<LockOutlined />} placeholder="密码" autoComplete="current-password" />

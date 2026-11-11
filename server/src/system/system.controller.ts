@@ -1,7 +1,8 @@
 import { Body, Controller, Get, Param, ParseIntPipe, Post, Put, Query } from '@nestjs/common';
 import { Type } from 'class-transformer';
-import { IsArray, IsBoolean, IsOptional, IsString } from 'class-validator';
+import { IsArray, IsBoolean, IsIn, IsOptional, IsString } from 'class-validator';
 import { Perms, User } from '../auth';
+import { NO_LOCAL_PASSWORD, resetLoginFailures } from '../auth/auth.service';
 import { hashPassword } from '../auth/password';
 import { PERMISSIONS, ROLES } from '../auth/roles';
 import type { CurrentUser } from '../common/context';
@@ -19,6 +20,8 @@ class UserDto {
   @IsOptional() @IsString() department?: string | null;
   @IsOptional() @IsString() email?: string | null;
   @IsOptional() @IsBoolean() @Type(() => Boolean) is_active = true;
+  /** LOCAL = 本系统密码；KINGDEE = 使用金蝶云星空账号密码登录（无需设置密码） */
+  @IsOptional() @IsIn(['LOCAL', 'KINGDEE']) auth_source?: 'LOCAL' | 'KINGDEE';
 }
 
 function checkRoles(roles: string[]) {
@@ -49,12 +52,15 @@ export class SystemController {
   @Perms('admin')
   createUser(@Body() b: UserDto, @User() admin: CurrentUser) {
     checkRoles(b.roles);
-    if (!b.password || b.password.length < 6) throw new BizError('初始密码至少 6 位');
+    const source = b.auth_source ?? 'LOCAL';
+    const kingdee = source === 'KINGDEE';
+    if (!kingdee && (!b.password || b.password.length < 6)) throw new BizError('初始密码至少 6 位');
     return this.db.tx(async (tx) => {
       if (await tx.user.findUnique({ where: { username: b.username } })) throw new BizError('用户名已存在');
       const u = await tx.user.create({
         data: {
-          username: b.username, full_name: b.full_name, password_hash: hashPassword(b.password!), roles: b.roles.join(','),
+          username: b.username, full_name: b.full_name, password_hash: kingdee ? NO_LOCAL_PASSWORD : hashPassword(b.password!), roles: b.roles.join(','),
+          auth_source: source,
           department: b.department ?? null, email: b.email ?? null, is_active: b.is_active, created_by: admin.username,
         },
       });
@@ -67,13 +73,19 @@ export class SystemController {
   updateUser(@Param('id', ParseIntPipe) id: number, @Body() b: UserDto) {
     checkRoles(b.roles);
     return this.db.tx(async (tx) => {
-      if (!(await tx.user.findUnique({ where: { id } }))) throw new NotFound('用户');
-      if (b.password && b.password.length < 6) throw new BizError('密码至少 6 位');
+      const cur = await tx.user.findUnique({ where: { id } });
+      if (!cur) throw new NotFound('用户');
+      const source = b.auth_source ?? cur.auth_source;
+      const kingdee = source === 'KINGDEE';
+      if (!kingdee && b.password && b.password.length < 6) throw new BizError('密码至少 6 位');
+      if (!kingdee && cur.auth_source === 'KINGDEE' && !b.password) throw new BizError('改为本系统账号时请设置密码');
+      resetLoginFailures(cur.username); // 管理员保存即解锁
       const u = await tx.user.update({
         where: { id },
         data: {
           full_name: b.full_name, roles: b.roles.join(','), department: b.department ?? null, email: b.email ?? null,
-          is_active: b.is_active, ...(b.password ? { password_hash: hashPassword(b.password) } : {}),
+          is_active: b.is_active, auth_source: source,
+          ...(kingdee ? { password_hash: NO_LOCAL_PASSWORD } : b.password ? { password_hash: hashPassword(b.password) } : {}),
         },
       });
       return ser('User', u);

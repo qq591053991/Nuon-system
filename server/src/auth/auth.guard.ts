@@ -7,6 +7,9 @@ import { PERMISSIONS, userPermissions } from './roles';
 
 export const PUBLIC_KEY = 'nuon:public';
 export const PERMS_KEY = 'nuon:perms';
+export const NO_ROLE_KEY = 'nuon:no-role';
+/** 未分配角色的用户（如首次登录的金蝶账号）也可访问 */
+export const AllowNoRole = () => SetMetadata(NO_ROLE_KEY, true);
 /** 无需登录 */
 export const Public = () => SetMetadata(PUBLIC_KEY, true);
 /** 需要任一权限点：@Perms('qa') / @Perms('wms', 'plan') */
@@ -35,6 +38,9 @@ export class AuthGuard implements CanActivate {
     req.user = user;
     const store = als.getStore();
     if (store) store.user = user;
+    if (!user.roles && !this.reflector.getAllAndOverride<boolean>(NO_ROLE_KEY, targets)) {
+      throw new HttpException({ detail: '您的账号尚未分配角色，请联系系统管理员开通权限' }, 403);
+    }
     const perms = this.reflector.getAllAndOverride<string[]>(PERMS_KEY, targets);
     if (perms?.length) {
       const mine = userPermissions(user);

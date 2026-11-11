@@ -1,4 +1,4 @@
-import { Alert, Button, Card, Col, Empty, List, Row, Space, Statistic, Tag, Typography } from 'antd';
+import { Alert, Button, Card, Col, Empty, List, Result, Row, Space, Statistic, Tag, Typography } from 'antd';
 import { ArrowRightOutlined, NodeIndexOutlined, PlusOutlined, ScanOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { useEffect, useMemo, useState } from 'react';
@@ -23,7 +23,28 @@ function Kpi({ title, value, suffix, hint, onClick, warn }: { title: string; val
   );
 }
 
+/** 首次登录的金蝶账号等尚未分配角色的用户 */
+function AwaitingRole() {
+  const { user } = useAuth();
+  return (
+    <Card>
+      <Result
+        status="info"
+        title={`欢迎，${user?.full_name}`}
+        subTitle={user?.auth_source === 'KINGDEE'
+          ? '您的金蝶云星空账号已接入本系统。为保障医疗器械质量数据安全，请联系系统管理员为您分配岗位角色后再使用业务功能。'
+          : '您的账号尚未分配角色，请联系系统管理员开通权限。'}
+      />
+    </Card>
+  );
+}
+
 export default function Dashboard() {
+  const { user } = useAuth();
+  return user?.roles.length ? <DashboardMain /> : <AwaitingRole />;
+}
+
+function DashboardMain() {
   const { user } = useAuth();
   const nav = useNavigate();
   const [d, setD] = useState<Rec | null>(null);

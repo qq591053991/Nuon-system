@@ -51,7 +51,7 @@ export const DICT: Record<string, Record<string, Entry>> = {
   mrp_status: { OPEN: ['待处理', 'gold'], CONVERTED: ['已转单', 'green'], IGNORED: ['已忽略', 'default'] },
   fin_type: { AR: ['应收', 'blue'], AP: ['应付', 'orange'] },
   fin_status: { OPEN: ['未结', 'gold'], PARTIAL: ['部分结算', 'blue'], PAID: ['已结清', 'green'] },
-  audit_action: { CREATE: ['新增', 'green'], UPDATE: ['修改', 'blue'], DELETE: ['删除', 'red'] },
+  audit_action: { CREATE: ['新增', 'green'], UPDATE: ['修改', 'blue'], DELETE: ['删除', 'red'], LOGIN: ['登录', 'cyan'], LOGIN_FAILED: ['登录失败', 'volcano'] },
   device_class: { I: ['I类'], II: ['II类'], III: ['III类'] },
 };
 

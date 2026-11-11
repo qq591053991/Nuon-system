@@ -43,6 +43,7 @@ export const ENTITY_NAMES: Record<string, string> = {
   wms_stock_count: '盘点单',
   wms_stock_count_line: '盘点明细',
   sys_user: '用户',
+  sys_login: '登录',
 };
 
 export const entityName = (e?: string | null) => (e ? ENTITY_NAMES[e] || e : '-');
