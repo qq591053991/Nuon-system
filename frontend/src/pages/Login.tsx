@@ -27,7 +27,7 @@ export default function Login() {
           <li>扫码作业，从来料到出货一键追溯</li>
         </ul>
       </div>
-      <Card className="login-card" bordered={false}>
+      <Card className="login-card" variant="borderless">
         <Typography.Title level={3} style={{ marginTop: 0 }}>登录</Typography.Title>
         <Form form={form} size="large" initialValues={{ username: 'admin' }} onFinish={async (v) => {
           setLoading(true);

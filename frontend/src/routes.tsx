@@ -73,7 +73,6 @@ export const menu: MenuDef[] = [
   {
     key: 'mes', label: '生产执行 MES', icon: <ToolOutlined />, children: [
       { key: '/mes/work-orders', label: '生产工单' },
-      { key: '/mes/station', label: '工位终端（扫码报工）' },
     ],
   },
   {

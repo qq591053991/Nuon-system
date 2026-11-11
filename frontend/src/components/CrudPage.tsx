@@ -176,7 +176,7 @@ export default function CrudPage({ title, sub, url, perm, fields, filters, rowAc
         </Space>
         <Table rowKey="id" size="middle" columns={columns} dataSource={rows} loading={loading} pagination={pagination} scroll={{ x: scrollX || 'max-content' }} />
       </Card>
-      <Modal open={open} title={(editing ? '编辑' : '新增') + title} width={modalWidth} onCancel={() => setOpen(false)} onOk={submit} confirmLoading={saving} destroyOnClose maskClosable={false}>
+      <Modal open={open} title={(editing ? '编辑' : '新增') + title} width={modalWidth} onCancel={() => setOpen(false)} onOk={submit} confirmLoading={saving} destroyOnHidden maskClosable={false}>
         <Form form={form} layout="vertical">
           <Row gutter={16}>
             {formFields.map((f) => (

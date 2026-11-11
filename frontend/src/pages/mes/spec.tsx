@@ -42,7 +42,8 @@ export function inSpec(p: SpecParam, v?: number | null): boolean | null {
 
 /** 单个测试值的文本："辐照度=50.1mW/cm²(40~60) ✓" */
 export function valueText(v: Rec): string {
-  return `${v.name}=${num(v.value)}${v.unit ?? ''}(${specText(v as SpecParam, false)}) ${v.result === 'FAIL' ? '✗' : '✓'}`;
+  const spec = v.lower == null && v.upper == null ? '' : `(${specText(v as SpecParam, false)})`;
+  return `${v.name}=${num(v.value)}${v.unit ?? ''}${spec} ${v.result === 'FAIL' ? '✗' : '✓'}`;
 }
 
 /** 测试值列表（不合格项标红） */
@@ -61,9 +62,9 @@ export function ValuesText({ values, block }: { values?: Rec[]; block?: boolean 
 export function ParamsText({ params }: { params?: SpecParam[] }) {
   if (!params?.length) return <Typography.Text type="secondary">无测试项</Typography.Text>;
   return (
-    <Space size={[4, 4]} wrap>
+    <Space size={[4, 4]} wrap style={{ maxWidth: 440 }}>
       {params.map((p) => (
-        <Tag key={p.code || p.name} style={{ marginInlineEnd: 0 }}>{p.name}：{specText(p)}</Tag>
+        <Tag key={p.code || p.name} style={{ marginInlineEnd: 0, whiteSpace: 'normal' }}>{p.name}：{specText(p)}</Tag>
       ))}
     </Space>
   );

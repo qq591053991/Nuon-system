@@ -106,7 +106,7 @@ function Todos() {
 function ChangePassword({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [form] = Form.useForm();
   return (
-    <Modal open={open} title="修改密码" onCancel={onClose} destroyOnClose onOk={async () => {
+    <Modal open={open} title="修改密码" onCancel={onClose} destroyOnHidden onOk={async () => {
       const v = await form.validateFields();
       await post('/auth/change-password', v);
       message.success('密码已修改');

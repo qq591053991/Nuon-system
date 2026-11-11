@@ -22,7 +22,9 @@ body { margin: 0; background: var(--bg); font-family: -apple-system, BlinkMacSys
 .login-hero li { opacity: 0.75; line-height: 2; }
 .login-card { width: 380px; max-width: 100%; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35); }
 /* 工位终端：大字号、大按钮，适配车间触摸屏 */
-.station .ant-input-lg { font-size: 22px; height: 56px; }
+.station .ant-input-lg { font-size: 22px; }
+.station .ant-input-affix-wrapper-lg { height: 56px; padding-top: 0; padding-bottom: 0; }
+.station .ant-input-affix-wrapper-lg .ant-input-lg { height: 100%; }
 .station-op { font-size: 28px; font-weight: 700; }
 .station-result-pass { background: #f6ffed; border: 2px solid #52c41a; }
 .station-result-fail { background: #fff1f0; border: 2px solid #ff4d4f; }

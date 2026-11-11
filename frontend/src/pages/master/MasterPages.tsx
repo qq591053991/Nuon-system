@@ -143,7 +143,7 @@ function CalibrationDrawer({ eq, onClose }: { eq: Rec | null; onClose: () => voi
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [eq?.id]);
   return (
-    <Drawer open={!!eq} width={640} title={`校准记录 - ${eq?.code} ${eq?.name}`} onClose={onClose} destroyOnClose>
+    <Drawer open={!!eq} width={640} title={`校准记录 - ${eq?.code} ${eq?.name}`} onClose={onClose} destroyOnHidden>
       {can('master', 'qa') && (
         <Form form={form} layout="inline" style={{ marginBottom: 16, rowGap: 8 }}
           onFinish={async (v) => {

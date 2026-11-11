@@ -73,7 +73,7 @@ export default function Dashboard() {
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <Card bordered={false} style={{ background: 'linear-gradient(110deg,#2a1b5e,#5b3cc4 60%,#c2417a)', color: '#fff' }}>
+      <Card variant="borderless" style={{ background: 'linear-gradient(110deg,#2a1b5e,#5b3cc4 60%,#c2417a)', color: '#fff' }}>
         <Row align="middle" gutter={16}>
           <Col flex="auto">
             <Typography.Title level={3} style={{ color: '#fff', margin: 0 }}>{greet}，{user?.full_name}</Typography.Title>

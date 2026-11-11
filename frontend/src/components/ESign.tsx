@@ -37,7 +37,7 @@ export function useESign(): [(o: Opts) => Promise<Signature>, JSX.Element] {
       title={<span><SafetyCertificateOutlined style={{ color: '#722ed1', marginRight: 8 }} />电子签名确认</span>}
       okText="签名并提交"
       cancelText="取消"
-      destroyOnClose
+      destroyOnHidden
       onCancel={() => {
         setOpts(null);
         resolver.current?.reject(new Error('cancelled'));
