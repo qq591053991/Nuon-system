@@ -1,9 +1,10 @@
-import { Alert, Button, Card, DatePicker, Input, Select, Space, Table, Tag, Tooltip, Typography, type TableColumnsType } from 'antd';
-import { LockOutlined, ReloadOutlined } from '@ant-design/icons';
+import { Alert, Button, Card, DatePicker, Input, Modal, Result, Select, Space, Table, Tag, Tooltip, Typography, type TableColumnsType } from 'antd';
+import { LockOutlined, ReloadOutlined, SafetyCertificateOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import type { Rec } from '../../api/http';
+import { get, type Rec } from '../../api/http';
+import { useAuth } from '../../auth';
 import PageHeader from '../../components/PageHeader';
 import StatusTag from '../../components/StatusTag';
 import { usePaged } from '../../components/usePaged';
@@ -112,7 +113,63 @@ function FullDiff({ row }: { row: Rec }) {
   return <Table rowKey="field" size="small" columns={columns} dataSource={data} pagination={false} style={{ maxWidth: 900 }} />;
 }
 
+interface VerifyResult {
+  ok: boolean;
+  sealed_total: number;
+  sealed_now: number;
+  problems: { id: number; seal_no: number; problem: string }[];
+  verified_at: string;
+}
+
+/** 完整性校验：后端先把新记录接入哈希链（封存），再复算整条链，发现被篡改、删除或插入的记录 */
+function IntegrityCheck() {
+  const [busy, setBusy] = useState(false);
+  const [res, setRes] = useState<VerifyResult | null>(null);
+  const run = async () => {
+    setBusy(true);
+    try {
+      setRes(await get<VerifyResult>('/system/audit-verify'));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <Button icon={<SafetyCertificateOutlined />} loading={busy} onClick={run}>完整性校验</Button>
+      <Modal open={!!res} title="审计追踪完整性校验" width={720} footer={<Button type="primary" onClick={() => setRes(null)}>关闭</Button>} onCancel={() => setRes(null)}>
+        {res && (res.ok ? (
+          <Result
+            status="success"
+            title="审计追踪完整，未发现篡改"
+            subTitle={`已校验 ${res.sealed_total} 条已封存记录的哈希链（本次新封存 ${res.sealed_now} 条），校验时间 ${fmtTs(res.verified_at)}。`}
+          />
+        ) : (
+          <>
+            <Result
+              status="error"
+              title={`发现 ${res.problems.length} 条异常记录`}
+              subTitle={`共 ${res.sealed_total} 条已封存记录，校验时间 ${fmtTs(res.verified_at)}。请立即通知 QA 负责人调查，并保留本次校验结果作为偏差记录。`}
+            />
+            <Table
+              rowKey="seal_no"
+              size="small"
+              pagination={false}
+              dataSource={res.problems}
+              columns={[
+                { title: '封存序号', dataIndex: 'seal_no', width: 100 },
+                { title: '记录ID', dataIndex: 'id', width: 100 },
+                { title: '问题', dataIndex: 'problem', render: (v) => <Typography.Text type="danger">{v}</Typography.Text> },
+              ]}
+            />
+          </>
+        ))}
+      </Modal>
+    </>
+  );
+}
+
 export default function AuditLogs() {
+  const { can } = useAuth();
   const [sp] = useSearchParams();
   const eid = sp.get('entity_id');
   const { rows, loading, setQuery, reload, pagination } = usePaged(
@@ -150,7 +207,7 @@ export default function AuditLogs() {
         showIcon
         icon={<LockOutlined />}
         style={{ marginBottom: 16 }}
-        message="审计追踪由系统自动记录，任何人（包括管理员）都无法修改或删除。"
+        message="审计追踪由系统自动记录，任何人（包括管理员）都无法修改或删除；系统每分钟把新记录接入哈希链封存，可随时做完整性校验。"
       />
       <Card>
         <Space wrap style={{ marginBottom: 16 }}>
@@ -169,6 +226,7 @@ export default function AuditLogs() {
           <DatePicker.RangePicker onChange={(v) => setQuery({ date_from: toDate(v?.[0]) || undefined, date_to: toDate(v?.[1]) || undefined })} />
           {eid && <Tag color="blue">记录ID = {eid}</Tag>}
           <Button icon={<ReloadOutlined />} onClick={reload} />
+          {can('admin', 'qa') && <IntegrityCheck />}
         </Space>
         <Table
           rowKey="id"

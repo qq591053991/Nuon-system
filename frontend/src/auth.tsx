@@ -11,12 +11,31 @@ export interface CurrentUser {
   permissions: string[];
   /** LOCAL 本系统账号 / KINGDEE 金蝶云星空账号 */
   auth_source?: string;
+  /** 工牌号（工位终端刷卡） */
+  badge_no?: string | null;
+  /** 本次会话的登录方式：password 密码 / badge 工位刷工牌 */
+  login_method?: 'password' | 'badge';
+  /** 密码已过期：须先修改密码（其他接口返回 403） */
+  must_change_password?: boolean;
+  password_expires_at?: string | null;
+}
+
+/** 登录 / 工牌登录接口的响应 */
+export interface LoginResult {
+  access_token: string;
+  token_type: string;
+  user: CurrentUser;
+  must_change_password?: boolean;
 }
 
 interface AuthCtx {
   user: CurrentUser | null;
   loading: boolean;
-  login: (username: string, password: string) => Promise<void>;
+  login: (username: string, password: string) => Promise<CurrentUser>;
+  /** 工位终端刷工牌登录（工牌号 + PIN），成功后切换为该用户的会话 */
+  badgeLogin: (badge_no: string, pin: string) => Promise<CurrentUser>;
+  /** 重新读取当前用户（如修改密码后） */
+  refresh: () => Promise<CurrentUser | null>;
   logout: () => void;
   /** 是否拥有任一权限点 */
   can: (...perms: string[]) => boolean;
@@ -39,10 +58,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .finally(() => setLoading(false));
   }, []);
 
-  const login = useCallback(async (username: string, password: string) => {
-    const r = await post('/auth/login', { username, password });
+  const apply = useCallback((r: LoginResult) => {
     localStorage.setItem(TOKEN_KEY, r.access_token);
     setUser(r.user);
+    return r.user;
+  }, []);
+
+  const login = useCallback(async (username: string, password: string) => apply(await post<LoginResult>('/auth/login', { username, password })), [apply]);
+
+  const badgeLogin = useCallback(async (badge_no: string, pin: string) => apply(await post<LoginResult>('/auth/badge-login', { badge_no, pin })), [apply]);
+
+  const refresh = useCallback(async () => {
+    const u = await get<CurrentUser>('/auth/me', undefined, true).catch(() => null);
+    if (u) setUser(u);
+    return u;
   }, []);
 
   const logout = useCallback(() => {
@@ -53,7 +82,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const can = useCallback((...perms: string[]) => !!user && perms.some((p) => user.permissions.includes(p)), [user]);
 
-  return <Ctx.Provider value={{ user, loading, login, logout, can }}>{children}</Ctx.Provider>;
+  return <Ctx.Provider value={{ user, loading, login, badgeLogin, refresh, logout, can }}>{children}</Ctx.Provider>;
 }
 
 export const useAuth = () => useContext(Ctx);

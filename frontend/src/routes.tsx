@@ -36,6 +36,8 @@ export const routes: RouteDef[] = [
   { path: '/quality/capas', element: lazy(() => import('./pages/quality/Capas')) },
   { path: '/quality/release', element: lazy(() => import('./pages/quality/ReleaseCenter')) },
   { path: '/quality/dhr/:id', element: lazy(() => import('./pages/quality/DhrView')) },
+  { path: '/quality/inspection-specs', element: lazy(() => import('./pages/quality/InspectionSpecs')) },
+  { path: '/quality/complaints', element: lazy(() => import('./pages/quality/Complaints')) },
   // WMS
   { path: '/wms/stock', element: lazy(() => import('./pages/wms/Stock')) },
   { path: '/wms/moves', element: lazy(() => import('./pages/wms/StockMoves')) },
@@ -43,6 +45,7 @@ export const routes: RouteDef[] = [
   { path: '/wms/issues', element: lazy(() => import('./pages/wms/Issues')) },
   { path: '/wms/shipments', element: lazy(() => import('./pages/wms/Shipments')) },
   { path: '/wms/counts', element: lazy(() => import('./pages/wms/StockCounts')) },
+  { path: '/wms/customer-returns', element: lazy(() => import('./pages/wms/CustomerReturns')) },
   // 追溯
   { path: '/trace', element: lazy(() => import('./pages/Trace')) },
   // 主数据
@@ -81,6 +84,8 @@ export const menu: MenuDef[] = [
       { key: '/quality/ncrs', label: '不合格品 NCR' },
       { key: '/quality/capas', label: '纠正预防 CAPA' },
       { key: '/quality/release', label: 'DHR 审核与放行' },
+      { key: '/quality/inspection-specs', label: '检验规范' },
+      { key: '/quality/complaints', label: '客户投诉/不良事件' },
     ],
   },
   {
@@ -90,6 +95,7 @@ export const menu: MenuDef[] = [
       { key: '/wms/issues', label: '生产领料' },
       { key: '/wms/shipments', label: '发货出库' },
       { key: '/wms/counts', label: '库存盘点' },
+      { key: '/wms/customer-returns', label: '客户退货' },
       { key: '/wms/moves', label: '库存流水' },
     ],
   },

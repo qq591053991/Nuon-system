@@ -1,6 +1,6 @@
 import { Alert, Button, Card, Form, Input, Modal, Select, Space, Table, Tag, message, type TableColumnsType } from 'antd';
 import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { post, type Rec } from '../../api/http';
 import { useAuth } from '../../auth';
@@ -15,7 +15,15 @@ export default function Boms() {
   const nav = useNavigate();
   const { can } = useAuth();
   const [sp] = useSearchParams();
-  const { rows, loading, setQuery, reload, pagination } = usePaged('/boms', { q: sp.get('q') || undefined });
+  const { rows, loading, setQuery, reload, pagination, query } = usePaged('/boms', { q: sp.get('q') || undefined, status: sp.get('status') || undefined });
+  // 从待办跳转（?status=SUBMITTED 等）时同步筛选条件
+  const urlStatus = sp.get('status') || undefined;
+  const appliedStatus = useRef(urlStatus);
+  useEffect(() => {
+    if (appliedStatus.current === urlStatus) return;
+    appliedStatus.current = urlStatus;
+    setQuery({ status: urlStatus });
+  }, [urlStatus, setQuery]);
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [form] = Form.useForm();
@@ -40,17 +48,18 @@ export default function Boms() {
     { title: '状态', dataIndex: 'status', render: (v) => <StatusTag dict="eng_status" value={v} /> },
     { title: 'ECN 编号', dataIndex: 'ecn_no', render: (v) => v || '-' },
     { title: '生效日期', dataIndex: 'effective_date', render: fmtDate },
-    { title: '发布人', dataIndex: 'released_by', render: (v) => v || '-' },
-    { title: '发布时间', dataIndex: 'released_at', render: fmtDateTime },
+    { title: '提交人（编制）', dataIndex: 'submitted_by', render: (v) => v || '-' },
+    { title: '批准人（QA）', dataIndex: 'released_by', render: (v) => v || '-' },
+    { title: '批准时间', dataIndex: 'released_at', render: fmtDateTime },
     { title: '备注', dataIndex: 'remark', ellipsis: true, width: 200, render: (v) => v || '-' },
-    { title: '操作', key: 'op', fixed: 'right', render: (_, r) => <Link to={`/engineering/boms/${r.id}`}>{r.status === 'DRAFT' && can('engineering') ? '编辑' : '查看'}</Link> },
+    { title: '操作', key: 'op', fixed: 'right', render: (_, r) => <Link to={`/engineering/boms/${r.id}`}>{r.status === 'DRAFT' && can('engineering') ? '编辑' : r.status === 'SUBMITTED' && can('qa') ? '审批' : '查看'}</Link> },
   ];
 
   return (
     <>
       <PageHeader
         title="BOM 物料清单"
-        sub="BOM 是受控文件：草稿可编辑，发布需电子签名；每个产品同一时间只有一个“已发布”版本，MRP 与工单都使用它。"
+        sub="BOM 是受控文件：工程师编制并提交（电子签名），QA 审核批准（电子签名）后才生效；每个产品同一时间只有一个“已发布”版本，MRP 与工单都使用它。"
         extra={
           can('engineering') && (
             <Button type="primary" icon={<PlusOutlined />} onClick={() => setOpen(true)}>新建 BOM</Button>
@@ -60,7 +69,7 @@ export default function Boms() {
       <Card>
         <Space wrap style={{ marginBottom: 16 }}>
           <Input.Search allowClear placeholder="产品编码 / 名称 / ECN" defaultValue={sp.get('q') || ''} style={{ width: 260 }} onSearch={(q) => setQuery({ q })} />
-          <Select allowClear placeholder="状态" style={{ width: 140 }} options={dictOptions('eng_status')} onChange={(v) => setQuery({ status: v })} />
+          <Select allowClear placeholder="状态" style={{ width: 140 }} options={dictOptions('eng_status')} value={query.status} onChange={(v) => setQuery({ status: v })} />
           <Button icon={<ReloadOutlined />} onClick={reload} />
         </Space>
         <Table rowKey="id" size="middle" columns={columns} dataSource={rows} loading={loading} pagination={pagination} scroll={{ x: 'max-content' }} />

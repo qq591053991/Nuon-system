@@ -1,8 +1,8 @@
-import { AutoComplete, Avatar, Badge, Button, Dropdown, Form, Input, Layout, Menu, Modal, Popover, List, Spin, Tag, Typography, message } from 'antd';
-import { BellOutlined, LockOutlined, LogoutOutlined, MenuFoldOutlined, MenuUnfoldOutlined, SearchOutlined, UserOutlined } from '@ant-design/icons';
-import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, AutoComplete, Avatar, Badge, Button, Dropdown, Form, Input, Layout, Menu, Modal, Popover, List, Result, Spin, Tag, Typography, message } from 'antd';
+import { BellOutlined, ClockCircleOutlined, LockOutlined, LogoutOutlined, MenuFoldOutlined, MenuUnfoldOutlined, SearchOutlined, UserOutlined } from '@ant-design/icons';
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
-import { get, post, type Rec } from '../api/http';
+import { get, post, TOKEN_KEY, type Rec } from '../api/http';
 import { useAuth } from '../auth';
 import { menu, type MenuDef } from '../routes';
 
@@ -105,29 +105,193 @@ function Todos() {
   );
 }
 
-function ChangePassword({ open, onClose }: { open: boolean; onClose: () => void }) {
+/** 登录选项：空闲超时（分钟）与密码策略（后端 /auth/options） */
+interface AuthOptions {
+  idle_minutes?: number;
+  password_policy?: { min_length: number; require_letter_digit: boolean; max_age_days: number; text: string };
+}
+
+function useAuthOptions() {
+  const [opts, setOpts] = useState<AuthOptions>({});
+  useEffect(() => {
+    get<AuthOptions>('/auth/options', undefined, true).then(setOpts).catch(() => undefined);
+  }, []);
+  return opts;
+}
+
+/** 修改密码；forced = 密码已过期，必须修改后才能继续使用（不可关闭，只能修改或退出） */
+function ChangePassword({ open, forced, policy, onClose, onDone, onLogout }: {
+  open: boolean;
+  forced?: boolean;
+  policy?: AuthOptions['password_policy'];
+  onClose: () => void;
+  onDone: () => void;
+  onLogout: () => void;
+}) {
   const [form] = Form.useForm();
+  const [saving, setSaving] = useState(false);
+  const min = policy?.min_length ?? 8;
+  const letterDigit = policy?.require_letter_digit ?? true;
+  const hint = policy?.text ?? `至少 ${min} 位，且须同时包含字母和数字`;
   return (
-    <Modal open={open} title="修改密码" onCancel={onClose} destroyOnHidden onOk={async () => {
-      const v = await form.validateFields();
-      await post('/auth/change-password', v);
-      message.success('密码已修改');
-      onClose();
-    }}>
+    <Modal
+      open={open}
+      title={forced ? <span><LockOutlined style={{ color: '#fa8c16', marginRight: 8 }} />密码已过期，请修改密码</span> : '修改密码'}
+      closable={!forced}
+      maskClosable={false}
+      keyboard={!forced}
+      okText="确认修改"
+      cancelText={forced ? '退出登录' : '取消'}
+      confirmLoading={saving}
+      onCancel={forced ? onLogout : onClose}
+      destroyOnHidden
+      onOk={async () => {
+        const v = await form.validateFields();
+        setSaving(true);
+        try {
+          await post('/auth/change-password', { old_password: v.old_password, new_password: v.new_password });
+          message.success('密码已修改');
+          onDone();
+        } finally {
+          setSaving(false);
+        }
+      }}
+    >
+      {forced && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={`根据账号安全策略，密码每 ${policy?.max_age_days ?? 90} 天须更换一次。修改密码后才能继续使用系统。`}
+        />
+      )}
       <Form form={form} layout="vertical">
-        <Form.Item name="old_password" label="原密码" rules={[{ required: true }]}><Input.Password /></Form.Item>
-        <Form.Item name="new_password" label="新密码（至少 6 位）" rules={[{ required: true, min: 6 }]}><Input.Password /></Form.Item>
+        <Form.Item name="old_password" label="原密码" rules={[{ required: true, message: '请输入原密码' }]}><Input.Password autoComplete="current-password" /></Form.Item>
+        <Form.Item
+          name="new_password"
+          label="新密码"
+          extra={hint}
+          rules={[
+            { required: true, message: '请输入新密码' },
+            { min, message: `至少 ${min} 位` },
+            ...(letterDigit ? [{ pattern: /^(?=.*[A-Za-z])(?=.*\d).+$/, message: '须同时包含字母和数字' }] : []),
+          ]}
+        >
+          <Input.Password autoComplete="new-password" />
+        </Form.Item>
+        <Form.Item
+          name="confirm"
+          label="再次输入新密码"
+          dependencies={['new_password']}
+          rules={[
+            { required: true, message: '请再次输入新密码' },
+            ({ getFieldValue }) => ({
+              validator: (_, v) => (!v || v === getFieldValue('new_password') ? Promise.resolve() : Promise.reject(new Error('两次输入的新密码不一致'))),
+            }),
+          ]}
+        >
+          <Input.Password autoComplete="new-password" />
+        </Form.Item>
       </Form>
     </Modal>
   );
 }
 
+const ACTIVITY_KEY = 'nuon_last_activity';
+const ACTIVITY_EVENTS = ['mousemove', 'mousedown', 'keydown', 'wheel', 'touchstart', 'scroll'];
+const WARN_SECONDS = 60;
+
+/**
+ * 空闲超时：minutes 分钟无键盘/鼠标/触摸操作自动退出登录，退出前 60 秒弹窗提醒。
+ * 多个标签页共享最近操作时间（localStorage），任一标签页有操作即视为在用。
+ */
+function IdleLogout({ minutes, paused, onTimeout }: { minutes: number; paused?: boolean; onTimeout: () => void }) {
+  const [left, setLeft] = useState<number | null>(null);
+  const last = useRef(Date.now());
+  const warning = useRef(false);
+
+  const touch = useCallback(() => {
+    last.current = Date.now();
+    try {
+      localStorage.setItem(ACTIVITY_KEY, String(last.current));
+    } catch {
+      /* 存储不可用时仅本页计时 */
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!(minutes > 0) || paused) return;
+    const limit = minutes * 60_000;
+    const onActivity = () => {
+      if (!warning.current && Date.now() - last.current > 1000) touch();
+    };
+    ACTIVITY_EVENTS.forEach((e) => window.addEventListener(e, onActivity, { capture: true, passive: true }));
+    touch();
+    const timer = setInterval(() => {
+      try {
+        const shared = Number(localStorage.getItem(ACTIVITY_KEY));
+        if (shared > last.current) last.current = shared; // 其他标签页有操作
+      } catch {
+        /* ignore */
+      }
+      const idle = Date.now() - last.current;
+      if (idle >= limit) {
+        clearInterval(timer);
+        onTimeout();
+      } else if (idle >= limit - WARN_SECONDS * 1000) {
+        warning.current = true;
+        setLeft(Math.ceil((limit - idle) / 1000));
+      } else if (warning.current) {
+        warning.current = false;
+        setLeft(null);
+      }
+    }, 1000);
+    return () => {
+      ACTIVITY_EVENTS.forEach((e) => window.removeEventListener(e, onActivity, { capture: true }));
+      clearInterval(timer);
+      warning.current = false;
+      setLeft(null);
+    };
+  }, [minutes, paused, onTimeout, touch]);
+
+  return (
+    <Modal
+      open={left !== null}
+      title={<span><ClockCircleOutlined style={{ color: '#fa8c16', marginRight: 8 }} />长时间未操作</span>}
+      closable={false}
+      maskClosable={false}
+      keyboard={false}
+      okText="继续使用"
+      cancelText="立即退出"
+      onOk={() => {
+        warning.current = false;
+        touch();
+        setLeft(null);
+      }}
+      onCancel={onTimeout}
+    >
+      <Typography.Paragraph>
+        您已约 {minutes} 分钟没有操作。为保护数据安全，系统将在 <b style={{ color: '#cf1322', fontSize: 16 }}>{left}</b> 秒后自动退出登录。
+      </Typography.Paragraph>
+      <Typography.Text type="secondary">未保存的内容可能丢失，如仍在使用请点击“继续使用”。</Typography.Text>
+    </Modal>
+  );
+}
+
 export default function MainLayout() {
-  const { user, logout, can } = useAuth();
+  const { user, logout, can, refresh } = useAuth();
   const nav = useNavigate();
   const loc = useLocation();
   const [collapsed, setCollapsed] = useState(window.innerWidth < 1000);
   const [pwd, setPwd] = useState(false);
+  const options = useAuthOptions();
+  const mustChange = !!user?.must_change_password;
+
+  // 空闲超时退出：工位终端页面有自己的（更短的）锁屏，不在此处退出
+  const onIdle = useCallback(() => {
+    localStorage.removeItem(TOKEN_KEY);
+    location.href = `/login?idle=1&redirect=${encodeURIComponent(location.pathname + location.search)}`;
+  }, []);
 
   const { user: me } = useAuth();
   const noRole = !me?.roles.length;
@@ -164,7 +328,7 @@ export default function MainLayout() {
           <Button type="text" icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />} onClick={() => setCollapsed(!collapsed)} />
           <GlobalSearch />
           <div style={{ flex: 1 }} />
-          <Todos />
+          {!mustChange && <Todos />}
           <Dropdown
             menu={{
               items: [
@@ -184,12 +348,28 @@ export default function MainLayout() {
           </Dropdown>
         </Header>
         <Content className="app-content">
-          <Suspense fallback={<div style={{ textAlign: 'center', padding: 80 }}><Spin size="large" /></div>}>
-            <Outlet />
-          </Suspense>
+          {mustChange ? (
+            <Result status="warning" title="密码已过期" subTitle="根据账号安全策略，请先修改密码后再继续使用系统。"
+              extra={<Button type="primary" onClick={() => setPwd(true)}>修改密码</Button>} />
+          ) : (
+            <Suspense fallback={<div style={{ textAlign: 'center', padding: 80 }}><Spin size="large" /></div>}>
+              <Outlet />
+            </Suspense>
+          )}
         </Content>
       </Layout>
-      <ChangePassword open={pwd} onClose={() => setPwd(false)} />
+      <ChangePassword
+        open={pwd || mustChange}
+        forced={mustChange}
+        policy={options.password_policy}
+        onClose={() => setPwd(false)}
+        onLogout={logout}
+        onDone={() => {
+          setPwd(false);
+          if (mustChange) refresh();
+        }}
+      />
+      <IdleLogout minutes={options.idle_minutes ?? 0} paused={loc.pathname.startsWith('/mes/station')} onTimeout={onIdle} />
     </Layout>
   );
 }

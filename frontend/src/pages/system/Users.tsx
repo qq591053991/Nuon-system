@@ -1,5 +1,5 @@
 import { Alert, Button, Card, Col, Form, Input, Modal, Radio, Result, Row, Select, Space, Switch, Table, Tag, Tooltip, Typography, message, type TableColumnsType } from 'antd';
-import { CheckOutlined, EditOutlined, ReloadOutlined, UserAddOutlined } from '@ant-design/icons';
+import { CheckOutlined, EditOutlined, IdcardOutlined, LockOutlined, ReloadOutlined, UserAddOutlined } from '@ant-design/icons';
 import { useEffect, useMemo, useState } from 'react';
 import { get, post, put, type Rec } from '../../api/http';
 import { useAuth } from '../../auth';
@@ -9,13 +9,16 @@ import { fmtDateTime } from '../../utils/format';
 
 interface RoleDef { code: string; name: string; perms: string[] }
 interface PermDef { code: string; name: string }
+interface PwdPolicy { min_length: number; require_letter_digit: boolean; text: string }
 
 const ROLE_COLORS = ['magenta', 'volcano', 'orange', 'gold', 'green', 'cyan', 'blue', 'geekblue', 'purple', 'lime', 'red'];
 
 /** 权限名称较长（含括号说明），表头只显示括号前部分 */
 const shortPerm = (name: string) => name.split('（')[0];
 
-function UserModal({ user, open, roles, onClose, onDone }: { user: Rec | null; open: boolean; roles: RoleDef[]; onClose: () => void; onDone: () => void }) {
+function UserModal({ user, open, roles, policy, onClose, onDone }: {
+  user: Rec | null; open: boolean; roles: RoleDef[]; policy?: PwdPolicy; onClose: () => void; onDone: () => void;
+}) {
   const [form] = Form.useForm();
   const [saving, setSaving] = useState(false);
   const { user: me } = useAuth();
@@ -26,13 +29,19 @@ function UserModal({ user, open, roles, onClose, onDone }: { user: Rec | null; o
     if (!open) return;
     form.resetFields();
     form.setFieldsValue(user
-      ? { username: user.username, full_name: user.full_name, roles: user.role_list || [], department: user.department, email: user.email, is_active: user.is_active, auth_source: user.auth_source || 'LOCAL' }
+      ? {
+          username: user.username, full_name: user.full_name, roles: user.role_list || [], department: user.department, email: user.email,
+          is_active: user.is_active, auth_source: user.auth_source || 'LOCAL', badge_no: user.badge_no,
+        }
       : { roles: [], is_active: true, auth_source: 'LOCAL' });
   }, [open, user, form]);
 
   const submit = async () => {
     const v = await form.validateFields();
-    const body = { ...v, password: v.auth_source === 'KINGDEE' ? null : v.password || null, is_active: !!v.is_active };
+    const body = {
+      ...v, password: v.auth_source === 'KINGDEE' ? null : v.password || null, is_active: !!v.is_active,
+      badge_no: (v.badge_no || '').trim(), pin: v.pin || null,
+    };
     if (user && user.username === me?.username && (!body.is_active || !body.roles.includes('admin'))) {
       const ok = await new Promise<boolean>((resolve) => Modal.confirm({
         title: '确认修改自己的账号？',
@@ -66,6 +75,15 @@ function UserModal({ user, open, roles, onClose, onDone }: { user: Rec | null; o
       destroyOnHidden
       maskClosable={false}
     >
+      {user?.locked && (
+        <Alert
+          type="warning"
+          showIcon
+          icon={<LockOutlined />}
+          style={{ marginBottom: 16 }}
+          message={`该账号因密码/PIN 连续错误已锁定至 ${fmtDateTime(user.locked_until)}，点击“确定”保存即可解锁。`}
+        />
+      )}
       <Form form={form} layout="vertical">
         <Row gutter={16}>
           <Col span={24}>
@@ -88,10 +106,14 @@ function UserModal({ user, open, roles, onClose, onDone }: { user: Rec | null; o
               <Form.Item
                 name="password"
                 label={user && user.auth_source !== 'KINGDEE' ? '重置密码' : '初始密码'}
-                rules={[{ required: !user || user.auth_source === 'KINGDEE', message: '请设置初始密码' }, { min: 6, message: '密码至少 6 位' }]}
-                extra={user && user.auth_source !== 'KINGDEE' ? '留空则不修改密码' : '请通知用户首次登录后自行修改'}
+                rules={[
+                  { required: !user || user.auth_source === 'KINGDEE', message: '请设置初始密码' },
+                  { min: policy?.min_length ?? 8, message: `密码至少 ${policy?.min_length ?? 8} 位` },
+                  ...(policy?.require_letter_digit ?? true ? [{ pattern: /^(?=.*[A-Za-z])(?=.*\d).+$/, message: '密码须同时包含字母和数字' }] : []),
+                ]}
+                extra={user && user.auth_source !== 'KINGDEE' ? '留空则不修改密码' : `${policy?.text ?? '至少 8 位，且须同时包含字母和数字'}；请通知用户登录后自行修改`}
               >
-                <Input.Password autoComplete="new-password" placeholder={user && user.auth_source !== 'KINGDEE' ? '留空不修改' : '至少 6 位'} />
+                <Input.Password autoComplete="new-password" placeholder={user && user.auth_source !== 'KINGDEE' ? '留空不修改' : `至少 ${policy?.min_length ?? 8} 位，含字母和数字`} />
               </Form.Item>
             </Col>
           )}
@@ -108,6 +130,21 @@ function UserModal({ user, open, roles, onClose, onDone }: { user: Rec | null; o
                 optionFilterProp="label"
                 options={roles.map((r) => ({ value: r.code, label: `${r.name}（${r.code}）` }))}
               />
+            </Form.Item>
+          </Col>
+          <Col span={12}>
+            <Form.Item name="badge_no" label="工牌号" extra="工位终端刷工牌登录用（须有车间报工权限）；清空即取消工牌。">
+              <Input prefix={<IdcardOutlined />} placeholder="如 E1001" autoComplete="off" maxLength={64} />
+            </Form.Item>
+          </Col>
+          <Col span={12}>
+            <Form.Item
+              name="pin"
+              label={user?.has_pin ? '重置工位 PIN' : '设置工位 PIN'}
+              rules={[{ pattern: /^\d{4,8}$/, message: 'PIN 须为 4–8 位数字' }]}
+              extra={user?.has_pin ? '已设置；留空则不修改' : '4–8 位数字，与工牌号配合使用'}
+            >
+              <Input.Password inputMode="numeric" maxLength={8} autoComplete="new-password" placeholder={user?.has_pin ? '留空不修改' : '4–8 位数字'} />
             </Form.Item>
           </Col>
           <Col span={12}>
@@ -128,12 +165,14 @@ function UserModal({ user, open, roles, onClose, onDone }: { user: Rec | null; o
 
 function UsersAdmin() {
   const [roleData, setRoleData] = useState<{ roles: RoleDef[]; permissions: PermDef[] }>({ roles: [], permissions: [] });
+  const [policy, setPolicy] = useState<PwdPolicy>();
   const { rows, loading, setQuery, reload, pagination } = usePaged('/system/users', {}, 50);
   const [editing, setEditing] = useState<Rec | null>(null);
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
     get('/system/roles').then(setRoleData);
+    get('/auth/options', undefined, true).then((o) => setPolicy(o.password_policy)).catch(() => undefined);
   }, []);
 
   const roleMap = useMemo(() => new Map(roleData.roles.map((r, i) => [r.code, { ...r, color: ROLE_COLORS[i % ROLE_COLORS.length] }])), [roleData]);
@@ -153,10 +192,28 @@ function UsersAdmin() {
         </Space>
       ),
     },
+    {
+      title: '工牌 / PIN', dataIndex: 'badge_no', width: 120,
+      render: (v, r) => (v ? <Space size={4}><span className="mono">{v}</span>{r.has_pin ? <Tag color="green">PIN</Tag> : <Tag color="orange">无 PIN</Tag>}</Space> : '-'),
+    },
     { title: '部门', dataIndex: 'department', width: 110, render: (v) => v || '-' },
     { title: '邮箱', dataIndex: 'email', width: 180, render: (v) => v || '-' },
-    { title: '状态', dataIndex: 'is_active', width: 80, render: (v, r) => (!v ? <Tag>停用</Tag> : !(r.role_list || []).length ? <Tag color="orange">待分配角色</Tag> : <Tag color="green">启用</Tag>) },
+    {
+      title: '状态', dataIndex: 'is_active', width: 110,
+      render: (v, r) => (
+        <Space size={4} wrap>
+          {!v ? <Tag>停用</Tag> : !(r.role_list || []).length ? <Tag color="orange">待分配角色</Tag> : <Tag color="green">启用</Tag>}
+          {r.locked && (
+            <Tooltip title={`密码/PIN 连续错误，锁定至 ${fmtDateTime(r.locked_until)}；编辑并保存即可解锁`}>
+              <Tag color="red" icon={<LockOutlined />}>已锁定</Tag>
+            </Tooltip>
+          )}
+          {!r.locked && r.failed_login_count > 0 && <Tooltip title="连续登录失败次数（成功登录后清零）"><Tag color="volcano">失败 {r.failed_login_count} 次</Tag></Tooltip>}
+        </Space>
+      ),
+    },
     { title: '最近登录', dataIndex: 'last_login_at', width: 140, render: (v) => fmtDateTime(v) },
+    { title: '密码修改', dataIndex: 'password_changed_at', width: 140, render: (v, r) => (r.auth_source === 'KINGDEE' ? <Typography.Text type="secondary">金蝶管理</Typography.Text> : fmtDateTime(v)) },
     { title: '创建时间', dataIndex: 'created_at', width: 140, render: (v) => fmtDateTime(v) },
     {
       title: '操作', key: '_op', width: 80, fixed: 'right',
@@ -197,7 +254,7 @@ function UsersAdmin() {
       <Space direction="vertical" size={16} style={{ width: '100%' }}>
         <Card>
           <Space wrap style={{ marginBottom: 16 }}>
-            <Input.Search allowClear placeholder="账号 / 姓名" style={{ width: 220 }} onSearch={(q) => setQuery({ q: q.trim() })} />
+            <Input.Search allowClear placeholder="账号 / 姓名 / 工牌号" style={{ width: 220 }} onSearch={(q) => setQuery({ q: q.trim() })} />
             <Button icon={<ReloadOutlined />} onClick={reload} />
           </Space>
           <Table rowKey="id" size="middle" columns={columns} dataSource={rows} loading={loading} pagination={pagination} scroll={{ x: 'max-content' }} />
@@ -207,12 +264,12 @@ function UsersAdmin() {
             type="info"
             showIcon
             style={{ marginBottom: 12 }}
-            message="角色与权限由系统预置，符合职责分离原则（如：仓管不能做质量判定，QA 才能放行产品）。如需调整请联系实施顾问。"
+            message="角色与权限由系统预置，符合职责分离原则：系统管理员只管账号、权限与审计，不含业务操作权限；质量签名（产品放行、NCR 处置、让步接收、CAPA 关闭、BOM/工艺批准）只能由 QA 角色完成，厂长也不能代签。如需调整请联系实施顾问。"
           />
           <Table rowKey="code" size="small" columns={matrixColumns} dataSource={roleData.roles} pagination={false} scroll={{ x: 'max-content' }} bordered />
         </Card>
       </Space>
-      <UserModal user={editing} open={open} roles={roleData.roles} onClose={() => setOpen(false)} onDone={() => { setOpen(false); reload(); }} />
+      <UserModal user={editing} open={open} roles={roleData.roles} policy={policy} onClose={() => setOpen(false)} onDone={() => { setOpen(false); reload(); }} />
     </>
   );
 }

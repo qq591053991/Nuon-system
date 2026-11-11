@@ -1,7 +1,7 @@
 /**
  * 演示业务流程（移植自 backend/app/seed.py 的 seed_demo）：
- *   SO → 工单 → 领料 → 逐台过站（含一次光学不合格返工、一次安规不合格报废）→ 完工入库 → DHR 放行 → 发货；
- *   再生成一张部分在制的工单（留一条待处置 NCR）和一张已到货待 IQC 的采购订单。
+ *   SO → 工单 → 领料 → 逐台过站（含一次光学不合格返工换件、一次安规不合格报废）→ 完工入库 → DHR 放行 → 发货；
+ *   再生成一张部分在制的工单（留一条待处置 NCR；已完工的 2 台入库并分批放行 1 台）和一张已到货待 IQC 的采购订单。
  * 每个业务步骤一个事务，并以对应操作人的身份运行（审计追踪记录真实操作人）。
  */
 import { AuthService } from '../auth/auth.service';
@@ -123,6 +123,14 @@ export async function seedDemo(db: PrismaService, ctx: SeedContext): Promise<voi
       // 光学测试辐照度超上限 → NCR → 返工后通过
       await runSn(wo.id, sn, operator, { failAt: 20, failCode: 'IRR' });
       await disposeOpenNcr(sn, 'REWORK', '更换驱动IC后重新测试');
+      // 返工换件：拆下损坏的驱动 IC，从合格库存补领同型号 IC 装上（单台追溯）
+      await step(operator, (tx) =>
+        prod.reworkParts(tx, operator, {
+          sn,
+          removed: [{ material_id: m.ICDRV.id, lot_no: 'XD260830', part_sn: 'U2', remark: '驱动IC输出电流偏大' }],
+          installed: [{ material_id: m.ICDRV.id, lot_no: 'XD260830', location_id: loc.get('RAW-A01')!, qty: 1, part_sn: 'U2' }],
+        }),
+      );
       await runSn(wo.id, sn, operator);
     } else if (i === 7) {
       // 安规测试患者漏电流超标 → 报废
@@ -149,6 +157,9 @@ export async function seedDemo(db: PrismaService, ctx: SeedContext): Promise<voi
     if (stop) await runSn(wo2.id, sn, u.op1, { stopAfter: stop });
   }
   await runSn(wo2.id, sns2[8], u.op2, { failAt: 20, failCode: 'WL_RED', stopAfter: 20 }); // 留一条待处置 NCR
+  // 已完工的 2 台先入库，QA 分批放行其中 1 台（另 1 台待放行）
+  await step(u.wh, (tx) => prod.fgReceipt(tx, u.wh, wo2.id, loc.get('FG-02')!));
+  await step(u.qa, (tx) => prod.releaseBatch(tx, u.qa, wo2.id, { serials: [sns2[0]], approve: true, reason: '首批急单，记录审核完整', sig }));
 
   // 采购：LED 补货，已到货待 IQC
   const po = await step(u.buyer, async (tx) =>

@@ -1,14 +1,18 @@
-import { Alert, Button, Card, Descriptions, Drawer, Input, Popconfirm, Select, Space, Table, Tag, Typography, message, type TableColumnsType } from 'antd';
-import { CheckOutlined, CloseOutlined, ReloadOutlined } from '@ant-design/icons';
-import { useMemo, useState } from 'react';
+import { Alert, Button, Card, Descriptions, Drawer, Empty, Input, InputNumber, Modal, Popconfirm, Select, Space, Spin, Table, Tag, Typography, message, type TableColumnsType } from 'antd';
+import { CheckOutlined, CloseOutlined, ReloadOutlined, RollbackOutlined } from '@ant-design/icons';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { post, type Rec } from '../../api/http';
+import { get, post, type Rec } from '../../api/http';
 import { useAuth } from '../../auth';
 import PageHeader from '../../components/PageHeader';
+import RemoteSelect, { LocationSelect } from '../../components/RemoteSelect';
 import StatusTag from '../../components/StatusTag';
 import { usePaged } from '../../components/usePaged';
-import { fmtDateTime } from '../../utils/format';
+import { fmtDateTime, fmtQty } from '../../utils/format';
 import { CsTag, ExpiryDate, LotLink, MaterialCell, Qty } from './common';
+
+const isReturn = (r?: Rec | null) => r?.issue_type === 'RETURN';
+const docName = (r?: Rec | null) => (isReturn(r) ? '退料单' : '领料单');
 
 const STATUS_OPTIONS = [
   { value: 'DRAFT', label: '待过账' },
@@ -25,7 +29,11 @@ function IssueActions({ row, onChanged, size = 'small' }: { row: Rec; onChanged:
     setBusy(true);
     try {
       const r = await post(`/issues/${row.id}/${action}`);
-      message.success(action === 'confirm' ? `领料单 ${row.no} 已过账，库存已扣减` : `领料单 ${row.no} 已取消`);
+      message.success(
+        action === 'confirm'
+          ? isReturn(row) ? `退料单 ${row.no} 已过账，物料已退回合格库存` : `领料单 ${row.no} 已过账，库存已扣减`
+          : `${docName(row)} ${row.no} 已取消`,
+      );
       onChanged(r);
     } finally {
       setBusy(false);
@@ -36,7 +44,13 @@ function IssueActions({ row, onChanged, size = 'small' }: { row: Rec; onChanged:
       {can('wms') && (
         <Popconfirm
           title="确认过账？"
-          description={<div style={{ maxWidth: 280 }}>请确认已按单拣料。过账后将扣减库存，批次与工单绑定用于追溯，不可撤销。</div>}
+          description={
+            <div style={{ maxWidth: 280 }}>
+              {isReturn(row)
+                ? '请确认退料实物已清点并放回指定库位。过账后库存加回“合格”，并扣减工单已领数量，不可撤销。'
+                : '请确认已按单拣料。过账后将扣减库存，批次与工单绑定用于追溯，不可撤销。'}
+            </div>
+          }
           okText="过账"
           onConfirm={() => act('confirm')}
         >
@@ -44,7 +58,7 @@ function IssueActions({ row, onChanged, size = 'small' }: { row: Rec; onChanged:
         </Popconfirm>
       )}
       {can('wms', 'plan') && (
-        <Popconfirm title="确定取消该领料单？" okText="取消领料单" cancelText="不取消" onConfirm={() => act('cancel')}>
+        <Popconfirm title={`确定取消该${docName(row)}？`} okText={`取消${docName(row)}`} cancelText="不取消" onConfirm={() => act('cancel')}>
           <Button size={size} danger icon={<CloseOutlined />} disabled={busy}>取消</Button>
         </Popconfirm>
       )}
@@ -74,7 +88,7 @@ function IssueDrawer({ issue, onClose, onChanged }: { issue: Rec | null; onClose
       open={!!issue}
       width={860}
       onClose={onClose}
-      title={issue && <Space>领料单 <span className="mono">{issue.no}</span><StatusTag dict="doc_status" value={issue.status} /></Space>}
+      title={issue && <Space>{docName(issue)} <span className="mono">{issue.no}</span><StatusTag dict="issue_type" value={issue.issue_type} /><StatusTag dict="doc_status" value={issue.status} /></Space>}
       extra={issue && <IssueActions row={issue} onChanged={onChanged} size="middle" />}
       destroyOnHidden
     >
@@ -87,12 +101,15 @@ function IssueDrawer({ issue, onClose, onChanged }: { issue: Rec | null; onClose
             <Descriptions.Item label="过账">{issue.confirmed_by ? `${issue.confirmed_by} · ${fmtDateTime(issue.confirmed_at)}` : '-'}</Descriptions.Item>
             {issue.remark && <Descriptions.Item label="备注" span={2}>{issue.remark}</Descriptions.Item>}
           </Descriptions>
-          {issue.status === 'DRAFT' && (
+          {issue.status === 'DRAFT' && !isReturn(issue) && (
             <Alert type="warning" showIcon style={{ marginBottom: 12 }} message="拣料清单已按库位排序。请按指定批号拣料（系统已按先到期先出推荐），全部拣齐后点击右上角“过账”。" />
+          )}
+          {issue.status === 'DRAFT' && isReturn(issue) && (
+            <Alert type="warning" showIcon style={{ marginBottom: 12 }} message="退料：请清点实物、核对批号，放回下列库位后点击右上角“过账”。过账后库存加回“合格”，工单已领数量相应减少。" />
           )}
           <Table rowKey="id" size="small" columns={columns} dataSource={lines} pagination={false} scroll={{ x: 'max-content' }} />
           <Typography.Paragraph type="secondary" style={{ marginTop: 12, fontSize: 12 }}>
-            共 {lines.length} 行。客供料（紫色标记）只能用于对应客户的工单；过期批次系统不会推荐。
+            共 {lines.length} 行。{isReturn(issue) ? '客供料退回原客户货主名下；退料批次只能是本工单已领用的批次。' : '客供料（紫色标记）只能用于对应客户的工单；过期批次系统不会推荐。'}
           </Typography.Paragraph>
         </>
       )}
@@ -115,7 +132,8 @@ export default function Issues() {
   };
 
   const columns: TableColumnsType<Rec> = [
-    { title: '领料单号', dataIndex: 'no', width: 130, fixed: 'left', render: (v) => <a className="mono" style={{ fontWeight: 600 }}>{v}</a> },
+    { title: '单号', dataIndex: 'no', width: 130, fixed: 'left', render: (v) => <a className="mono" style={{ fontWeight: 600 }}>{v}</a> },
+    { title: '类型', dataIndex: 'issue_type', width: 70, render: (v) => <StatusTag dict="issue_type" value={v || 'ISSUE'} /> },
     {
       title: '生产工单', dataIndex: 'wo_no', width: 130,
       render: (v, r) => <Link to={`/mes/work-orders/${r.wo_id}`} onClick={(e) => e.stopPropagation()}>{v}</Link>,

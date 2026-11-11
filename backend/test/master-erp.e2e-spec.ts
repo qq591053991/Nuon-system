@@ -288,7 +288,8 @@ describe('ERP：销售、采购、MRP、财务', () => {
       data: { no: 'AP-TEST-1', doc_type: 'AP', supplier_id: s1.id, ref_no: 'RK-1', doc_date: addDays(today(), -60), due_date: addDays(today(), -40), amount: 1000 },
     });
     let sum = await api.ok('get', '/api/finance/summary');
-    expect(sum.AP).toEqual([{ partner: s1.name, 未到期: 0, '1-30天': 0, '31-90天': 1000, '90天以上': 0, total: 1000 }]);
+    // 评审 P0-3：账龄按往来单位 + 币别分行，并给出本位币折算（total_base）
+    expect(sum.AP).toEqual([{ partner: s1.name, currency: 'CNY', 未到期: 0, '1-30天': 0, '31-90天': 1000, '90天以上': 0, total: 1000, total_base: 1000 }]);
     expect(sum.AR).toEqual([]);
     expect((await api.as('buyer').post(`/api/finance/docs/${doc.id}/payments`, { amount: 1 })).status).toBe(403);
     let d = await api.as('finance').ok('post', `/api/finance/docs/${doc.id}/payments`, { amount: 300, reference: 'BANK-1' });

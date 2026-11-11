@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { get, post, type Rec } from '../../api/http';
 import { useAuth } from '../../auth';
+import Attachments from '../../components/Attachments';
 import { isCancel, useESign } from '../../components/ESign';
 import PageHeader from '../../components/PageHeader';
 import StatusTag from '../../components/StatusTag';
@@ -81,12 +82,17 @@ export default function InspectionDetail() {
   const [remark, setRemark] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+  /** 物料检验规范中的检验方法（按项目名称对应） */
+  const [methods, setMethods] = useState<Record<string, string>>({});
 
   useEffect(() => {
     get(`/inspections/${id}`)
       .then((d) => {
         setInsp(d);
         setRows(toRows(d.items));
+        get(`/materials/${d.material_id}/inspection-items`, undefined, true)
+          .then((s) => setMethods(Object.fromEntries((s.items as Rec[]).filter((i) => i.method).map((i) => [i.name, i.method]))))
+          .catch(() => setMethods({}));
       })
       .catch(() => setFailed(true));
   }, [id]);
@@ -145,6 +151,9 @@ export default function InspectionDetail() {
       title: '标准 / 要求', dataIndex: 'standard',
       render: (v: string, r: ItemRow) => (editable && !r.id ? <Input value={v} placeholder="判定标准" onChange={(e) => update(r.key, { standard: e.target.value })} /> : v || '-'),
     },
+    ...(Object.keys(methods).length
+      ? [{ title: '检验方法', key: 'method', width: 160, render: (_: any, r: ItemRow) => methods[r.name] || <Typography.Text type="secondary">-</Typography.Text> }]
+      : []),
     {
       title: '实测 / 记录', dataIndex: 'value', width: 200,
       render: (v: string, r: ItemRow) => (editable ? <Input value={v} placeholder="如：抽测 5 件 658~662nm" onChange={(e) => update(r.key, { value: e.target.value })} /> : v || '-'),
@@ -202,7 +211,7 @@ export default function InspectionDetail() {
             </Card>
             <Card
               size="small"
-              title="检验项目"
+              title={<Space>检验项目{Object.keys(methods).length > 0 && <Typography.Text type="secondary" style={{ fontSize: 12, fontWeight: 'normal' }}>按物料检验规范</Typography.Text>}</Space>}
               extra={editable && (
                 <Button size="small" icon={<PlusOutlined />}
                   onClick={() => setRows((rs) => [...rs, { key: `n${Date.now()}`, name: '', standard: '', value: '', result: 'PASS' }])}>
@@ -219,6 +228,7 @@ export default function InspectionDetail() {
                 onRow={(r) => ({ style: r.result === 'FAIL' ? { background: '#fff1f0' } : undefined })}
               />
             </Card>
+            <Attachments entity="qms_inspection" entityId={insp.id} title="附件（COA、检验记录、照片）" hint="供应商出厂检验报告（COA）、检测照片、测试数据截图等检验证据。" canUpload={can('qc', 'qa', 'wms')} />
           </Space>
         </Col>
         <Col xs={24} xl={8}>

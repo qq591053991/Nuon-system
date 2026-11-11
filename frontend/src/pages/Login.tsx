@@ -1,4 +1,4 @@
-import { Alert, Button, Card, Form, Input, Typography, Select } from 'antd';
+import { Alert, Button, Card, Form, Input, Typography, Select, message } from 'antd';
 import { LockOutlined, UserOutlined } from '@ant-design/icons';
 import { useEffect, useState } from 'react';
 import { get } from '../api/http';
@@ -34,13 +34,17 @@ export default function Login() {
       </div>
       <Card className="login-card" variant="borderless">
         <Typography.Title level={3} style={{ marginTop: 0 }}>登录</Typography.Title>
+        {sp.get('idle') === '1' && (
+          <Alert type="warning" showIcon style={{ marginBottom: 16 }} message="由于长时间未操作，系统已自动退出登录，请重新登录。" />
+        )}
         {kingdee && (
           <Alert type="info" showIcon style={{ marginBottom: 16 }} message="支持金蝶云星空账号登录" description="可直接使用您在金蝶云星空的用户名和密码登录。" />
         )}
         <Form form={form} size="large" initialValues={{ username: 'admin' }} onFinish={async (v) => {
           setLoading(true);
           try {
-            await login(v.username, v.password);
+            const u = await login(v.username, v.password);
+            if (u.must_change_password) message.warning('您的密码已过期，请先修改密码');
             nav(sp.get('redirect') || '/', { replace: true });
           } finally {
             setLoading(false);

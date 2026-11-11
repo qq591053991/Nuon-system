@@ -6,6 +6,7 @@ import { useEffect, useRef, useState, type MouseEvent } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { get, post, type Rec } from '../../api/http';
 import { useAuth } from '../../auth';
+import Attachments from '../../components/Attachments';
 import { isCancel, useESign } from '../../components/ESign';
 import PageHeader from '../../components/PageHeader';
 import RemoteSelect, { CustomerSelect, MaterialSelect } from '../../components/RemoteSelect';
@@ -35,6 +36,15 @@ function dispositionChoices(source: string): { value: string; label: string; des
       { value: 'REWORK', label: '挑选后重检', desc: '库存转回“待检”，系统自动生成新的检验单重新检验。' },
       { value: 'RETURN', label: '退货', desc: '不合格库存出库，退回供应商。' },
       { value: 'SCRAP', label: '报废', desc: '不合格库存报废出库。' },
+    ];
+  }
+  if (source === 'CUSTOMER') {
+    // 客户退货（RMA）关联的 NCR：关闭退货单时系统按此处置执行冻结库存
+    return [
+      { value: 'REWORK', label: '返工/返修', desc: '返修并重新检验合格后，关闭退货单时退货品转为合格库存。' },
+      { value: 'SCRAP', label: '报废', desc: '关闭退货单时退货品报废出库，序列号标记为报废。' },
+      { value: 'USE_AS_IS', label: '让步接收', desc: '经评审无质量问题（如客户误操作），关闭退货单时转为合格库存。' },
+      { value: 'RETURN', label: '返还客户', desc: '原样返还客户，关闭退货单时出库，序列号恢复为已发货。' },
     ];
   }
   return [
@@ -281,6 +291,13 @@ function NcrDrawer({ ncr, onClose, onAction }: { ncr: Rec | null; onClose: () =>
         { key: 'capa', label: '关联 CAPA', span: 2, children: ncr.capa_id ? <Link to={`/quality/capas?id=${ncr.capa_id}`}>查看 CAPA</Link> : '-' },
       ]} />
       {ncr.status === 'OPEN' && !can('qa') && <Alert style={{ marginTop: 16 }} type="info" showIcon message="NCR 由 QA 评审处置（需电子签名）。" />}
+      {ncr.source === 'CUSTOMER' && (
+        <Alert style={{ marginTop: 16 }} type="info" showIcon
+          message={<span>客户来源的 NCR 可能关联 <Link to={`/wms/customer-returns?q=${encodeURIComponent(ncr.sn || ncr.lot_no || '')}`}>客户退货</Link> 或 <Link to={`/quality/complaints?q=${encodeURIComponent(ncr.sn || ncr.lot_no || '')}`}>客户投诉</Link>。</span>} />
+      )}
+      <div style={{ marginTop: 16 }}>
+        <Attachments entity="qms_ncr" entityId={ncr.id} bare hint="缺陷照片、检测报告、客户反馈材料等。" canUpload={can('qc', 'qa', 'wms', 'mes')} />
+      </div>
     </Drawer>
   );
 }

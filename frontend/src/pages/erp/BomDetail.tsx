@@ -2,7 +2,7 @@ import {
   Alert, Button, Card, Col, DatePicker, Descriptions, Form, Input, InputNumber, Popconfirm, Result, Row, Space, Spin, Table, Tabs, Tag, Tooltip,
   Typography, message, type TableColumnsType,
 } from 'antd';
-import { ArrowLeftOutlined, BranchesOutlined, DeleteOutlined, PlusOutlined, SafetyCertificateOutlined, SaveOutlined } from '@ant-design/icons';
+import { ArrowLeftOutlined, BranchesOutlined, CloseCircleOutlined, DeleteOutlined, PlusOutlined, SafetyCertificateOutlined, SaveOutlined, SendOutlined } from '@ant-design/icons';
 import { useCallback, useEffect, useState, type Key } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { del, get, post, put, type Rec } from '../../api/http';
@@ -11,8 +11,10 @@ import { isCancel, useESign } from '../../components/ESign';
 import PageHeader from '../../components/PageHeader';
 import { MaterialSelect } from '../../components/RemoteSelect';
 import StatusTag from '../../components/StatusTag';
+import { dictLabel } from '../../utils/dict';
 import { fmtDate, fmtDateTime, fmtQty, toDate } from '../../utils/format';
 import { NewVersionModal, toDayjs, uid, type LineRow } from './shared';
+import { SignatureHistory } from './EngSignatures';
 
 const CsTag = () => <Tag color="purple" style={{ marginInlineStart: 6 }}>客供料</Tag>;
 const pct = (v?: number | null) => (v ? `${Math.round(v * 10000) / 100}%` : '-');
@@ -81,10 +83,14 @@ function BomTree({ bomId, version }: { bomId: number; version: string }) {
 
 function BomBody({ bom, versions, reload }: { bom: Rec; versions: Rec[]; reload: () => Promise<unknown> }) {
   const nav = useNavigate();
-  const { can } = useAuth();
+  const { can, user } = useAuth();
   const [sign, signHolder] = useESign();
   const [form] = Form.useForm();
   const editing = bom.status === 'DRAFT' && can('engineering');
+  const reviewing = bom.status === 'SUBMITTED' && can('qa');
+  /** 该产品已有发布过的版本：提交时须填写变更原因 */
+  const needReason = versions.some((v) => v.id !== bom.id && (v.status === 'RELEASED' || v.status === 'OBSOLETE'));
+  const selfSubmitted = !!bom.submitted_by && bom.submitted_by === user?.full_name;
   const [lines, setLines] = useState<LineRow[]>(() =>
     (bom.lines as Rec[]).map((l) => ({ ...l, scrap_pct: l.scrap_rate ? Math.round(l.scrap_rate * 10000) / 100 : 0, _key: uid() })),
   );
@@ -114,6 +120,7 @@ function BomBody({ bom, versions, reload }: { bom: Rec; versions: Rec[]; reload:
       ecn_no: v.ecn_no || null,
       effective_date: toDate(v.effective_date),
       remark: v.remark || null,
+      change_reason: v.change_reason?.trim() || null,
       lines: used.map((l) => ({
         component_id: l.component_id,
         qty_per: Number(l.qty_per),
@@ -137,28 +144,69 @@ function BomBody({ bom, versions, reload }: { bom: Rec; versions: Rec[]; reload:
     }
   };
 
-  const release = async () => {
+  /** 签名后执行；用户取消签名时静默返回 */
+  const signed = async (opts: Parameters<typeof sign>[0]) => {
+    try {
+      return await sign(opts);
+    } catch (e) {
+      if (isCancel(e)) return null;
+      throw e;
+    }
+  };
+
+  /** 工程师提交（电子签名：编制）→ 待 QA 批准 */
+  const submit = async () => {
     const body = await collect();
     if (!body) return;
     if (!body.lines.length) {
-      message.error('BOM 没有组件，不能发布');
+      message.error('BOM 没有组件，不能提交');
       return;
     }
-    let signature;
-    try {
-      signature = await sign({
-        meaning: 'BOM发布批准',
-        description: `发布 ${bom.material_code} 版本 ${body.version}：发布后成为生效 BOM，旧的已发布版本自动作废；已下达的工单不受影响。`,
-      });
-    } catch (e) {
-      if (isCancel(e)) return;
-      throw e;
-    }
-    setBusy('release');
+    const signature = await signed({
+      meaning: 'BOM编制提交',
+      description: `提交 ${bom.material_code} 版本 ${body.version} 给 QA 审核：批准前不生效；提交后不能修改，如需修改请由 QA 驳回。`,
+    });
+    if (!signature) return;
+    setBusy('submit');
     try {
       await put(`/boms/${bom.id}`, body);
-      await post(`/boms/${bom.id}/release`, { signature });
-      message.success('BOM 已发布');
+      await post(`/boms/${bom.id}/submit`, { signature, change_reason: body.change_reason });
+      message.success('已提交，等待 QA 批准');
+      await reload();
+    } finally {
+      setBusy(undefined);
+    }
+  };
+
+  /** QA 批准（电子签名：批准）→ 生效 */
+  const approve = async () => {
+    const signature = await signed({
+      meaning: 'BOM批准',
+      description: `批准后 ${bom.material_code} 版本 ${bom.version} 立即生效，原已发布版本自动作废；已下达的工单不受影响。`,
+    });
+    if (!signature) return;
+    setBusy('approve');
+    try {
+      await post(`/boms/${bom.id}/approve`, { signature });
+      message.success('BOM 已批准生效');
+      await reload();
+    } finally {
+      setBusy(undefined);
+    }
+  };
+
+  /** QA 驳回（电子签名 + 原因）→ 退回草稿 */
+  const reject = async () => {
+    const signature = await signed({
+      meaning: 'BOM驳回',
+      description: '驳回后退回草稿，由工程师修改后重新提交。请在下方填写驳回原因。',
+      reasonRequired: true,
+    });
+    if (!signature) return;
+    setBusy('reject');
+    try {
+      await post(`/boms/${bom.id}/reject`, { reason: signature.reason, signature });
+      message.success('已驳回，退回工程师修改');
       await reload();
     } finally {
       setBusy(undefined);
@@ -235,7 +283,7 @@ function BomBody({ bom, versions, reload }: { bom: Rec; versions: Rec[]; reload:
             其他版本：
             {others.map((v) => (
               <Link key={v.id} to={`/engineering/boms/${v.id}`}>
-                {v.version}（{(v.status === 'RELEASED' && '已发布') || (v.status === 'DRAFT' && '草稿') || '已作废'}）
+                {v.version}（{dictLabel('eng_status', v.status)}）
               </Link>
             ))}
           </Space>
@@ -249,7 +297,15 @@ function BomBody({ bom, versions, reload }: { bom: Rec; versions: Rec[]; reload:
                   <Button danger>删除草稿</Button>
                 </Popconfirm>
                 <Button icon={<SaveOutlined />} loading={busy === 'save'} disabled={!!busy} onClick={save}>保存</Button>
-                <Button type="primary" icon={<SafetyCertificateOutlined />} loading={busy === 'release'} disabled={!!busy} onClick={release}>发布</Button>
+                <Button type="primary" icon={<SendOutlined />} loading={busy === 'submit'} disabled={!!busy} onClick={submit}>提交审批</Button>
+              </>
+            )}
+            {reviewing && (
+              <>
+                <Button danger icon={<CloseCircleOutlined />} loading={busy === 'reject'} disabled={!!busy} onClick={reject}>驳回</Button>
+                <Tooltip title={selfSubmitted ? '批准人不能与提交人相同（职责分离）' : undefined}>
+                  <Button type="primary" icon={<SafetyCertificateOutlined />} loading={busy === 'approve'} disabled={!!busy || selfSubmitted} onClick={approve}>批准</Button>
+                </Tooltip>
               </>
             )}
             {bom.status === 'RELEASED' && can('engineering') && (
@@ -265,7 +321,13 @@ function BomBody({ bom, versions, reload }: { bom: Rec; versions: Rec[]; reload:
           message={
             bom.status === 'OBSOLETE'
               ? '此版本已作废（已被新版本替代），仅供查阅。'
-              : `已发布的 BOM 不能修改，变更请升版（ECN），已下达工单使用下达时的快照。${editing ? '录入组件后点击【发布】，发布需电子签名。' : ''}`
+              : bom.status === 'SUBMITTED'
+                ? reviewing
+                  ? '工程师已提交：请审核组件、用量与变更原因后【批准】或【驳回】（均需电子签名；批准人不能是提交人）。'
+                  : '已提交，等待 QA 批准；批准前不生效，且不能修改。'
+                : bom.status === 'DRAFT'
+                  ? `草稿：录入组件后点击【提交审批】（电子签名：编制），QA 批准（电子签名）后才生效。${needReason ? '本产品已有发布过的版本，须填写变更原因及影响评估。' : ''}`
+                  : 'GMP：BOM 变更须经 QA 批准；已发布的 BOM 不能修改，变更请升版（ECN），已下达工单使用下达时的快照。'
           }
         />
         <Card size="small" title="基本信息">
@@ -273,7 +335,7 @@ function BomBody({ bom, versions, reload }: { bom: Rec; versions: Rec[]; reload:
             <Form
               form={form}
               layout="vertical"
-              initialValues={{ version: bom.version, ecn_no: bom.ecn_no, effective_date: toDayjs(bom.effective_date), remark: bom.remark }}
+              initialValues={{ version: bom.version, ecn_no: bom.ecn_no, effective_date: toDayjs(bom.effective_date), remark: bom.remark, change_reason: bom.change_reason }}
             >
               <Row gutter={16}>
                 <Col xs={24} md={8}>
@@ -291,6 +353,16 @@ function BomBody({ bom, versions, reload }: { bom: Rec; versions: Rec[]; reload:
                 <Col xs={12} md={4}>
                   <Form.Item name="remark" label="备注"><Input /></Form.Item>
                 </Col>
+                <Col span={24}>
+                  <Form.Item
+                    name="change_reason"
+                    label="变更原因 / 影响评估"
+                    rules={[{ required: needReason, whitespace: true, message: '本产品已有发布过的版本，请填写变更原因及影响评估' }]}
+                    extra={needReason ? '说明变更内容、原因，以及对在制品、库存、已发货产品和注册/客户的影响。' : '首版可不填。'}
+                  >
+                    <Input.TextArea autoSize={{ minRows: 1, maxRows: 4 }} placeholder="如：LED 供应商变更（ECN-2026-015），光学性能经验证无差异；在制品按旧版本完工" />
+                  </Form.Item>
+                </Col>
               </Row>
             </Form>
           ) : (
@@ -303,9 +375,11 @@ function BomBody({ bom, versions, reload }: { bom: Rec; versions: Rec[]; reload:
                 { key: 's', label: '状态', children: <StatusTag dict="eng_status" value={bom.status} /> },
                 { key: 'ecn', label: 'ECN 编号', children: bom.ecn_no || '-' },
                 { key: 'eff', label: '生效日期', children: fmtDate(bom.effective_date) },
-                { key: 'rel', label: '发布', children: bom.released_by ? `${bom.released_by}${bom.released_at ? ` · ${fmtDateTime(bom.released_at)}` : ''}` : '-' },
+                { key: 'sub', label: '提交（编制）', children: bom.submitted_by ? `${bom.submitted_by}${bom.submitted_at ? ` · ${fmtDateTime(bom.submitted_at)}` : ''}` : '-' },
+                { key: 'rel', label: '批准（QA）', children: bom.released_by ? `${bom.released_by}${bom.released_at ? ` · ${fmtDateTime(bom.released_at)}` : ''}` : '-' },
                 { key: 'c', label: '创建', children: `${bom.created_by ?? '-'} · ${fmtDateTime(bom.created_at)}` },
                 { key: 'r', label: '备注', children: bom.remark || '-' },
+                { key: 'cr', label: '变更原因 / 影响评估', span: 'filled', children: bom.change_reason || '-' },
               ]}
             />
           )}
@@ -335,6 +409,7 @@ function BomBody({ bom, versions, reload }: { bom: Rec; versions: Rec[]; reload:
                 ),
               },
               { key: 'tree', label: '多级展开', children: <BomTree bomId={bom.id} version={bom.updated_at} /> },
+              { key: 'sig', label: '签名记录', children: <SignatureHistory entity="eng_bom" id={bom.id} stamp={bom.updated_at} /> },
             ]}
           />
         </Card>
@@ -346,7 +421,7 @@ function BomBody({ bom, versions, reload }: { bom: Rec; versions: Rec[]; reload:
         onCancel={() => setVerOpen(false)}
         onOk={async (v) => {
           const nb = await post(`/boms/${bom.id}/new-version`, v);
-          message.success(`已生成新版本 ${nb.version} 草稿，请修改后发布`);
+          message.success(`已生成新版本 ${nb.version} 草稿，请修改后提交审批`);
           setVerOpen(false);
           nav(`/engineering/boms/${nb.id}`);
         }}
