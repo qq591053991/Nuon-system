@@ -3,6 +3,10 @@ import { crudController } from '../common/crud';
 import { addDays } from '../common/dates';
 import { BizError } from '../common/errors';
 import { isValidGtin } from '../core/udi';
+import { BomController } from './bom.controller';
+import { CalibrationController } from './calibration.controller';
+import { EngineeringService } from './engineering.service';
+import { RoutingController } from './routing.controller';
 
 /** 主数据：通用 CRUD（与原 Python 版字段、筛选、校验规则一致） */
 const crud = [
@@ -32,7 +36,7 @@ const crud = [
 ];
 
 // 设备校准、BOM、工艺路线控制器在本目录其他文件中实现，并加入下方 controllers
-export const MASTER_EXTRA_CONTROLLERS: any[] = [];
+export const MASTER_EXTRA_CONTROLLERS: any[] = [CalibrationController, BomController, RoutingController];
 
-@Module({ controllers: [...crud, ...MASTER_EXTRA_CONTROLLERS] })
+@Module({ controllers: [...crud, ...MASTER_EXTRA_CONTROLLERS], providers: [EngineeringService], exports: [EngineeringService] })
 export class MasterModule {}
