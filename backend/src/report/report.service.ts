@@ -3,9 +3,10 @@ import { Injectable } from '@nestjs/common';
 import { userPermissions } from '../auth/roles';
 import type { CurrentUser } from '../common/context';
 import { addDays, fmtDate, localDateStr, today } from '../common/dates';
-import { g, num, round, round2 } from '../common/num';
+import { g, round, round2 } from '../common/num';
 import type { Tx } from '../common/prisma.service';
 import { config } from '../config';
+import { CurrencyTotals, RateBook } from '../erp/currency';
 
 /** 某时刻在工厂时区相对 UTC 的偏移（毫秒） */
 function tzOffsetMs(at: Date): number {
@@ -79,8 +80,16 @@ export class ReportService {
     const iqcRate = iqcDone.length ? pct(iqcDone.filter((i) => i.status === 'PASSED').length, iqcDone.length) : null;
     const ncrSrc = await tx.ncr.groupBy({ by: ['source'], where: { created_at: { gte: since } }, _count: { _all: true } });
 
+    // 在手订单金额：按币别汇总，再按今日适用汇率折算本位币（缺汇率的币别不计入，并在预警中提示）
+    const book = await RateBook.load(tx);
+    const soByCur = new CurrencyTotals();
+    for (const o of openSo) soByCur.add(o.currency, o.total_amount);
+    const soBase = soByCur.toBase(book, t);
+    const openSoByCurrency = soByCur.byCurrency(book.base);
+
+    // 库存金额（标准成本，本位币）：数量转 numeric 后与 Decimal 单价相乘，避免浮点误差
     const [{ value: stockValue }] = await tx.$queryRaw<{ value: number }[]>`
-      SELECT COALESCE(SUM(s.qty * m.std_cost), 0)::float8 AS value FROM wms_stock s JOIN md_material m ON m.id = s.material_id`;
+      SELECT ROUND(COALESCE(SUM(s.qty::numeric * m.std_cost), 0), 2)::float8 AS value FROM wms_stock s JOIN md_material m ON m.id = s.material_id`;
     const avail = new Map<number, number>();
     for (const r of await tx.stock.groupBy({ by: ['material_id'], where: { status: 'AVAILABLE' }, _sum: { qty: true } })) {
       avail.set(r.material_id, r._sum.qty ?? 0);
@@ -99,7 +108,10 @@ export class ReportService {
     return {
       kpi: {
         open_so: openSo.length,
-        open_so_amount: round2(openSo.reduce((s, o) => s + num(o.total_amount), 0)),
+        open_so_amount: soBase.amount,
+        open_so_by_currency: openSoByCurrency,
+        base_currency: book.base,
+        missing_rates: soBase.missing,
         overdue_so: overdueSo.length,
         wip_wo: (woStatus.RELEASED ?? 0) + (woStatus.IN_PROGRESS ?? 0),
         wip_qty: round2(wipQty),
@@ -120,6 +132,10 @@ export class ReportService {
       fpy_by_op: fpy,
       ncr_by_source: ncrSrc.map((r) => ({ source: r.source, count: r._count._all })),
       alerts: [
+        ...soBase.missing.map((c) => ({
+          level: 'warning',
+          text: `缺少 ${c} → ${book.base} 汇率，在手订单金额未包含 ${c} ${(openSoByCurrency.find((x) => x.currency === c)?.amount ?? 0).toFixed(2)}（请在“基础资料 → 汇率”中维护）`,
+        })),
         ...calDue.map((e) => ({
           level: expired(e.next_calibration_date) ? 'error' : 'warning',
           text: `设备 ${e.code} ${e.name} 校准${expired(e.next_calibration_date) ? '已过期' : '即将到期'}（${fmtDate(e.next_calibration_date)}）`,
@@ -143,6 +159,9 @@ export class ReportService {
     await add('qa', 'ncr', '待评审处置的不合格品（NCR）', () => tx.ncr.count({ where: { status: 'OPEN' } }), '/quality/ncrs');
     await add('qa', 'dhr', '待审核放行的生产批（DHR）', () => tx.workOrder.count({ where: { status: 'COMPLETED', dhr_status: 'OPEN' } }), '/quality/release');
     await add('qa', 'capa', '进行中的 CAPA', () => tx.capa.count({ where: { status: { not: 'CLOSED' } } }), '/quality/capas');
+    await add('qa', 'complaint', '未关闭的客户投诉/不良事件', () => tx.complaint.count({ where: { status: { not: 'CLOSED' } } }), '/quality/complaints');
+    await add('qa', 'bom_submitted', '待批准的 BOM', () => tx.bom.count({ where: { status: 'SUBMITTED' } }), '/engineering/boms?status=SUBMITTED');
+    await add('qa', 'routing_submitted', '待批准的工艺路线', () => tx.routing.count({ where: { status: 'SUBMITTED' } }), '/engineering/routings?status=SUBMITTED');
     await add('plan', 'so_no_wo', '已确认待排产的销售订单', () => tx.salesOrder.count({ where: { status: 'CONFIRMED' } }), '/sales/orders');
     await add('plan', 'wo_planned', '待下达的生产工单', () => tx.workOrder.count({ where: { status: 'PLANNED' } }), '/mes/work-orders');
     await add('purchase', 'po_draft', '待审批的采购订单', () => tx.purchaseOrder.count({ where: { status: 'DRAFT' } }), '/purchase/orders');
@@ -154,8 +173,8 @@ export class ReportService {
         SELECT COUNT(*)::int AS n FROM mes_work_order WHERE status IN ('IN_PROGRESS', 'COMPLETED') AND completed_qty > received_qty`;
       return Number(n);
     }, '/mes/work-orders');
-    await add('engineering', 'bom', '待发布的 BOM 草稿', () => tx.bom.count({ where: { status: 'DRAFT' } }), '/engineering/boms');
-    await add('engineering', 'routing', '待发布的工艺路线草稿', () => tx.routing.count({ where: { status: 'DRAFT' } }), '/engineering/routings');
+    await add('engineering', 'bom', '待提交的 BOM 草稿', () => tx.bom.count({ where: { status: 'DRAFT' } }), '/engineering/boms?status=DRAFT');
+    await add('engineering', 'routing', '待提交的工艺路线草稿', () => tx.routing.count({ where: { status: 'DRAFT' } }), '/engineering/routings?status=DRAFT');
     await add('master', 'calib', '校准过期的设备', () => tx.equipment.count({ where: { calibration_required: true, next_calibration_date: { lt: today() } } }), '/master/equipment');
     await add('sales', 'so_draft', '待确认的销售订单', () => tx.salesOrder.count({ where: { status: 'DRAFT' } }), '/sales/orders');
     return items;

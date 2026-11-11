@@ -15,6 +15,7 @@ import { QmsModule } from './qms/qms.module';
 import { MesModule } from './mes/mes.module';
 import { ReportModule } from './report/report.module';
 import { ImportModule } from './imports/import.module';
+import { AttachmentsModule } from './attachments/attachments.module';
 
 @Module({
   imports: [
@@ -28,6 +29,7 @@ import { ImportModule } from './imports/import.module';
     MesModule,
     ReportModule,
     ImportModule,
+    AttachmentsModule,
   ],
   controllers: [HealthController],
   providers: [

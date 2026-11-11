@@ -1,6 +1,6 @@
 /** ERP 请求体：销售订单、采购订单、采购收货、MRP 转单、收付款 */
 import { Type } from 'class-transformer';
-import { IsArray, IsInt, IsNumber, IsOptional, IsPositive, IsString, ValidateNested } from 'class-validator';
+import { IsArray, IsInt, IsNumber, IsOptional, IsPositive, IsString, Min, ValidateNested } from 'class-validator';
 
 // ============ 销售订单 ============
 export class SoLineDto {
@@ -27,10 +27,18 @@ export class SoDto {
 }
 
 // ============ 采购订单 ============
+/**
+ * 采购订单行：qty / unit_price 为库存单位数量与单价。
+ * 按采购单位下单时传 purchase_qty（+ purchase_price，可选 purchase_uom，默认取物料的采购单位）：
+ *   qty = purchase_qty × 换算率；unit_price = purchase_price ÷ 换算率；amount = purchase_qty × purchase_price（此时 qty/unit_price 可不传）。
+ */
 export class PoLineDto {
   @Type(() => Number) @IsInt() material_id: number;
-  @Type(() => Number) @IsNumber() @IsPositive() qty: number;
+  @IsOptional() @Type(() => Number) @IsNumber() @IsPositive() qty?: number | null;
   @IsOptional() @Type(() => Number) @IsNumber() unit_price: number | null = 0;
+  @IsOptional() @Type(() => Number) @IsNumber() @IsPositive() purchase_qty?: number | null;
+  @IsOptional() @IsString() purchase_uom?: string | null;
+  @IsOptional() @Type(() => Number) @IsNumber() @Min(0) purchase_price?: number | null;
   @IsOptional() @IsString() expected_date?: string | null;
   @IsOptional() @IsString() remark?: string | null;
 }

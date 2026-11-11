@@ -1,6 +1,6 @@
 /** 工程数据（BOM / 工艺路线）与设备校准的请求体 */
 import { Type } from 'class-transformer';
-import { IsArray, IsBoolean, IsInt, IsNumber, IsOptional, IsPositive, IsString, ValidateNested } from 'class-validator';
+import { IsArray, IsBoolean, IsInt, IsNotEmpty, IsNumber, IsOptional, IsPositive, IsString, ValidateNested } from 'class-validator';
 import { SignatureDto } from '../core/esign.service';
 
 // ---------------- 设备校准 ----------------
@@ -28,18 +28,31 @@ export class BomDto {
   @IsOptional() @IsString() ecn_no?: string | null;
   @IsOptional() @IsString() effective_date?: string | null;
   @IsOptional() @IsString() remark?: string | null;
+  /** 变更原因 / 影响评估（首版之后的版本提交时必填） */
+  @IsOptional() @IsString() change_reason?: string | null;
   @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => BomLineDto) lines: BomLineDto[] | null = [];
 }
 
-/** 发布（电子签名） */
-export class ReleaseDto {
+/** 仅电子签名（QA 批准） */
+export class SignOnlyDto {
   @IsOptional() @ValidateNested() @Type(() => SignatureDto) signature?: SignatureDto | null;
+}
+
+/** 工程师提交（电子签名：编制）；可同时填写/更新变更原因 */
+export class SubmitDto extends SignOnlyDto {
+  @IsOptional() @IsString() change_reason?: string | null;
+}
+
+/** QA 驳回（电子签名 + 驳回原因） */
+export class RejectDto extends SignOnlyDto {
+  @IsString() @IsNotEmpty({ message: '请填写驳回原因' }) reason: string;
 }
 
 /** 升版 */
 export class NewVersionDto {
   @IsString() version: string;
   @IsOptional() @IsString() ecn_no?: string | null;
+  @IsOptional() @IsString() change_reason?: string | null;
 }
 
 // ---------------- 工艺路线 ----------------
@@ -71,5 +84,7 @@ export class RoutingDto {
   @IsOptional() @IsString() version: string | null = 'A0';
   @IsOptional() @IsString() name?: string | null;
   @IsOptional() @IsString() remark?: string | null;
+  /** 变更原因 / 影响评估（首版之后的版本提交时必填） */
+  @IsOptional() @IsString() change_reason?: string | null;
   @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => OperationDto) operations: OperationDto[] | null = [];
 }

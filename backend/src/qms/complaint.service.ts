@@ -1,0 +1,194 @@
+/**
+ * 客户投诉 / 不良事件：OPEN（已登记）→ INVESTIGATING（调查中）→ CLOSED（已关闭，QA 电子签名“客诉关闭”）。
+ *   create / update            登记与修改（未关闭）；输入序列号自动带出产品与批号
+ *   startInvestigation         开始调查
+ *   createNcr                  由投诉开具 NCR（来源 CUSTOMER）并关联，未调查时自动转为调查中
+ *   createCapa / linkCapa      发起或关联 CAPA（来源 COMPLAINT）
+ *   close                      关闭：必须填写调查结论 + QA 电子签名
+ *   enrich                     补充 customer_name / material_code / ncr_no / capa_no 等
+ */
+import { Injectable } from '@nestjs/common';
+import type { Complaint } from '@prisma/client';
+import type { CurrentUser } from '../common/context';
+import { today } from '../common/dates';
+import { BizError, NotFound } from '../common/errors';
+import { ser } from '../common/presenter';
+import type { Tx } from '../common/prisma.service';
+import { EsignService, type SignatureDto } from '../core/esign.service';
+import { NumberingService } from '../core/numbering.service';
+
+export interface ComplaintInput {
+  customer_id?: number;
+  received_date?: Date | null;
+  material_id?: number | null;
+  sn?: string | null;
+  lot_no?: string | null;
+  description?: string;
+  is_adverse_event?: boolean;
+  investigation?: string | null;
+  capa_id?: number | null;
+}
+
+const text = (v: string | null | undefined) => {
+  const s = (v ?? '').trim();
+  return s ? s : null;
+};
+
+@Injectable()
+export class ComplaintService {
+  constructor(private readonly numbering: NumberingService, private readonly esign: EsignService) {}
+
+  private async load(tx: Tx, id: number): Promise<Complaint> {
+    const c = await tx.complaint.findUnique({ where: { id } });
+    if (!c) throw new NotFound('客户投诉');
+    return c;
+  }
+
+  private open(c: Complaint) {
+    if (c.status === 'CLOSED') throw new BizError('投诉已关闭，不能修改');
+  }
+
+  /** 序列号 → 产品与批号（本系统生产的产品） */
+  private async bySn(tx: Tx, sn: string | null) {
+    if (!sn) return null;
+    return tx.serialNumber.findUnique({ where: { sn } });
+  }
+
+  async create(tx: Tx, user: CurrentUser, a: ComplaintInput): Promise<Complaint> {
+    if (!a.customer_id || !(await tx.customer.findUnique({ where: { id: a.customer_id } }))) throw new NotFound('客户');
+    const description = text(a.description);
+    if (!description) throw new BizError('请填写投诉内容');
+    const sn = text(a.sn);
+    const serial = await this.bySn(tx, sn);
+    if (a.material_id && !(await tx.material.findUnique({ where: { id: a.material_id } }))) throw new NotFound('物料');
+    if (serial && a.material_id && serial.material_id !== a.material_id) throw new BizError(`序列号 ${sn} 不是所选产品`);
+    const material_id = a.material_id ?? serial?.material_id ?? null;
+    return tx.complaint.create({
+      data: {
+        no: await this.numbering.nextNo(tx, 'KS'), customer_id: a.customer_id, received_date: a.received_date ?? today(),
+        material_id, sn, lot_no: text(a.lot_no) ?? serial?.lot_no ?? null, description, is_adverse_event: !!a.is_adverse_event,
+        status: 'OPEN', created_by: user.username,
+      },
+    });
+  }
+
+  /** 修改（只改请求中出现的字段；已关闭不能修改） */
+  async update(tx: Tx, id: number, a: ComplaintInput): Promise<Complaint> {
+    const c = await this.load(tx, id);
+    this.open(c);
+    const data: Record<string, any> = {};
+    if (a.customer_id !== undefined) {
+      if (!a.customer_id || !(await tx.customer.findUnique({ where: { id: a.customer_id } }))) throw new NotFound('客户');
+      data.customer_id = a.customer_id;
+    }
+    if (a.received_date !== undefined && a.received_date !== null) data.received_date = a.received_date;
+    if (a.material_id !== undefined) {
+      if (a.material_id && !(await tx.material.findUnique({ where: { id: a.material_id } }))) throw new NotFound('物料');
+      data.material_id = a.material_id ?? null;
+    }
+    if (a.sn !== undefined) data.sn = text(a.sn);
+    if (a.lot_no !== undefined) data.lot_no = text(a.lot_no);
+    if (a.description !== undefined) {
+      const d = text(a.description);
+      if (!d) throw new BizError('投诉内容不能为空');
+      data.description = d;
+    }
+    if (a.is_adverse_event !== undefined) data.is_adverse_event = !!a.is_adverse_event;
+    if (a.investigation !== undefined) data.investigation = text(a.investigation);
+    if (a.capa_id !== undefined) {
+      if (a.capa_id && !(await tx.capa.findUnique({ where: { id: a.capa_id } }))) throw new NotFound('CAPA');
+      data.capa_id = a.capa_id ?? null;
+    }
+    if (data.sn && data.material_id === undefined && !c.material_id) {
+      const serial = await this.bySn(tx, data.sn);
+      if (serial) Object.assign(data, { material_id: serial.material_id, lot_no: data.lot_no ?? c.lot_no ?? serial.lot_no });
+    }
+    // 填写了调查内容 → 自动进入调查中
+    if (c.status === 'OPEN' && data.investigation) data.status = 'INVESTIGATING';
+    return tx.complaint.update({ where: { id }, data });
+  }
+
+  async startInvestigation(tx: Tx, id: number, investigation?: string | null): Promise<Complaint> {
+    const c = await this.load(tx, id);
+    if (c.status !== 'OPEN') throw new BizError('只有“已登记”的投诉可以开始调查');
+    return tx.complaint.update({ where: { id }, data: { status: 'INVESTIGATING', ...(text(investigation) ? { investigation: text(investigation) } : {}) } });
+  }
+
+  /** 由投诉开具 NCR（来源 CUSTOMER），关联到投诉 */
+  async createNcr(tx: Tx, user: CurrentUser, id: number, o: { severity?: string | null; qty?: number | null } = {}): Promise<Complaint> {
+    const c = await this.load(tx, id);
+    this.open(c);
+    if (c.ncr_id) throw new BizError('该投诉已关联 NCR');
+    const severity = o.severity || (c.is_adverse_event ? 'CRITICAL' : 'MAJOR');
+    if (!['MINOR', 'MAJOR', 'CRITICAL'].includes(severity)) throw new BizError('严重程度无效');
+    const ncr = await tx.ncr.create({
+      data: {
+        no: await this.numbering.nextNo(tx, 'NCR'), source: 'CUSTOMER', severity, status: 'OPEN', customer_id: c.customer_id,
+        material_id: c.material_id, lot_no: c.lot_no, sn: c.sn, qty: o.qty && o.qty > 0 ? o.qty : 1,
+        description: `客户投诉 ${c.no}${c.is_adverse_event ? '【不良事件】' : ''}：${c.description}`, created_by: user.username,
+      },
+    });
+    return tx.complaint.update({ where: { id }, data: { ncr_id: ncr.id, ...(c.status === 'OPEN' ? { status: 'INVESTIGATING' } : {}) } });
+  }
+
+  /** 由投诉发起 CAPA（来源 COMPLAINT），关联到投诉（及其 NCR） */
+  async createCapa(tx: Tx, user: CurrentUser, id: number, o: { title?: string | null } = {}): Promise<Complaint> {
+    const c = await this.load(tx, id);
+    this.open(c);
+    if (c.capa_id) throw new BizError('该投诉已关联 CAPA');
+    const cust = await tx.customer.findUnique({ where: { id: c.customer_id } });
+    const capa = await tx.capa.create({
+      data: {
+        no: await this.numbering.nextNo(tx, 'CAPA'), status: 'OPEN', source: 'COMPLAINT', created_by: user.username,
+        title: (text(o.title) ?? `客户投诉 ${c.no} 纠正预防`).slice(0, 128),
+        description: `来源：客户投诉 ${c.no}（${cust?.name ?? ''}）${c.is_adverse_event ? '【不良事件】' : ''}\n${c.description}`,
+      },
+    });
+    if (c.ncr_id) {
+      const ncr = await tx.ncr.findUnique({ where: { id: c.ncr_id } });
+      if (ncr && !ncr.capa_id) await tx.ncr.update({ where: { id: ncr.id }, data: { capa_id: capa.id } });
+    }
+    return tx.complaint.update({ where: { id }, data: { capa_id: capa.id, ...(c.status === 'OPEN' ? { status: 'INVESTIGATING' } : {}) } });
+  }
+
+  /** 关闭投诉：必须填写调查结论 + QA 电子签名（客诉关闭） */
+  async close(tx: Tx, user: CurrentUser, id: number, investigation: string | null | undefined, sig: SignatureDto | null | undefined): Promise<Complaint> {
+    const c = await this.load(tx, id);
+    if (c.status === 'CLOSED') throw new BizError('投诉已关闭');
+    if (c.status !== 'INVESTIGATING') throw new BizError('请先开始调查，调查完成后再关闭');
+    const inv = text(investigation) ?? c.investigation;
+    if (!inv) throw new BizError('请填写调查结论（原因分析、处理措施、是否需要上报）后再关闭');
+    await this.esign.sign(tx, user, sig, '客诉关闭', 'qms_complaint', c.id, c.no);
+    return tx.complaint.update({ where: { id }, data: { status: 'CLOSED', investigation: inv, closed_by: user.full_name, closed_at: new Date() } });
+  }
+
+  /** 序列化并补充关联名称 */
+  async enrich(tx: Tx, rows: Complaint[]): Promise<any[]> {
+    const ids = (f: (r: Complaint) => number | null | undefined) => [...new Set(rows.map(f).filter((x): x is number => !!x))];
+    const [customers, materials, ncrs, capas] = await Promise.all([
+      tx.customer.findMany({ where: { id: { in: ids((r) => r.customer_id) } } }),
+      tx.material.findMany({ where: { id: { in: ids((r) => r.material_id) } } }),
+      tx.ncr.findMany({ where: { id: { in: ids((r) => r.ncr_id) } } }),
+      tx.capa.findMany({ where: { id: { in: ids((r) => r.capa_id) } } }),
+    ]);
+    const c = new Map(customers.map((x) => [x.id, x]));
+    const m = new Map(materials.map((x) => [x.id, x]));
+    const n = new Map(ncrs.map((x) => [x.id, x]));
+    const k = new Map(capas.map((x) => [x.id, x]));
+    return rows.map((r) => {
+      const mat = r.material_id ? m.get(r.material_id) : null;
+      const ncr = r.ncr_id ? n.get(r.ncr_id) : null;
+      const capa = r.capa_id ? k.get(r.capa_id) : null;
+      return {
+        ...ser('Complaint', r),
+        customer_name: c.get(r.customer_id)?.name ?? null,
+        material_code: mat?.code ?? null,
+        material_name: mat?.name ?? null,
+        ncr_no: ncr?.no ?? null,
+        ncr_status: ncr?.status ?? null,
+        capa_no: capa?.no ?? null,
+        capa_status: capa?.status ?? null,
+      };
+    });
+  }
+}

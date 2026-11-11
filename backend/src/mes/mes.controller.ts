@@ -65,6 +65,39 @@ class DhrReleaseDto {
   @IsOptional() @IsObject() @ValidateNested() @Type(() => SignatureDto) signature?: SignatureDto;
 }
 
+/** 分批放行：序列号产品传 serials（为空 = 全部可放行，或用 qty 取前 N 台）；批量产品传 qty（为空 = 全部可放行数量） */
+class ReleaseBatchDto {
+  @IsOptional() @IsArray() @IsString({ each: true }) serials?: string[] | null;
+  @IsOptional() @IsNumber() @IsPositive() qty?: number | null;
+  @IsOptional() @IsBoolean() approve?: boolean = true;
+  @IsOptional() @IsString() reason?: string | null;
+  @IsOptional() @IsObject() @ValidateNested() @Type(() => SignatureDto) signature?: SignatureDto;
+}
+
+class ReworkRemovedDto {
+  @IsInt() material_id: number;
+  @IsOptional() @IsString() lot_no?: string | null;
+  @IsOptional() @IsString() part_sn?: string | null;
+  @IsOptional() @IsString() remark?: string | null;
+}
+
+class ReworkInstalledDto {
+  @IsInt() material_id: number;
+  @IsString() lot_no: string;
+  /** 不传 = 在该批次的合格库存中按先到期先出扣减 */
+  @IsOptional() @IsInt() location_id?: number | null;
+  @IsOptional() @IsNumber() @IsPositive() qty?: number | null;
+  @IsOptional() @IsString() part_sn?: string | null;
+  @IsOptional() @IsString() remark?: string | null;
+}
+
+class ReworkPartsDto {
+  @IsString() sn: string;
+  @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => ReworkRemovedDto) removed?: ReworkRemovedDto[] = [];
+  @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => ReworkInstalledDto) installed?: ReworkInstalledDto[] = [];
+  @IsOptional() @IsString() remark?: string | null;
+}
+
 const WO_FIELDS = ['material_id', 'planned_qty', 'customer_id', 'so_id', 'so_line_id', 'bom_id', 'routing_id', 'planned_start', 'planned_end', 'priority', 'remark'] as const;
 
 /** 请求体 → 工单字段（只取请求中出现的字段；日期转纯日期） */
@@ -100,7 +133,7 @@ export class MesController {
 
   // ---------- 生产工单 ----------
   @Get('work-orders')
-  list(@Query() q: Record<string, string>) {
+  async list(@Query() q: Record<string, string>) {
     const where: any = {};
     if (q.q) {
       where.OR = [{ no: like(q.q) }, { lot_no: like(q.q) }, { material: { code: like(q.q) } }, { material: { name: like(q.q) } }];
@@ -109,6 +142,15 @@ export class MesController {
     if (q.material_id) where.material_id = Number(q.material_id);
     if (q.customer_id) where.customer_id = Number(q.customer_id);
     if (q.dhr_status) where.dhr_status = q.dhr_status;
+    if (q.releasable === '1' || q.releasable === 'true') {
+      // 有已入库、尚未放行（也未拒绝）成品的工单（分批放行待办）
+      const rows = await this.db.client.$queryRaw<{ id: number }[]>`
+        SELECT w.id FROM mes_work_order w
+        WHERE w.dhr_status = 'OPEN' AND w.status IN ('IN_PROGRESS', 'COMPLETED')
+          AND w.received_qty - w.released_qty
+              - COALESCE((SELECT SUM(r.qty) FROM mes_product_release r WHERE r.wo_id = w.id AND r.status = 'REJECTED'), 0) > 0.00001`;
+      where.id = { in: rows.map((r) => r.id) };
+    }
     return paginate(this.db.client.workOrder, 'WorkOrder', { where, orderBy: { id: 'desc' } }, q);
   }
 
@@ -172,9 +214,9 @@ export class MesController {
   @Get('work-orders/:id/serials')
   async serials(@Param('id', ParseIntPipe) id: number, @Query('status') status?: string) {
     const rows = await this.db.client.serialNumber.findMany({
-      where: { wo_id: id, ...(status ? { status } : {}) }, orderBy: { sn: 'asc' }, include: inc('SerialNumber'),
+      where: { wo_id: id, ...(status ? { status } : {}) }, orderBy: { sn: 'asc' }, include: { ...inc('SerialNumber'), release: true },
     });
-    return serList('SerialNumber', rows);
+    return rows.map((r) => ({ ...ser('SerialNumber', r), release_no: r.release?.no ?? null, release_status: r.release?.status ?? null }));
   }
 
   @Get('work-orders/:id/records')
@@ -199,6 +241,13 @@ export class MesController {
         sn: b.sn, seq: b.seq, result: b.result, values: b.values, equipment_id: b.equipment_id, remark: b.remark, key_parts: b.key_parts,
       }),
     );
+  }
+
+  /** 返工换件登记：拆下/装上零件（装上件从合格库存补领，流水 REWORK_ISSUE 关联 NCR） */
+  @Post('mes/rework-parts')
+  @Perms('mes')
+  reworkParts(@Body() b: ReworkPartsDto, @User() user: CurrentUser) {
+    return this.db.tx((tx) => this.svc.reworkParts(tx, user, { sn: b.sn, removed: b.removed, installed: b.installed, remark: b.remark }));
   }
 
   @Post('work-orders/:id/report-batch')
@@ -234,6 +283,31 @@ export class MesController {
     return this.db.tx(async (tx) => {
       await this.svc.releaseDhr(tx, user, id, b.approve !== false, b.signature, b.reason);
       return this.woOut(tx, id);
+    });
+  }
+
+  /** 放行批记录（分批放行 / 整单放行 / 拒绝），含序列号清单 */
+  @Get('work-orders/:id/releases')
+  async releases(@Param('id', ParseIntPipe) id: number) {
+    await this.wo(this.db.client, id);
+    return (await this.svc.releaseList(this.db.client, id)).map((r) => ({ ...ser('ProductRelease', r), sn_list: r.sn_list }));
+  }
+
+  /** 放行概况：已入库 / 已放行 / 已拒绝 / 可放行数量与可放行序列号 */
+  @Get('work-orders/:id/releasable')
+  releasable(@Param('id', ParseIntPipe) id: number) {
+    return this.svc.releaseSummary(this.db.client, id);
+  }
+
+  /** DHR 分批放行（QA 电子签名“产品放行（分批）”） */
+  @Post('work-orders/:id/releases')
+  @Perms('qa')
+  releaseBatch(@Param('id', ParseIntPipe) id: number, @Body() b: ReleaseBatchDto, @User() user: CurrentUser) {
+    if (b.signature && b.reason && !b.signature.reason) b.signature.reason = b.reason;
+    return this.db.tx(async (tx) => {
+      const r = await this.svc.releaseBatch(tx, user, id, { serials: b.serials, qty: b.qty, approve: b.approve !== false, reason: b.reason, sig: b.signature });
+      const rel = await tx.productRelease.findUniqueOrThrow({ where: { id: r.release.id }, include: inc('ProductRelease') });
+      return { ...r, release: { ...ser('ProductRelease', rel), sn_list: r.release.sn_list } };
     });
   }
 }

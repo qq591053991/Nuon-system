@@ -216,6 +216,36 @@ export async function seedBase(db: PrismaService): Promise<SeedContext> {
         });
       }
     }
+
+    // 汇率（评审 P0-3：多币别折算本位币）：1 USD = 7.10 CNY，几天前生效
+    if (!(await tx.exchangeRate.findFirst({ where: { currency: 'USD' } }))) {
+      await tx.exchangeRate.create({ data: { currency: 'USD', rate: 7.1, effective_date: addDays(t, -5), remark: '示例汇率（月初中间价）', created_by: 'system' } });
+    }
+
+    // 账号安全（评审 P1-11 / P0-4）：预置账号记为刚设置密码（密码有效期从此起算）；产线操作员分配工牌与工位 PIN
+    await tx.user.updateMany({
+      where: { username: { in: USERS.map(([u]) => u) }, created_by: 'system', auth_source: 'LOCAL', password_changed_at: null },
+      data: { password_changed_at: new Date() },
+    });
+    for (const [username, badge, pin] of [['op1', 'E1001', '1234'], ['op2', 'E1002', '5678']]) {
+      const u = await tx.user.findUnique({ where: { username } });
+      if (!u || u.badge_no || u.pin_hash || (await tx.user.findUnique({ where: { badge_no: badge } }))) continue;
+      await tx.user.update({ where: { id: u.id }, data: { badge_no: badge } });
+      // PIN 哈希直接写库，不进入审计追踪内容
+      await tx.$executeRaw`UPDATE "sys_user" SET "pin_hash" = ${hashPassword(pin)} WHERE "id" = ${u.id}`;
+    }
+
+    // 人员上岗资质（评审 P1-7）：产线操作员 op1、op2 已培训考核合格，可在全部工序（*）上岗
+    for (const username of ['op1', 'op2']) {
+      const u = await tx.user.findUnique({ where: { username } });
+      if (!u || (await tx.qualification.findFirst({ where: { user_id: u.id, op_code: '*' } }))) continue;
+      await tx.qualification.create({
+        data: {
+          user_id: u.id, op_code: '*', level: 'QUALIFIED', certified_at: addDays(t, -30), expires_at: addDays(t, 335),
+          trainer: '赵QA', certificate: `TR-2026-${username.toUpperCase()}`, remark: '上岗培训考核合格（全部工序）', created_by: 'system',
+        },
+      });
+    }
     return { m, eq, customers: [c1, c2, c3] };
   });
 }

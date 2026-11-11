@@ -58,7 +58,7 @@ describe('金蝶云星空账号登录', () => {
   const asToken = (tok: string) => ({ Authorization: `Bearer ${tok}` });
 
   test('金蝶账号首次登录自动开通；未分配角色不能访问业务数据；分配角色后可用', async () => {
-    expect((await request(t.app.getHttpServer()).get('/api/auth/options')).body).toEqual({ kingdee_enabled: true, kingdee_name: '金蝶云星空' });
+    expect((await request(t.app.getHttpServer()).get('/api/auth/options')).body).toMatchObject({ kingdee_enabled: true, kingdee_name: '金蝶云星空' });
     const r = await login('zhangsan', 'Kd@123456');
     expect(r.status).toBe(200);
     expect(r.body.user).toMatchObject({ username: 'zhangsan', full_name: '张三', roles: [], auth_source: 'KINGDEE' });
@@ -87,6 +87,8 @@ describe('金蝶云星空账号登录', () => {
   });
 
   test('金蝶密码错误、连续失败锁定、登录审计', async () => {
+    // 锁定状态存数据库（按本系统账号记录）：先首次登录开通账号
+    expect((await login('zhangsan', 'Kd@123456')).status).toBe(200);
     let r = await login('zhangsan', 'wrong');
     expect(r.status).toBe(401);
     expect(r.body.detail).toBe('金蝶云星空：用户名或密码错误！');

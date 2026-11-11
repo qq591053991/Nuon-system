@@ -35,12 +35,21 @@ describe('主数据与工程数据', () => {
     });
     expect(r.status).toBe(400);
     expect(r.body.detail).toBe('BOM 组件不能是父项自身');
-    // 发布需要电子签名
-    r = await api.as('engineer').post(`/api/boms/${bom.id}/release`, { signature: { password: 'bad' } });
+    // 工程师提交需要电子签名（编制）；首版之后的版本须填写变更原因
+    r = await api.as('engineer').post(`/api/boms/${bom.id}/submit`, { signature: { password: 'bad' }, change_reason: '更换 LED 供应商' });
     expect(r.status).toBe(400);
-    bom = await api.as('engineer').ok('post', `/api/boms/${bom.id}/release`, { signature: SIG });
+    r = await api.as('engineer').post(`/api/boms/${bom.id}/submit`, { signature: SIG });
+    expect(r.body.detail).toContain('变更原因');
+    bom = await api.as('engineer').ok('post', `/api/boms/${bom.id}/submit`, { signature: SIG, change_reason: '更换 LED 供应商' });
+    expect([bom.status, bom.submitted_by, bom.change_reason]).toEqual(['SUBMITTED', '吴工艺', '更换 LED 供应商']);
+    // 待批准状态只读；工程师、厂长都不能批准（质量签名只限 QA）
+    r = await api.as('engineer').put(`/api/boms/${bom.id}`, { material_id: ref.m['FG-BL100'], version: 'A1', lines: [] });
+    expect(r.body.detail).toContain('待 QA 批准');
+    expect((await api.as('engineer').post(`/api/boms/${bom.id}/approve`, { signature: SIG })).status).toBe(403);
+    expect((await api.as('manager').post(`/api/boms/${bom.id}/approve`, { signature: SIG })).status).toBe(403);
+    bom = await api.as('qa').ok('post', `/api/boms/${bom.id}/approve`, { signature: SIG });
     expect(bom.status).toBe('RELEASED');
-    expect(bom.released_by).toBe('吴工艺');
+    expect(bom.released_by).toBe('赵QA');
     expect(bom.effective_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     const old = (await api.ok('get', '/api/boms', { material_id: ref.m['FG-BL100'], status: 'OBSOLETE' })).items;
     expect(old.length).toBeGreaterThan(0);
@@ -64,10 +73,10 @@ describe('主数据与工程数据', () => {
     const logs = (await api.ok('get', '/api/system/audit-logs', { entity: 'eng_bom', entity_id: bom.id })).items;
     const actions = new Set(logs.map((l: any) => l.action));
     expect(actions.has('CREATE') && actions.has('UPDATE')).toBe(true);
-    expect(logs.every((l: any) => l.username === 'engineer')).toBe(true);
-    const sig = (await api.ok('get', '/api/system/esignatures', { entity: 'eng_bom' })).items[0];
-    expect(sig.meaning).toBe('BOM发布批准');
-    expect(sig.doc_no).toBe('FG-BL100 A1');
+    expect([...new Set(logs.map((l: any) => l.username))].sort()).toEqual(['engineer', 'qa']);
+    const sigs = (await api.ok('get', '/api/system/esignatures', { entity: 'eng_bom' })).items;
+    expect(sigs.map((x: any) => [x.meaning, x.username])).toEqual([['BOM批准', 'qa'], ['BOM编制提交', 'engineer']]);
+    expect(sigs[0].doc_no).toBe('FG-BL100 A1');
     // 草稿可删除，已发布不可删除
     expect((await api.as('engineer').del(`/api/boms/${bom.id}`)).body.detail).toBe('只能删除草稿');
     await api.as('engineer').ok('delete', `/api/boms/${nb.id}`);
@@ -93,16 +102,21 @@ describe('主数据与工程数据', () => {
     const saved = await api.as('engineer').ok('put', `/api/routings/${nr.id}`, { material_id: ref.m['FG-BL100'], version: 'A1', operations: ops });
     expect(saved.operations[1].params[0].upper).toBe(999);
     expect(saved.operations[1].work_center_name).toBe('光学测试区');
-    r = await api.as('engineer').post(`/api/routings/${nr.id}/release`, {});
-    expect(r.body.detail).toBe('此操作需要电子签名（工艺路线发布批准），请输入密码确认');
-    const rel = await api.as('engineer').ok('post', `/api/routings/${nr.id}/release`, { signature: SIG });
+    r = await api.as('engineer').post(`/api/routings/${nr.id}/submit`, {});
+    expect(r.body.detail).toContain('变更原因');
+    r = await api.as('engineer').post(`/api/routings/${nr.id}/submit`, { change_reason: '光学测试上限放宽（ECN-002）' });
+    expect(r.body.detail).toBe('此操作需要电子签名（工艺路线编制提交），请输入密码确认');
+    const sub = await api.as('engineer').ok('post', `/api/routings/${nr.id}/submit`, { signature: SIG, change_reason: '光学测试上限放宽（ECN-002）' });
+    expect(sub.status).toBe('SUBMITTED');
+    expect((await api.ok('get', `/api/routings/${rt.id}`)).status).toBe('RELEASED'); // 批准前旧版本仍生效
+    const rel = await api.as('qa').ok('post', `/api/routings/${nr.id}/approve`, { signature: SIG });
     expect(rel.status).toBe('RELEASED');
     expect((await api.ok('get', `/api/routings/${rt.id}`)).status).toBe('OBSOLETE');
     r = await api.as('engineer').put(`/api/routings/${nr.id}`, { material_id: ref.m['FG-BL100'], version: 'A1', operations: ops });
     expect(r.body.detail).toBe('已发布的工艺路线不能修改，请升版');
     expect((await api.as('engineer').post(`/api/routings/${nr.id}/new-version`, { version: 'A0' })).body.detail).toBe('版本号已存在');
     const sig = (await api.ok('get', '/api/system/esignatures', { entity: 'eng_routing' })).items[0];
-    expect(sig.meaning).toBe('工艺路线发布批准');
+    expect(sig.meaning).toBe('工艺路线批准');
   });
 
   test('工艺发布不影响已下达工单的快照（test_routing_release_and_wo_snapshot，依赖 MES 工单接口）', async () => {
@@ -115,7 +129,8 @@ describe('主数据与工程数据', () => {
     const ops = (await api.ok('get', `/api/routings/${nr.id}`)).operations;
     ops[1].params[0].upper = 999;
     await api.as('engineer').ok('put', `/api/routings/${nr.id}`, { material_id: ref.m['FG-BL100'], version: 'A1', operations: ops });
-    await api.as('engineer').ok('post', `/api/routings/${nr.id}/release`, { signature: SIG });
+    await api.as('engineer').ok('post', `/api/routings/${nr.id}/submit`, { signature: SIG, change_reason: '放宽上限' });
+    await api.as('qa').ok('post', `/api/routings/${nr.id}/approve`, { signature: SIG });
     // 已下达工单的工序规格是快照，不受新版本影响
     wo = await api.ok('get', `/api/work-orders/${wo.id}`);
     expect(wo.operations[1].params[0].upper).toBe(470);

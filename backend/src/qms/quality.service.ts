@@ -3,7 +3,9 @@
  *
  * 导出方法（tx = 事务客户端；关联对象既可传 id 也可传带 id 的记录）：
  *   createIqc(tx, { receipt, line, material, username }): Promise<Inspection>
- *       为待检收货行创建 IQC 检验单（AQL 抽样方案 + 按物料类型的默认检验项目），并回写 receipt_line.inspection_id
+ *       为待检收货行创建 IQC 检验单（AQL 抽样方案 + 检验项目），并回写 receipt_line.inspection_id。
+ *       检验项目：物料已维护检验规范（qms_material_inspection_item 启用项，按 seq）则按规范，否则按物料类型的默认模板
+ *   iqcItemsFor(tx, material): Promise<{ name, standard, method }[]>   该物料 IQC 应检项目（规范优先，其次默认模板）
  *   submitInspection(tx, user, insp, { items, defect_qty, concession, remark, sig }): Promise<Inspection & { items }>
  *       提交检验结果：让步接收仅限 QA；电子签名；待检库存 → 合格/不合格；不合格或让步自动开具 NCR
  *   dispositionNcr(tx, user, ncr, disposition, remark, sig): Promise<Ncr>
@@ -37,7 +39,8 @@ export const DEFAULT_IQC_ITEMS: Record<string, [string, string][]> = {
   DEFAULT: [['外观', '无破损、无污渍'], ['规格核对', '与采购规格一致'], ['尺寸', '符合图纸']],
 };
 
-function itemsFor(m: Material): [string, string][] {
+/** 按物料类型的默认 IQC 检验项目（物料未维护检验规范时使用） */
+export function itemsFor(m: Material): [string, string][] {
   const code = (m.code || '').toUpperCase();
   if (code.startsWith('LED') || (m.wavelength_nm && m.category === 'RAW')) return DEFAULT_IQC_ITEMS.LED;
   if (code.startsWith('PSU')) return DEFAULT_IQC_ITEMS.PSU;
@@ -72,10 +75,20 @@ export class QualityService {
     private readonly esign: EsignService,
   ) {}
 
-  /** 为待检收货行创建 IQC 检验单（AQL 抽样方案 + 默认检验项目），并回写 receipt_line.inspection_id */
+  /** 物料的 IQC 检验项目：已维护检验规范（启用项，按序号）则按规范；否则按物料类型的默认模板 */
+  async iqcItemsFor(tx: Tx, material: Material): Promise<{ name: string; standard: string | null; method: string | null }[]> {
+    const spec = await tx.materialInspectionItem.findMany({
+      where: { material_id: material.id, is_active: true }, orderBy: [{ seq: 'asc' }, { id: 'asc' }],
+    });
+    if (spec.length) return spec.map((s) => ({ name: s.name, standard: s.standard ?? null, method: s.method ?? null }));
+    return itemsFor(material).map(([name, standard]) => ({ name, standard, method: null }));
+  }
+
+  /** 为待检收货行创建 IQC 检验单（AQL 抽样方案 + 检验规范/默认检验项目），并回写 receipt_line.inspection_id */
   async createIqc(tx: Tx, a: { receipt: Receipt; line: ReceiptLine; material: Material; username: string }): Promise<Inspection> {
     const { receipt, line, material } = a;
     const plan = samplingPlan(line.qty, material.aql || 1.0);
+    const items = await this.iqcItemsFor(tx, material);
     const insp = await tx.inspection.create({
       data: {
         no: await this.numbering.nextNo(tx, 'IQC'), insp_type: 'IQC', material_id: material.id, lot_no: line.lot_no,
@@ -83,7 +96,7 @@ export class QualityService {
         receipt_line_id: line.id, supplier_id: receipt.supplier_id ?? null, lot_qty: line.qty, aql: plan.aql,
         code_letter: plan.code_letter, sample_size: plan.sample_size, accept_num: plan.accept_num, reject_num: plan.reject_num,
         status: 'PENDING', created_by: a.username,
-        items: { create: itemsFor(material).map(([name, standard]) => ({ name, standard, result: 'PASS' })) },
+        items: { create: items.map(({ name, standard }) => ({ name, standard, result: 'PASS' })) },
       },
     });
     await tx.receiptLine.update({ where: { id: line.id }, data: { inspection_id: insp.id } });

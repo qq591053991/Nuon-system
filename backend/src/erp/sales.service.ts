@@ -4,7 +4,8 @@ import type { Prisma } from '@prisma/client';
 import type { CurrentUser } from '../common/context';
 import { dateOnly, today } from '../common/dates';
 import { BizError, NotFound } from '../common/errors';
-import { round, round2 } from '../common/num';
+import { lineAmount, MoneySum, price6 } from '../common/money';
+import { round } from '../common/num';
 import { inList, like, paginate } from '../common/paginate';
 import { inc, ser, serList } from '../common/presenter';
 import { PrismaService, type Tx } from '../common/prisma.service';
@@ -23,21 +24,21 @@ export class SalesService {
   private async soLines(tx: Tx, customerId: number, lines: SoLineDto[]) {
     if (!lines?.length) throw new BizError('请至少录入一行订单明细');
     const out: Prisma.SalesOrderLineUncheckedCreateWithoutOrderInput[] = [];
-    let total = 0;
+    const total = new MoneySum();
     for (const [i, ln] of lines.entries()) {
       const m = await tx.material.findUnique({ where: { id: ln.material_id } });
       if (!m) throw new NotFound('物料');
       if (!['FINISHED', 'SEMI'].includes(m.category)) throw new BizError(`${m.code} 不是成品/半成品，不能销售`);
       if (m.customer_id && m.customer_id !== customerId) throw new BizError(`${m.code} 是其他品牌客户的产品（代工产品只能卖给注册人/品牌方）`);
-      const price = ln.unit_price ?? 0;
-      const amount = round2(ln.qty * price);
-      total += amount;
+      const price = price6(ln.unit_price ?? 0);
+      const amount = lineAmount(ln.qty, price);
+      total.add(amount);
       out.push({
         line_no: i + 1, material_id: m.id, qty: ln.qty, unit_price: price, amount,
         delivery_date: dateOnly(ln.delivery_date), remark: ln.remark ?? null,
       });
     }
-    return { lines: out, total: round2(total) };
+    return { lines: out, total: total.value };
   }
 
   private async checkCustomer(tx: Tx, id: number) {

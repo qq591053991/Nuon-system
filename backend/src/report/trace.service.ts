@@ -8,6 +8,7 @@ import { BizError } from '../common/errors';
 import { round } from '../common/num';
 import { like } from '../common/paginate';
 import type { Tx } from '../common/prisma.service';
+import { keyPartRows } from '../mes/key-parts';
 
 const partnerName = (rc: { supplier?: { name: string } | null; customer?: { name: string } | null }) =>
   rc.supplier ? rc.supplier.name : rc.customer?.name ?? null;
@@ -47,7 +48,7 @@ export class TraceService {
   }
 
   async traceSerial(tx: Tx, snText: string) {
-    const sn = await tx.serialNumber.findUnique({ where: { sn: (snText || '').trim() } });
+    const sn = await tx.serialNumber.findUnique({ where: { sn: (snText || '').trim() }, include: { release: true } });
     if (!sn) throw new BizError(`序列号 ${snText} 不存在`);
     const wo = await tx.workOrder.findUniqueOrThrow({
       where: { id: sn.wo_id }, include: { material: true, customer: true, sales_order: true, bom: true, routing: true },
@@ -55,20 +56,29 @@ export class TraceService {
     const recs = await tx.operationRecord.findMany({
       where: { sn_id: sn.id }, orderBy: { id: 'asc' }, include: { equipment: true, values: { orderBy: { id: 'asc' } } },
     });
-    const kps = await tx.keyPartBinding.findMany({ where: { sn_id: sn.id }, orderBy: { id: 'asc' }, include: { material: true } });
+    // 关键件：装配绑定 + 返工换件（拆下/装上，关联 NCR）
+    const kps = await keyPartRows(tx, { sn_id: sn.id });
     const sh = sn.shipment_id
       ? await tx.shipment.findUnique({ where: { id: sn.shipment_id }, include: { customer: true, sales_order: true } })
       : null;
     const ncrs = await tx.ncr.findMany({ where: { sn: sn.sn }, orderBy: { id: 'asc' } });
     return {
-      serial: { sn: sn.sn, udi: sn.udi, status: sn.status, lot_no: sn.lot_no, completed_at: sn.completed_at, shipped_at: sn.shipped_at },
+      serial: {
+        sn: sn.sn, udi: sn.udi, status: sn.status, lot_no: sn.lot_no, completed_at: sn.completed_at, shipped_at: sn.shipped_at,
+        // 放行批（DHR 分批放行）：release_status = RELEASED 才能发货
+        release_no: sn.release?.no ?? null, release_status: sn.release?.status ?? null,
+        released_at: sn.release?.released_at ?? null, released_by: sn.release?.released_by ?? null,
+      },
       product: { code: wo.material.code, name: wo.material.name, model: wo.material.model, registration_no: wo.material.registration_no },
       work_order: {
         id: wo.id, no: wo.no, lot_no: wo.lot_no, customer_name: wo.customer?.name ?? null, so_no: wo.sales_order?.no ?? null,
         dhr_status: wo.dhr_status, bom_version: wo.bom?.version ?? null, routing_version: wo.routing?.version ?? null,
       },
       materials: await this.woMaterials(tx, wo.id),
-      key_parts: kps.map((k) => ({ material_code: k.material.code, material_name: k.material.name, lot_no: k.lot_no, part_sn: k.part_sn, ts: k.ts })),
+      key_parts: kps.map((k) => ({
+        material_code: k.material_code, material_name: k.material_name, lot_no: k.lot_no, part_sn: k.part_sn, ts: k.ts,
+        action: k.action, action_text: k.action_text, ncr_no: k.ncr_no, operator_name: k.operator_name, remark: k.remark,
+      })),
       records: recs.map((r) => ({
         ts: r.ts, seq: r.seq, op_name: r.op_name, result: r.result, operator_name: r.operator_name,
         equipment_code: r.equipment?.code ?? null, is_rework: r.is_rework,
@@ -109,9 +119,20 @@ export class TraceService {
     for (const wo of await tx.workOrder.findMany({ where: { material_id: m.id, lot_no: lotNo }, orderBy: { id: 'asc' } })) {
       if (!woIds.has(wo.id)) woIds.set(wo.id, 0);
     }
-    const kpSns = new Set(
-      (await tx.keyPartBinding.findMany({ where: { material_id: m.id, lot_no: lotNo }, select: { sn_id: true } })).map((k) => k.sn_id),
+    // 返工换件补领（REWORK_ISSUE，关联 NCR → 工单）
+    const reworkMoves = await tx.stockMove.findMany({ where: { material_id: m.id, lot_no: lotNo, move_type: 'REWORK_ISSUE', ref_type: 'NCR' }, orderBy: { id: 'asc' } });
+    const reworkNcrIds = [...new Set(reworkMoves.map((mv) => mv.ref_id).filter((x): x is number => !!x))];
+    const ncrWo = new Map(
+      (reworkNcrIds.length ? await tx.ncr.findMany({ where: { id: { in: reworkNcrIds } }, select: { id: true, wo_id: true } }) : []).map((n) => [n.id, n.wo_id]),
     );
+    for (const mv of reworkMoves) {
+      const wid = mv.ref_id ? ncrWo.get(mv.ref_id) : null;
+      if (wid) woIds.set(wid, round((woIds.get(wid) ?? 0) + mv.qty, 4));
+    }
+    // 关键件：装配绑定/返工装上 = 该台含此批次；返工拆下 = 已从该台拆除
+    const kpRows = await tx.keyPartBinding.findMany({ where: { material_id: m.id, lot_no: lotNo }, select: { sn_id: true, action: true } });
+    const kpSns = new Set(kpRows.filter((k) => k.action !== 'REMOVE').map((k) => k.sn_id));
+    const kpRemoved = new Set(kpRows.filter((k) => k.action === 'REMOVE').map((k) => k.sn_id));
     const shipments = new Map<number, any>();
     const getShipment = async (id: number) => {
       if (!shipments.has(id)) shipments.set(id, await tx.shipment.findUnique({ where: { id }, include: { customer: true } }));
@@ -132,7 +153,7 @@ export class TraceService {
         const customerName: string | null = sh ? sh.customer?.name ?? null : null;
         if (sh) customers.set(customerName, (customers.get(customerName) ?? 0) + 1);
         serials.push({
-          sn: s.sn, wo_no: wo.no, status: s.status, key_part_bound: kpSns.has(s.id),
+          sn: s.sn, wo_no: wo.no, status: s.status, key_part_bound: kpSns.has(s.id), key_part_removed: kpRemoved.has(s.id),
           shipment_no: sh?.no ?? null, customer_name: customerName, ship_date: sh?.ship_date ?? null,
         });
       }

@@ -6,6 +6,7 @@ import { isValidGtin } from '../core/udi';
 import { BomController } from './bom.controller';
 import { CalibrationController } from './calibration.controller';
 import { EngineeringService } from './engineering.service';
+import { ExchangeRateCrudController } from './exchange-rate.crud';
 import { RoutingController } from './routing.controller';
 
 /** 主数据：通用 CRUD */
@@ -19,6 +20,7 @@ const crud = [
       if (m.gtin && !isValidGtin(m.gtin)) throw new BizError('UDI-DI（GTIN）校验位错误，请检查');
       if (m.category === 'FINISHED' && m.owner_customer_id) throw new BizError('成品不能设置为客供料');
       if (m.serial_control && !['FINISHED', 'SEMI'].includes(m.category ?? 'RAW')) throw new BizError('只有成品/半成品可以启用序列号管理');
+      if (m.purchase_factor !== undefined && m.purchase_factor !== null && !(Number(m.purchase_factor) > 0)) throw new BizError('采购单位换算率必须大于 0');
     },
   }),
   crudController({ model: 'WorkCenter', prefix: 'work-centers', perm: 'master', label: '工作中心' }),
@@ -33,6 +35,7 @@ const crud = [
   }),
   crudController({ model: 'Warehouse', prefix: 'warehouses', perm: 'master', label: '仓库', filters: ['warehouse_type', 'is_active'], orderBy: { code: 'asc' } }),
   crudController({ model: 'Location', prefix: 'locations', perm: 'master', label: '库位', filters: ['warehouse_id', 'location_type', 'is_active'], orderBy: { code: 'asc' } }),
+  ExchangeRateCrudController,
 ];
 
 // 设备校准、BOM、工艺路线控制器在本目录其他文件中实现，并加入下方 controllers

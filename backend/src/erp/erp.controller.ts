@@ -158,8 +158,15 @@ export class FinanceController {
     return this.svc.addPayment(id, body, user);
   }
 
+  /** 账龄汇总：按往来单位 + 币别，另给本位币合计 */
   @Get('summary')
   summary() {
     return this.svc.summary();
+  }
+
+  /** 本位币与当前适用汇率 */
+  @Get('currencies')
+  currencies() {
+    return this.svc.currencies();
   }
 }

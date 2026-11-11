@@ -3,17 +3,19 @@
  * 测试数据自动判定、不合格自动开 NCR）、完工入库、DHR 汇编与产品放行。
  */
 import { Injectable } from '@nestjs/common';
-import type { Equipment, SerialNumber, WorkOrder, WorkOrderOperation } from '@prisma/client';
+import type { Equipment, Ncr, ProductRelease, SerialNumber, WorkOrder, WorkOrderOperation } from '@prisma/client';
 import type { CurrentUser } from '../common/context';
 import { addDays, fmtDate, today } from '../common/dates';
 import { BizError, NotFound } from '../common/errors';
 import { EPS, g, round } from '../common/num';
 import type { Tx } from '../common/prisma.service';
+import { config } from '../config';
 import { releasedBom, releasedRouting } from '../core/engineering';
 import { EsignService, type SignatureDto } from '../core/esign.service';
-import { InventoryService, type Ref } from '../core/inventory.service';
+import { InventoryService, STATUS_TEXT as STOCK_STATUS_TEXT, type Ref } from '../core/inventory.service';
 import { NumberingService } from '../core/numbering.service';
 import { buildUdi } from '../core/udi';
+import { keyPartRows } from './key-parts';
 
 export const DISCRETE_UOM = new Set(['PCS', 'PC', 'EA', 'SET', '个', '台', '只', '套', '片', '件', '张', '根', '块', '颗', '盒', '本']);
 export const OP_TYPE_TEXT: Record<string, string> = {
@@ -44,6 +46,22 @@ export interface ReportBatchArgs {
   equipment_id?: number | null;
   remark?: string | null;
 }
+
+/** 返工换件：拆下的零件（批号/部件序列号可选，用于记录拆下的是哪一个） */
+export interface ReworkRemovedInput { material_id: number; lot_no?: string | null; part_sn?: string | null; remark?: string | null }
+/** 返工换件：装上的零件（从合格库存补领；未指定库位时按 FEFO 在该批次的合格库存中扣减） */
+export interface ReworkInstalledInput {
+  material_id: number;
+  lot_no: string;
+  location_id?: number | null;
+  qty?: number | null;
+  part_sn?: string | null;
+  remark?: string | null;
+}
+export interface ReworkPartsArgs { sn: string; removed?: ReworkRemovedInput[] | null; installed?: ReworkInstalledInput[] | null; remark?: string | null }
+
+/** 分批放行：序列号产品按序列号（为空 = 全部可放行；或按 qty 取前 N 台），批量产品按数量（为空 = 全部可放行数量） */
+export interface ReleaseBatchArgs { serials?: string[] | null; qty?: number | null; approve: boolean; reason?: string | null; sig: SignatureDto | null | undefined }
 
 /** 需求数量取整：离散计量单位向上取整，其余保留 4 位 */
 export function roundReq(qty: number, uom: string | null | undefined): number {
@@ -202,6 +220,23 @@ export class ProductionService {
     return eq;
   }
 
+  /**
+   * 人员上岗资质（GMP：人员经培训考核合格后上岗）：报工人须持有该工序代码（或 *）的有效资质——
+   * 启用、已生效、未过期，且等级不是“培训中”。可用环境变量 REQUIRE_QUALIFICATION=0 关闭。
+   */
+  async checkQualification(tx: Tx, user: CurrentUser, op: { code: string; name: string }) {
+    if (!config.requireQualification) return;
+    const t = today().getTime();
+    const rows = await tx.qualification.findMany({ where: { user_id: user.id, is_active: true, op_code: { in: [op.code, '*'] } } });
+    const effective = rows.filter((q) => q.certified_at.getTime() <= t && (!q.expires_at || q.expires_at.getTime() >= t));
+    if (effective.some((q) => q.level !== 'TRAINEE')) return;
+    const label = `${op.code} ${op.name}`;
+    if (effective.length) throw new BizError(`您在工序【${label}】仍为培训期，尚未取得独立上岗资质，请完成考核后由质量部登记`);
+    const expired = rows.filter((q) => q.expires_at && q.expires_at.getTime() < t).sort((a, b) => b.expires_at!.getTime() - a.expires_at!.getTime())[0];
+    if (expired) throw new BizError(`您的工序【${label}】上岗资质已于 ${fmtDate(expired.expires_at)} 过期，请联系质量部重新培训考核`);
+    throw new BizError(`您尚未取得工序【${label}】的上岗资质，请联系质量部培训考核`);
+  }
+
   /** 已领用（过账）到工单的某物料批次 */
   private async issuedLots(tx: Tx, woId: number, materialId: number): Promise<Set<string>> {
     const rows = await tx.materialIssueLine.findMany({
@@ -245,6 +280,7 @@ export class ProductionService {
       const cur = ops.find((o) => o.seq === a.seq);
       throw new BizError(`防呆拦截：${sn.sn} 的下一道工序是【${op.seq} ${op.name}】，当前工位【${cur ? cur.name : a.seq}】不能报工（禁止跳站/重复过站）`);
     }
+    await this.checkQualification(tx, user, op);
     const eq = await this.checkEquipment(tx, op, a.equipment_id);
     const params = opParams(op);
     const judged = params.length ? judge(params, a.values || {}) : [];
@@ -326,6 +362,7 @@ export class ProductionService {
     const idx = ops.findIndex((o) => o.seq === a.seq);
     if (idx < 0) throw new BizError('工序不存在');
     const op = ops[idx];
+    await this.checkQualification(tx, user, op);
     const upstream = idx === 0 ? wo.planned_qty : ops[idx - 1].good_qty;
     const avail = round(upstream - (op.good_qty || 0) - (op.ng_qty || 0), 4);
     if (good + ng > avail + EPS) throw new BizError(`报工数量超出：工序【${op.name}】可报数量 ${g(avail)}`);
@@ -383,6 +420,8 @@ export class ProductionService {
     });
     const openNcr = await tx.ncr.findFirst({ where: { sn: sn.sn, status: 'OPEN' }, orderBy: { id: 'asc' } });
     const kpm = nxt?.key_part_material_id ? await tx.material.findUnique({ where: { id: nxt.key_part_material_id } }) : null;
+    const reworkNcr = this.underRework(sn) ? await this.reworkNcr(tx, sn) : null;
+    const reworkOp = reworkNcr ? ops.find((o) => o.seq === sn.ng_seq) : null;
     const p = wo.material;
     return {
       sn: sn.sn, udi: sn.udi, status: sn.status, lot_no: sn.lot_no, last_seq: sn.last_seq,
@@ -392,11 +431,122 @@ export class ProductionService {
       next_operation: opDict(nxt),
       key_part_material: kpm ? { id: kpm.id, code: kpm.code, name: kpm.name } : null,
       open_ncr: openNcr?.no ?? null,
+      /** 返工中（NCR 处置为返工、尚未重新测试通过）：可登记返工换件 */
+      rework: reworkNcr
+        ? {
+            ncr_id: reworkNcr.id, ncr_no: reworkNcr.no, ng_seq: sn.ng_seq, op_name: reworkOp?.name ?? reworkNcr.op_name,
+            description: reworkNcr.description, disposition_remark: reworkNcr.disposition_remark,
+          }
+        : null,
+      /** 关键件绑定与返工换件记录（BIND/REMOVE/INSTALL） */
+      key_parts: await keyPartRows(tx, { sn_id: sn.id }),
       history: recs.map((r) => ({
         ts: r.ts, seq: r.seq, op_name: r.op_name, result: r.result, operator_name: r.operator_name,
         equipment_code: r.equipment?.code ?? null, is_rework: r.is_rework,
         values: r.values.map((v) => ({ name: v.name, value: v.value, unit: v.unit, result: v.result })),
       })),
+    };
+  }
+
+  // ---------------- 返工换件 ----------------
+  /** 返工中：NCR 处置为返工后（ng_seq 保留、状态回到在制），在重新通过该工序之前 */
+  underRework(sn: SerialNumber): boolean {
+    return sn.ng_seq !== null && sn.ng_seq !== undefined && sn.status === 'IN_PROCESS';
+  }
+
+  /** 该序列号最近一张“返工”处置的 NCR */
+  reworkNcr(tx: Tx, sn: SerialNumber): Promise<Ncr | null> {
+    return tx.ncr.findFirst({ where: { sn: sn.sn, disposition: 'REWORK', status: { in: ['DISPOSITIONED', 'CLOSED'] } }, orderBy: { id: 'desc' } });
+  }
+
+  /**
+   * 返工换件登记（单台追溯）：拆下的零件记 REMOVE；装上的零件记 INSTALL，并从合格库存补领（REWORK_ISSUE，关联 NCR）——
+   * 批次须为合格状态、未过期、不在不合格品区，客供料只能用于该客户的工单；物料在工单 BOM 中时累加工单已领数量。
+   */
+  async reworkParts(tx: Tx, user: CurrentUser, a: ReworkPartsArgs) {
+    const found = await this.getSn(tx, a.sn);
+    const wo = await this.getWo(tx, found.wo_id, true);
+    const sn = (await tx.serialNumber.findUnique({ where: { id: found.id } }))!;
+    if (!this.underRework(sn)) {
+      throw new BizError(`${sn.sn} 不在返工中：只有 NCR 处置为“返工”、尚未重新通过不合格工序的产品才能登记返工换件`);
+    }
+    if (!ACTIVE.includes(wo.status)) throw new BizError(`工单 ${wo.no} 状态为【${wo.status}】，不能登记返工换件`);
+    const ncr = await this.reworkNcr(tx, sn);
+    if (!ncr) throw new BizError(`未找到 ${sn.sn} 的返工处置 NCR，请先由 QA 评审处置为“返工”`);
+    const removed = (a.removed ?? []).filter(Boolean);
+    const installed = (a.installed ?? []).filter(Boolean);
+    if (!removed.length && !installed.length) throw new BizError('请登记拆下或装上的零件');
+    const now = new Date();
+    const clean = (v?: string | null) => (v && v.trim() ? v.trim() : null);
+    const note = (r?: string | null) => [clean(r), clean(a.remark)].filter(Boolean).join('；') || null;
+    const created: number[] = [];
+
+    for (const r of removed) {
+      const m = await tx.material.findUnique({ where: { id: r.material_id } });
+      if (!m) throw new NotFound('物料');
+      const kp = await tx.keyPartBinding.create({
+        data: {
+          ts: now, sn_id: sn.id, material_id: m.id, lot_no: clean(r.lot_no), part_sn: clean(r.part_sn), operator: user.username,
+          action: 'REMOVE', ncr_id: ncr.id, remark: note(r.remark),
+        },
+      });
+      created.push(kp.id);
+    }
+
+    const ref: Ref = { ref_type: 'NCR', ref_id: ncr.id, ref_no: ncr.no, username: user.username, remark: `返工换件 ${sn.sn}（工单 ${wo.no}）` };
+    const t = today().getTime();
+    for (const r of installed) {
+      const m = await tx.material.findUnique({ where: { id: r.material_id } });
+      if (!m) throw new NotFound('物料');
+      const lot = (r.lot_no || '').trim();
+      if (!lot && m.lot_control) throw new BizError(`请扫描装上零件 ${m.code} 的批号`);
+      const qty = r.qty === null || r.qty === undefined ? 1 : Number(r.qty);
+      if (!(qty > 0)) throw new BizError(`${m.code} 数量必须大于 0`);
+      if (m.owner_customer_id && m.owner_customer_id !== wo.customer_id) throw new BizError(`${m.code} 为其他客户的客供料，不能用于本工单`);
+      const rows = await tx.stock.findMany({
+        where: { material_id: m.id, lot_no: lot, qty: { gt: EPS }, ...(r.location_id ? { location_id: r.location_id } : {}) },
+        include: { location: true },
+        orderBy: { id: 'asc' },
+      });
+      if (!rows.length) throw new BizError(`批次 ${lot || '-'} 没有 ${m.code} 的库存${r.location_id ? '（所选库位）' : ''}`);
+      const ok = rows.filter((s) => s.status === 'AVAILABLE');
+      if (!ok.length) {
+        throw new BizError(`批次 ${lot} 质量状态为【${[...new Set(rows.map((s) => s.status))].map((x) => STOCK_STATUS_TEXT[x] ?? x).join('/')}】，不能用于返工`);
+      }
+      const ownerOk = ok.filter((s) => s.owner_customer_id === null || s.owner_customer_id === wo.customer_id);
+      if (!ownerOk.length) throw new BizError(`批次 ${lot} 为其他客户的客供料，不能用于本工单`);
+      const notRej = ownerOk.filter((s) => s.location.location_type !== 'REJECT');
+      if (!notRej.length) throw new BizError(`批次 ${lot} 位于不合格品区，不能使用`);
+      const fresh = notRej.filter((s) => !s.expiry_date || s.expiry_date.getTime() >= t);
+      if (!fresh.length) throw new BizError(`批次 ${lot} 已过期（${fmtDate(notRej[0].expiry_date)}），禁止使用`);
+      // 指定库位：只从该库位扣；否则按先到期先出在该批次的合格库存中扣减
+      fresh.sort((x, y) => (x.expiry_date?.getTime() ?? Infinity) - (y.expiry_date?.getTime() ?? Infinity) || x.id - y.id);
+      const have = round(fresh.reduce((s, x) => s + x.qty, 0));
+      if (have + EPS < qty) throw new BizError(`库存不足：${m.code} 批次 ${lot} 合格可用 ${g(have)}，需要 ${g(qty)}`);
+      let remain = qty;
+      for (const st of fresh) {
+        if (remain <= EPS) break;
+        const q = round(Math.min(st.qty, remain));
+        await this.inv.removeStock(tx, {
+          material_id: m.id, location_id: st.location_id, lot_no: lot, status: 'AVAILABLE', qty: q,
+          owner_customer_id: st.owner_customer_id, move_type: 'REWORK_ISSUE', ref,
+        });
+        remain = round(remain - q);
+      }
+      const wm = await tx.workOrderMaterial.findFirst({ where: { wo_id: wo.id, material_id: m.id } });
+      if (wm) await tx.workOrderMaterial.update({ where: { id: wm.id }, data: { issued_qty: round((wm.issued_qty || 0) + qty) } });
+      const kp = await tx.keyPartBinding.create({
+        data: {
+          ts: now, sn_id: sn.id, material_id: m.id, lot_no: lot || null, part_sn: clean(r.part_sn), operator: user.username,
+          action: 'INSTALL', ncr_id: ncr.id, remark: [qty !== 1 ? `数量 ${g(qty)} ${m.uom}` : null, note(r.remark)].filter(Boolean).join('；') || null,
+        },
+      });
+      created.push(kp.id);
+    }
+    return {
+      sn: sn.sn, ncr_no: ncr.no, removed: removed.length, installed: installed.length,
+      key_parts: await keyPartRows(tx, { sn_id: sn.id }),
+      created_ids: created,
     };
   }
 
@@ -469,12 +619,26 @@ export class ProductionService {
     const issues = await tx.materialIssueLine.findMany({
       where: { issue: { wo_id: wo.id, status: 'CONFIRMED' } }, orderBy: { id: 'asc' }, include: { material: true },
     });
+    const ncrs = await tx.ncr.findMany({ where: { wo_id: wo.id }, orderBy: { id: 'asc' } });
+    // 返工换件补领（REWORK_ISSUE，关联本工单的 NCR）也计入物料批次追溯
+    const reworkMoves = ncrs.length
+      ? await tx.stockMove.findMany({
+          where: { move_type: 'REWORK_ISSUE', ref_type: 'NCR', ref_id: { in: ncrs.map((n) => n.id) } }, orderBy: { id: 'asc' }, include: { material: true },
+        })
+      : [];
     const matRows = new Map<string, Record<string, any>>();
-    for (const ln of issues) {
-      const k = `${ln.material_id}\u0000${ln.lot_no}`;
+    const lines = [
+      ...issues.map((ln) => ({ ...ln, source: 'ISSUE' })),
+      ...reworkMoves.map((mv) => ({ material_id: mv.material_id, material: mv.material, lot_no: mv.lot_no, qty: mv.qty, owner_customer_id: mv.owner_customer_id, source: 'REWORK' })),
+    ];
+    for (const ln of lines) {
+      const k = `${ln.material_id}\u0000${ln.lot_no}\u0000${ln.source}`;
       let row = matRows.get(k);
       if (!row) {
-        row = { material_code: ln.material.code, material_name: ln.material.name, lot_no: ln.lot_no, qty: 0, customer_supplied: !!ln.owner_customer_id };
+        row = {
+          material_code: ln.material.code, material_name: ln.material.name, lot_no: ln.lot_no, qty: 0, customer_supplied: !!ln.owner_customer_id,
+          source: ln.source,
+        };
         const insp = await tx.inspection.findFirst({
           where: { material_id: ln.material_id, lot_no: ln.lot_no }, orderBy: { id: 'desc' }, include: { supplier: true },
         });
@@ -483,14 +647,22 @@ export class ProductionService {
       }
       row.qty = round(row.qty + ln.qty, 4);
     }
-    const sns = await tx.serialNumber.findMany({ where: { wo_id: wo.id }, orderBy: { sn: 'asc' } });
+    const sns = await tx.serialNumber.findMany({ where: { wo_id: wo.id }, orderBy: { sn: 'asc' }, include: { release: true } });
     const records = await tx.operationRecord.findMany({
       where: { wo_id: wo.id }, orderBy: { id: 'asc' }, include: { serial: true, equipment: true, values: { orderBy: { id: 'asc' } } },
     });
     const eqIds = [...new Set(records.map((r) => r.equipment_id).filter((x): x is number => !!x))];
     const equipment = eqIds.length ? await tx.equipment.findMany({ where: { id: { in: eqIds } }, orderBy: { id: 'asc' } }) : [];
-    const ncrs = await tx.ncr.findMany({ where: { wo_id: wo.id }, orderBy: { id: 'asc' } });
-    const sigs = await tx.eSignature.findMany({ where: { entity: 'mes_work_order', entity_id: wo.id }, orderBy: { id: 'asc' } });
+    const releases = await this.releaseList(tx, wo.id);
+    const sigs = await tx.eSignature.findMany({
+      where: {
+        OR: [
+          { entity: 'mes_work_order', entity_id: wo.id },
+          ...(releases.length ? [{ entity: 'mes_product_release', entity_id: { in: releases.map((r) => r.id) } }] : []),
+        ],
+      },
+      orderBy: { id: 'asc' },
+    });
     // 一次直通率：每个序列号在该工序的首次结果
     const firstPass = new Map<string, { seq: number; result: string }>();
     for (const r of records) {
@@ -507,45 +679,268 @@ export class ProductionService {
       work_order: {
         id: wo.id, no: wo.no, lot_no: wo.lot_no, status: wo.status, dhr_status: wo.dhr_status,
         planned_qty: wo.planned_qty, completed_qty: wo.completed_qty, scrap_qty: wo.scrap_qty,
-        received_qty: wo.received_qty, actual_start: wo.actual_start, actual_end: wo.actual_end,
+        received_qty: wo.received_qty, released_qty: wo.released_qty, actual_start: wo.actual_start, actual_end: wo.actual_end,
         so_no: wo.sales_order?.no ?? null, customer_name: wo.customer?.name ?? null, bom_version: wo.bom?.version ?? null,
-        routing_version: wo.routing?.version ?? null,
+        routing_version: wo.routing?.version ?? null, serial_control: p.serial_control, uom: p.uom,
       },
       product: { code: p.code, name: p.name, model: p.model, spec: p.spec, registration_no: p.registration_no, device_class: p.device_class, gtin: p.gtin },
       materials: [...matRows.values()],
       operations: ops,
-      serials: sns.map((s) => ({ sn: s.sn, udi: s.udi, status: s.status })),
+      serials: sns.map((s) => ({ sn: s.sn, udi: s.udi, status: s.status, release_no: s.release?.no ?? null, release_status: s.release?.status ?? null })),
       records: records.map((r) => ({
         ts: r.ts, sn: r.serial?.sn ?? null, seq: r.seq, op_name: r.op_name, result: r.result, qty: r.qty,
         operator_name: r.operator_name, equipment_code: r.equipment?.code ?? null, is_rework: r.is_rework,
         values: r.values.map((v) => ({ name: v.name, value: v.value, unit: v.unit, lower: v.lower, upper: v.upper, result: v.result })),
       })),
+      /** 关键件绑定 + 返工换件（拆下/装上，关联 NCR） */
+      key_parts: await keyPartRows(tx, { serial: { wo_id: wo.id } }),
       equipment: equipment.map((e) => ({
         code: e.code, name: e.name, calibration_required: e.calibration_required,
         last_calibration_date: e.last_calibration_date, next_calibration_date: e.next_calibration_date,
       })),
       ncrs: ncrs.map((n) => ({ no: n.no, sn: n.sn, op_name: n.op_name, description: n.description, status: n.status, disposition: n.disposition })),
-      signatures: sigs.map((s) => ({ ts: s.ts, full_name: s.full_name, meaning: s.meaning, reason: s.reason })),
+      releases,
+      release_summary: await this.releaseSummary(tx, wo.id),
+      signatures: sigs.map((s) => ({ ts: s.ts, full_name: s.full_name, meaning: s.meaning, reason: s.reason, doc_no: s.doc_no })),
       checks: await this.dhrChecks(tx, wo.id),
     };
   }
 
-  /** DHR 审核与产品放行（QA 电子签名）：批准 → 成品批次 待放行→合格、工单关闭；拒绝 → 冻结 */
+  // ---------------- 产品放行（分批 / 整单） ----------------
+  /** 工单的放行批记录（含序列号清单），按时间顺序 */
+  async releaseList(tx: Tx, woId: number) {
+    const rows = await tx.productRelease.findMany({
+      where: { wo_id: woId }, orderBy: { id: 'asc' }, include: { serials: { orderBy: { sn: 'asc' }, select: { sn: true } } },
+    });
+    return rows.map(({ serials, ...r }) => ({ ...r, sn_list: serials.map((s) => s.sn) }));
+  }
+
+  /** 已拒绝放行（冻结）的数量 */
+  private async rejectedQty(tx: Tx, woId: number): Promise<number> {
+    const r = await tx.productRelease.aggregate({ where: { wo_id: woId, status: 'REJECTED' }, _sum: { qty: true } });
+    return round(r._sum.qty ?? 0);
+  }
+
+  /** 最后一道工序号（序列号已完成全部工序的判定） */
+  private async lastSeq(tx: Tx, woId: number): Promise<number> {
+    const r = await tx.workOrderOperation.aggregate({ where: { wo_id: woId }, _max: { seq: true } });
+    return r._max.seq ?? 0;
+  }
+
+  /** 可放行的序列号：已完工入库、完成全部工序、尚未进入任何放行批；有未处置 NCR 的单独列出 */
+  private async eligibleSerials(tx: Tx, woId: number) {
+    const last = await this.lastSeq(tx, woId);
+    const sns = await tx.serialNumber.findMany({
+      where: { wo_id: woId, status: 'IN_STOCK', release_id: null },
+      orderBy: [{ completed_at: 'asc' }, { sn: 'asc' }],
+      include: { location: true },
+    });
+    const open = sns.length ? await tx.ncr.findMany({ where: { sn: { in: sns.map((s) => s.sn) }, status: 'OPEN' }, orderBy: { id: 'asc' } }) : [];
+    const ncrOf = new Map(open.map((n) => [n.sn!, n.no]));
+    const eligible: typeof sns = [];
+    const blocked: { sn: string; reason: string }[] = [];
+    for (const s of sns) {
+      if (ncrOf.has(s.sn)) blocked.push({ sn: s.sn, reason: `存在未处置的不合格（${ncrOf.get(s.sn)}）` });
+      else if ((s.last_seq || 0) < last) blocked.push({ sn: s.sn, reason: '未完成全部工序' });
+      else eligible.push(s);
+    }
+    return { eligible, blocked };
+  }
+
+  /** 放行概况：已入库 / 已放行 / 已拒绝 / 可放行，以及可放行的序列号清单 */
+  async releaseSummary(tx: Tx, woId: number) {
+    const wo = await tx.workOrder.findUnique({ where: { id: woId }, include: { material: true } });
+    if (!wo) throw new NotFound('生产工单');
+    const rejected = await this.rejectedQty(tx, wo.id);
+    const serial = wo.material.serial_control;
+    const open = wo.dhr_status === 'OPEN' && ['IN_PROGRESS', 'COMPLETED'].includes(wo.status);
+    let releasable = 0;
+    let serials: Record<string, any>[] = [];
+    let blocked: { sn: string; reason: string }[] = [];
+    let openNcr = 0;
+    if (serial) {
+      const e = await this.eligibleSerials(tx, wo.id);
+      serials = e.eligible.map((s) => ({ sn: s.sn, udi: s.udi, completed_at: s.completed_at, location_code: s.location?.code ?? null }));
+      blocked = e.blocked;
+      releasable = open ? serials.length : 0;
+    } else {
+      openNcr = await tx.ncr.count({ where: { wo_id: wo.id, status: 'OPEN' } });
+      releasable = open ? Math.max(0, round((wo.received_qty || 0) - (wo.released_qty || 0) - rejected)) : 0;
+    }
+    return {
+      serial_control: serial, uom: wo.material.uom, status: wo.status, dhr_status: wo.dhr_status,
+      completed_qty: wo.completed_qty, received_qty: wo.received_qty, released_qty: wo.released_qty, rejected_qty: rejected,
+      releasable_qty: releasable, serials: open ? serials : [], blocked, open_ncr: openNcr,
+    };
+  }
+
+  /**
+   * 把成品批次中指定数量的“待放行”库存转为合格（放行）或冻结（拒绝）：优先从序列号所在库位转，不足时从该批次其他库位补足；
+   * 只转本次放行的数量（不影响同批号其他待放行库存，如尚未审核的批、退货品）。
+   */
+  private async moveReleaseQty(tx: Tx, wo: WorkOrder, qty: number, toStatus: string, moveType: string, ref: Ref, prefer = new Map<number, number>()) {
+    const lot = wo.lot_no || '';
+    const rows = await tx.stock.findMany({
+      where: { material_id: wo.material_id, lot_no: lot, status: 'QUARANTINE', owner_customer_id: null, qty: { gt: EPS } }, orderBy: { id: 'asc' },
+    });
+    const have = new Map<number, number>();
+    for (const r of rows) have.set(r.location_id, round((have.get(r.location_id) ?? 0) + r.qty));
+    const plan = new Map<number, number>();
+    let remain = round(qty);
+    const take = (loc: number, want: number) => {
+      const q = round(Math.min(have.get(loc) ?? 0, want));
+      if (q <= EPS) return;
+      have.set(loc, round(have.get(loc)! - q));
+      plan.set(loc, round((plan.get(loc) ?? 0) + q));
+      remain = round(remain - q);
+    };
+    for (const [loc, q] of prefer) if (remain > EPS) take(loc, Math.min(q, remain));
+    for (const loc of [...have.keys()]) if (remain > EPS) take(loc, remain);
+    if (remain > EPS) {
+      throw new BizError(`成品批次 ${lot || '-'} 的“待放行”库存不足：本次 ${g(qty)}，缺 ${g(remain)}（请核对完工入库与库存调整记录）`);
+    }
+    for (const [loc, q] of plan) {
+      await this.inv.moveStock(tx, {
+        material_id: wo.material_id, lot_no: lot, qty: q, from_location_id: loc, to_location_id: loc,
+        from_status: 'QUARANTINE', to_status: toStatus, move_type: moveType, ref,
+      });
+    }
+  }
+
+  /** 创建放行批：写放行记录、序列号归批、转换库存状态（不含电子签名与工单数量更新） */
+  private async createRelease(
+    tx: Tx, user: CurrentUser, wo: WorkOrder, units: { id: number; location_id: number | null }[], qty: number, approve: boolean, reason: string | null,
+  ): Promise<ProductRelease> {
+    const rel = await tx.productRelease.create({
+      data: {
+        no: await this.numbering.nextNo(tx, 'FX'), wo_id: wo.id, qty, status: approve ? 'RELEASED' : 'REJECTED', reason,
+        released_by: user.full_name, released_at: new Date(), created_by: user.username,
+      },
+    });
+    if (units.length) await tx.serialNumber.updateMany({ where: { id: { in: units.map((u) => u.id) } }, data: { release_id: rel.id } });
+    const prefer = new Map<number, number>();
+    for (const u of units) if (u.location_id) prefer.set(u.location_id, (prefer.get(u.location_id) ?? 0) + 1);
+    const ref: Ref = {
+      ref_type: 'PRODUCT_RELEASE', ref_id: rel.id, ref_no: rel.no, username: user.username,
+      remark: `工单 ${wo.no} ${approve ? '放行' : '拒绝放行（冻结）'}${reason ? '：' + reason : ''}`.slice(0, 250),
+    };
+    await this.moveReleaseQty(tx, wo, qty, approve ? 'AVAILABLE' : 'HOLD', approve ? 'FG_RELEASE' : 'STATUS_CHANGE', ref, prefer);
+    return rel;
+  }
+
+  /** 已完工、全部入库且全部放行 → DHR 已放行、工单关闭（须满足整单放行检查） */
+  private async maybeCloseAfterRelease(tx: Tx, wo: WorkOrder, releasedQty: number, upd: Record<string, any>) {
+    if (wo.status !== 'COMPLETED') return;
+    const received = wo.received_qty || 0;
+    if (received + EPS < (wo.completed_qty || 0) || releasedQty + EPS < received) return;
+    const bad = (await this.dhrChecks(tx, wo.id)).filter((c) => !c.ok);
+    if (!bad.length) Object.assign(upd, { dhr_status: 'RELEASED', status: 'CLOSED' });
+  }
+
+  /**
+   * DHR 分批放行（QA 电子签名“产品放行（分批）”）：
+   *   序列号产品：放行所选的已入库、未放行序列号（默认全部可放行；或按 qty 取完工最早的 N 台）；
+   *   批量产品：放行数量 ≤ 已入库 − 已放行 − 已拒绝。
+   * 每批校验：产品已完成全部工序；这些产品（批量产品为整张工单）没有未处置 NCR；物料已领 ≥ 单耗 × 放行后累计数量。
+   * 批准 → 该数量成品 待放行→合格，可发货；拒绝 → 冻结（HOLD）。全部入库产品都放行且工单已完工 → DHR 已放行、工单关闭。
+   */
+  async releaseBatch(tx: Tx, user: CurrentUser, woId: number, a: ReleaseBatchArgs) {
+    const wo = await this.getWo(tx, woId, true);
+    if (wo.dhr_status === 'RELEASED') throw new BizError('该批已全部放行');
+    if (wo.dhr_status === 'REJECTED') throw new BizError('该工单 DHR 已整批拒绝放行（成品已冻结），不能再分批放行');
+    if (!['IN_PROGRESS', 'COMPLETED'].includes(wo.status)) throw new BizError(`工单 ${wo.no} 状态为【${wo.status}】，不能放行`);
+    const reason = a.reason?.trim() || a.sig?.reason?.trim() || null;
+    if (!a.approve && !reason) throw new BizError('拒绝放行须填写原因');
+    const released = wo.released_qty || 0;
+    let units: SerialNumber[] = [];
+    let qty: number;
+    if (wo.material.serial_control) {
+      const picked = [...new Set((a.serials ?? []).map((s) => (s || '').trim()).filter(Boolean))];
+      if (picked.length) {
+        const last = await this.lastSeq(tx, wo.id);
+        const rows = await tx.serialNumber.findMany({ where: { sn: { in: picked } }, include: { release: true } });
+        const bySn = new Map(rows.map((r) => [r.sn, r]));
+        for (const s of picked) {
+          const r = bySn.get(s);
+          if (!r || r.wo_id !== wo.id) throw new BizError(`序列号 ${s} 不属于工单 ${wo.no}`);
+          if (r.release) throw new BizError(`序列号 ${s} 已在放行批 ${r.release.no} 中（${r.release.status === 'RELEASED' ? '已放行' : '已拒绝'}）`);
+          if (r.status !== 'IN_STOCK') throw new BizError(`序列号 ${s} 状态为【${r.status}】，只有已完工入库的产品才能放行`);
+          if ((r.last_seq || 0) < last) throw new BizError(`序列号 ${s} 未完成全部工序，不能放行`);
+          units.push(r);
+        }
+      } else {
+        units = (await this.eligibleSerials(tx, wo.id)).eligible;
+        if (a.qty) {
+          const n = Math.trunc(Number(a.qty));
+          if (n <= 0 || Math.abs(n - Number(a.qty)) > EPS) throw new BizError('序列号产品的放行数量必须为正整数');
+          if (units.length < n) throw new BizError(`可放行的产品只有 ${units.length} 台（需已完工入库、无未处置 NCR）`);
+          units = units.slice(0, n);
+        }
+      }
+      if (!units.length) throw new BizError('没有可放行的产品（需已完工入库、完成全部工序且尚未放行）');
+      if (a.approve) {
+        const open = await tx.ncr.findMany({ where: { sn: { in: units.map((u) => u.sn) }, status: 'OPEN' }, orderBy: { id: 'asc' } });
+        if (open.length) throw new BizError(`序列号 ${open.map((n) => `${n.sn}（${n.no}）`).join('、')} 存在未处置的不合格（NCR），不能放行`);
+      }
+      qty = units.length;
+    } else {
+      const avail = Math.max(0, round((wo.received_qty || 0) - released - (await this.rejectedQty(tx, wo.id))));
+      qty = a.qty ? round(Number(a.qty)) : avail;
+      if (qty <= EPS) throw new BizError(`没有可放行的数量（已入库 ${g(wo.received_qty)}，已放行 ${g(released)}）`);
+      if (qty > avail + EPS) throw new BizError(`放行数量超出：可放行 ${g(avail)} ${wo.material.uom}（已入库 − 已放行 − 已拒绝）`);
+      if (a.approve) {
+        const open = await tx.ncr.count({ where: { wo_id: wo.id, status: 'OPEN' } });
+        if (open) throw new BizError(`工单 ${wo.no} 有 ${open} 条未处置的不合格（NCR），不能放行`);
+      }
+    }
+    const after = round(released + qty);
+    if (a.approve) {
+      const mats = await tx.workOrderMaterial.findMany({ where: { wo_id: wo.id }, orderBy: { id: 'asc' }, include: { material: true } });
+      const short = mats.filter((m) => (m.issued_qty || 0) + EPS < (m.qty_per || 0) * after);
+      if (short.length) {
+        throw new BizError('物料未按 BOM 足额领用，不能放行：' + short.map((m) => `${m.material.code} 已领 ${g(m.issued_qty)} < 应耗 ${g(round(m.qty_per * after))}`).join('；'));
+      }
+    }
+    const rel = await this.createRelease(tx, user, wo, units, qty, a.approve, reason);
+    await this.esign.sign(tx, user, a.sig, a.approve ? '产品放行（分批）' : '产品放行（分批拒绝）', 'mes_product_release', rel.id, rel.no);
+    const upd: Record<string, any> = {};
+    if (a.approve) {
+      upd.released_qty = after;
+      await this.maybeCloseAfterRelease(tx, wo, after, upd);
+    }
+    const woNew = Object.keys(upd).length ? await tx.workOrder.update({ where: { id: wo.id }, data: upd }) : wo;
+    return {
+      release: { ...rel, sn_list: units.map((u) => u.sn).sort() },
+      wo_status: woNew.status, dhr_status: woNew.dhr_status, released_qty: woNew.released_qty,
+    };
+  }
+
+  /**
+   * DHR 整单审核（QA 电子签名）= 把剩余未放行的已入库成品一次放行：
+   *   批准 → 须通过全部检查（已完工、足额领料、无未处置 NCR、全部入库），剩余待放行成品转合格，DHR 已放行、工单关闭；
+   *   拒绝 → 剩余待放行成品冻结（HOLD），DHR 拒绝放行。
+   */
   async releaseDhr(tx: Tx, user: CurrentUser, woId: number, approve: boolean, sig: SignatureDto | null | undefined, reason?: string | null): Promise<WorkOrder> {
     const wo = await this.getWo(tx, woId, true);
     if (wo.dhr_status === 'RELEASED') throw new BizError('该批已放行');
+    if (!approve && wo.dhr_status === 'REJECTED') throw new BizError('该批已拒绝放行');
     if (approve) {
       const bad = (await this.dhrChecks(tx, wo.id)).filter((c) => !c.ok).map((c) => c.item);
       if (bad.length) throw new BizError('DHR 审核未通过，不能放行：' + bad.join('；'));
     }
     await this.esign.sign(tx, user, sig, approve ? '产品放行（DHR审核批准）' : '产品放行（DHR审核拒绝）', 'mes_work_order', wo.id, wo.no);
-    const ref: Ref = { ref_type: 'WORK_ORDER', ref_id: wo.id, ref_no: wo.no, username: user.username, remark: reason ?? null };
-    const base = { material_id: wo.material_id, lot_no: wo.lot_no || '', from_status: 'QUARANTINE', ref };
-    if (approve) {
-      await this.inv.changeLotStatus(tx, { ...base, to_status: 'AVAILABLE', move_type: 'FG_RELEASE' });
-      return tx.workOrder.update({ where: { id: wo.id }, data: { dhr_status: 'RELEASED', status: 'CLOSED' } });
+    const released = wo.released_qty || 0;
+    let units: SerialNumber[] = [];
+    let qty: number;
+    if (wo.material.serial_control) {
+      units = await tx.serialNumber.findMany({ where: { wo_id: wo.id, status: 'IN_STOCK', release_id: null }, orderBy: { sn: 'asc' } });
+      qty = units.length;
+    } else {
+      qty = Math.max(0, round((wo.received_qty || 0) - released - (await this.rejectedQty(tx, wo.id))));
     }
-    await this.inv.changeLotStatus(tx, { ...base, to_status: 'HOLD', move_type: 'STATUS_CHANGE' });
+    const text = approve ? '整单放行（剩余全部）' : '整单拒绝放行';
+    if (qty > EPS) await this.createRelease(tx, user, wo, units, qty, approve, [text, reason?.trim()].filter(Boolean).join('：'));
+    if (approve) return tx.workOrder.update({ where: { id: wo.id }, data: { dhr_status: 'RELEASED', status: 'CLOSED', released_qty: round(released + qty) } });
     return tx.workOrder.update({ where: { id: wo.id }, data: { dhr_status: 'REJECTED' } });
   }
 }

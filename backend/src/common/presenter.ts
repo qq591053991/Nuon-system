@@ -161,6 +161,34 @@ export const VIEWS: Record<string, View> = {
     include: { ...matInclude, work_order: true, supplier: true },
     props: { ...matProps, wo_no: (o) => o.work_order?.no ?? null, supplier_name: (o) => nm(o.supplier) },
   },
+  // 生产（代理 3）：放行批、人员上岗资质
+  ProductRelease: {
+    include: { work_order: { include: { material: true } } },
+    props: {
+      wo_no: (o) => o.work_order?.no ?? null,
+      lot_no: (o) => o.work_order?.lot_no ?? null,
+      material_code: (o) => o.work_order?.material?.code ?? null,
+      material_name: (o) => o.work_order?.material?.name ?? null,
+    },
+  },
+  Qualification: {
+    include: { user: true },
+    props: {
+      username: (o) => o.user?.username ?? null,
+      user_full_name: (o) => o.user?.full_name ?? null,
+      department: (o) => o.user?.department ?? null,
+      // 纯日期输出 YYYY-MM-DD
+      certified_at: (o) => (o.certified_at ? new Date(o.certified_at).toISOString().slice(0, 10) : null),
+      expires_at: (o) => (o.expires_at ? new Date(o.expires_at).toISOString().slice(0, 10) : null),
+    },
+  },
+  // 质量/仓储逆向（代理 4）：客户退货、客诉（客户/NCR 等名称由各自 service 补充）
+  CustomerReturn: {
+    props: { return_date: (o) => (o.return_date ? new Date(o.return_date).toISOString().slice(0, 10) : null) },
+    order: { lines: { id: 'asc' } },
+  },
+  CustomerReturnLine: { include: matInclude, props: matProps },
+  Complaint: { props: { received_date: (o) => (o.received_date ? new Date(o.received_date).toISOString().slice(0, 10) : null) } },
 };
 
 interface Tree { [k: string]: Tree }

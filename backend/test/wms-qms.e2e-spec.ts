@@ -303,9 +303,14 @@ describe('仓储与质量', () => {
     expect(await api.ok('get', '/api/serials/available', { material_id: fg })).toEqual([]);
     expect((await api.as('qc').post('/api/shipments', { so_id: so.id, lines: [{ so_line_id: sol.id, qty: 2 }] })).status).toBe(403);
 
-    // DHR 审核放行（MES 负责；此处直接改状态并放行库存）
+    // 仅改工单 DHR 状态不够：发货以序列号所属放行批（release_id）为准
+    await db.client.workOrder.update({ where: { id: wo.id }, data: { dhr_status: 'RELEASED' } });
+    expect(await api.ok('get', '/api/serials/available', { material_id: fg })).toEqual([]);
+    // DHR 审核放行（MES 负责；此处直接建放行批、序列号归批并放行库存）
     await db.tx(async (tx) => {
-      await tx.workOrder.update({ where: { id: wo.id }, data: { dhr_status: 'RELEASED' } });
+      const rel = await tx.productRelease.create({ data: { no: 'FX-T-SH', wo_id: wo.id, qty: 3, status: 'RELEASED', released_by: '赵QA', released_at: new Date() } });
+      await tx.serialNumber.updateMany({ where: { wo_id: wo.id }, data: { release_id: rel.id } });
+      await tx.workOrder.update({ where: { id: wo.id }, data: { released_qty: 3 } });
       await inv.changeLotStatus(tx, { material_id: fg, lot_no: 'B-T-SH', from_status: 'QUARANTINE', to_status: 'AVAILABLE', move_type: 'DHR_RELEASE', ref: ref0 });
     });
     const avail = await api.ok('get', '/api/serials/available', { material_id: fg });

@@ -1,7 +1,8 @@
 /** 库存核心服务：所有库存变动必须经过这里，余额与流水在同一事务内更新。 */
 import { Injectable } from '@nestjs/common';
 import type { Stock } from '@prisma/client';
-import { today } from '../common/dates';
+import { als } from '../common/context';
+import { fmtDate, today } from '../common/dates';
 import { BizError } from '../common/errors';
 import { EPS, g, round } from '../common/num';
 import type { Tx } from '../common/prisma.service';
@@ -55,29 +56,60 @@ export class InventoryService {
     });
   }
 
+  /**
+   * 入库（并发安全）：
+   *   1) 原子“插入或锁定”：INSERT … ON CONFLICT (库存键) DO UPDATE，依赖唯一索引 wms_stock_key_uq（NULLS NOT DISTINCT，货主为空也视为同一键）。
+   *      新键 → 直接插入本次数量（首次入库的生产日期/有效期/供应商等批次属性随之写入）；
+   *      已存在 → 走空更新以取得行锁，并发的同批次入库在此排队，不会产生重复行。
+   *   2) 已存在的行在持锁状态下用 ORM 更新数量（审计钩子自动记录 UPDATE；保留首次入库的批次属性，仅在有效期为空时补填）。
+   *   原生 SQL 不经过审计钩子，因此“新插入”分支在同一事务内手工写一条与钩子格式一致的 CREATE 审计记录。
+   */
   async addStock(tx: Tx, a: AddStockArgs): Promise<Stock> {
     if (!a.qty || a.qty <= 0) throw new BizError('数量必须大于 0');
     const loc = await tx.location.findUnique({ where: { id: a.location_id } });
     if (!loc || !loc.is_active) throw new BizError('库位不存在或已停用');
     const owner = a.owner_customer_id ?? null;
-    let st = await this.find(tx, a);
-    if (!st) {
-      st = await tx.stock.create({
-        data: {
-          material_id: a.material_id, location_id: a.location_id, lot_no: a.lot_no || '', status: a.status,
-          owner_customer_id: owner, qty: 0, mfg_date: a.mfg_date ?? null, expiry_date: a.expiry_date ?? null,
-          supplier_id: a.supplier_id ?? null, supplier_lot: a.supplier_lot ?? null, received_at: new Date(),
-        },
+    const lot = a.lot_no || '';
+    const qty = round(a.qty);
+    // 纯日期按 'YYYY-MM-DD' 文本传入再转 date，避免会话时区影响；received_at 统一按 UTC 存储（与 Prisma 一致）
+    const [hit] = await tx.$queryRaw<{ id: number; inserted: boolean }[]>`
+      INSERT INTO wms_stock (material_id, location_id, lot_no, status, owner_customer_id, qty, mfg_date, expiry_date, supplier_id, supplier_lot, received_at)
+      VALUES (${a.material_id}, ${a.location_id}, ${lot}, ${a.status}, ${owner}::int, ${qty}::float8,
+              ${fmtDate(a.mfg_date ?? null)}::date, ${fmtDate(a.expiry_date ?? null)}::date, ${a.supplier_id ?? null}::int, ${a.supplier_lot ?? null},
+              (now() AT TIME ZONE 'UTC'))
+      ON CONFLICT (material_id, location_id, lot_no, status, owner_customer_id) DO UPDATE SET qty = wms_stock.qty
+      RETURNING id, (xmax = 0) AS inserted`;
+    let st: Stock;
+    if (hit.inserted) {
+      st = (await tx.stock.findUnique({ where: { id: hit.id } }))!;
+      await this.auditCreate(tx, st);
+    } else {
+      const cur = (await tx.stock.findUnique({ where: { id: hit.id } }))!;
+      st = await tx.stock.update({
+        where: { id: cur.id },
+        data: { qty: round((cur.qty || 0) + qty), ...(a.expiry_date && !cur.expiry_date ? { expiry_date: a.expiry_date } : {}) },
       });
     }
-    st = await tx.stock.update({
-      where: { id: st.id },
-      data: { qty: round((st.qty || 0) + a.qty), ...(a.expiry_date && !st.expiry_date ? { expiry_date: a.expiry_date } : {}) },
-    });
     if (a.log !== false) {
       await this.log(tx, a.move_type, a.material_id, a.lot_no, a.qty, a.ref, { to_location_id: a.location_id, to_status: a.status, owner_customer_id: owner });
     }
     return st;
+  }
+
+  /** 原生 SQL 新增的库存行补写审计（格式与审计钩子一致：非空标量字段，纯日期 YYYY-MM-DD，时间 ISO） */
+  private async auditCreate(tx: Tx, st: Stock) {
+    const user = als.getStore()?.user;
+    const changes: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(st)) {
+      if (k === 'id' || v === null || v === undefined) continue;
+      changes[k] = v instanceof Date ? (k === 'received_at' ? v.toISOString() : fmtDate(v)) : v;
+    }
+    await tx.auditLog.create({
+      data: {
+        username: user?.username ?? 'system', full_name: user?.full_name ?? '系统', entity: 'wms_stock', entity_id: st.id, action: 'CREATE',
+        changes: JSON.stringify(changes),
+      },
+    });
   }
 
   async removeStock(tx: Tx, a: RemoveStockArgs): Promise<Stock> {

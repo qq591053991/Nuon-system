@@ -7,7 +7,7 @@
  *       → Receipt & { lines }                      收货（采购/客供料/期初/其他）；采购收货更新订单状态并生成应付
  *   createIssue(tx, user, wo, lines?)            → { issue, shortages }   生成领料单（lines 为空 = 按 FEFO 自动分配）
  *   confirmIssue(tx, user, issue)                → MaterialIssue & { lines }  领料过账（扣库存、更新工单已领数量）
- *   availableSerials(tx, materialId, limit=500)  → SerialNumber[]（含 work_order） 可发货序列号（已入库且 DHR 已放行）
+ *   availableSerials(tx, materialId, limit=500)  → SerialNumber[]（含 work_order） 可发货序列号（已入库且属于已放行的放行批）
  *   createShipment(tx, user, so, lines, { carrier, tracking_no, ship_to, remark }?)
  *       → Shipment & { lines }                     创建发货单（序列号逐台校验放行状态，非序列号产品按 FEFO 分配合格库存）
  *   confirmShipment(tx, user, sh)                → Shipment & { lines }   发货过账（扣库存、序列号出库、更新订单、生成应收）
@@ -26,11 +26,13 @@ import type { CurrentUser } from '../common/context';
 import { addDays, dateOnly, fmtDate, today } from '../common/dates';
 import { BizError, NotFound } from '../common/errors';
 import { EPS, g, num, round, round2 } from '../common/num';
+import { lineAmount, MoneySum, poReceiptAmount } from '../common/money';
 import { inc } from '../common/presenter';
 import type { Tx } from '../common/prisma.service';
 import { InventoryService, STATUS_TEXT, type Ref } from '../core/inventory.service';
 import { NumberingService } from '../core/numbering.service';
 import { QualityService } from '../qms/quality.service';
+import { confirmMaterialReturn } from './returns.service';
 
 type IdRef = number | { id: number };
 const idOf = (x: IdRef) => (typeof x === 'number' ? x : x.id);
@@ -105,7 +107,7 @@ export class WmsService {
     });
     const move_type = RECEIPT_MOVE[receipt_type] ?? 'OTHER_RECEIPT';
     const ref: Ref = { ref_type: 'RECEIPT', ref_id: rc.id, ref_no: rc.no, username: user.username, remark: args.remark ?? null };
-    let ap = 0;
+    const ap = new MoneySum(); // 应付金额（十进制精确累加，每行按分四舍五入）
     let i = 0;
     for (const ln of lines) {
       i += 1;
@@ -129,7 +131,7 @@ export class WmsService {
         const remain = round(pl.qty - (pl.received_qty || 0));
         if (qty > remain * 1.05 + EPS) throw new BizError(`${m.code} 超收：订单剩余 ${g(remain)}，本次 ${g(qty)}（允许超收 5%）`); // 允许 5% 超收
         await tx.purchaseOrderLine.update({ where: { id: pl.id }, data: { received_qty: round((pl.received_qty || 0) + qty) } });
-        ap += qty * num(pl.unit_price);
+        ap.add(poReceiptAmount(pl, qty)); // 有采购单位时按采购单价折算，整行收齐 = 订单行金额
         poLineId = pl.id;
       }
       const locId = ln.location_id;
@@ -154,13 +156,13 @@ export class WmsService {
       const poLines = await tx.purchaseOrderLine.findMany({ where: { order_id: po.id } });
       const done = poLines.every((l) => (l.received_qty || 0) + EPS >= l.qty);
       await tx.purchaseOrder.update({ where: { id: po.id }, data: { status: done ? 'RECEIVED' : 'PARTIAL_RECEIVED' } });
-      if (ap > 0) {
+      if (ap.value > 0) {
         const sup = await tx.supplier.findUnique({ where: { id: po.supplier_id } });
         await tx.financeDoc.create({
           data: {
             no: await this.numbering.nextNo(tx, 'AP'), doc_type: 'AP', supplier_id: po.supplier_id, ref_type: 'RECEIPT', ref_no: rc.no,
             doc_date: today(), currency: po.currency, due_date: addDays(today(), sup ? sup.payment_terms_days : 30),
-            amount: round2(ap), status: 'OPEN', remark: `采购订单 ${po.no} 入库`, created_by: user.username,
+            amount: ap.value, status: 'OPEN', remark: `采购订单 ${po.no} 入库`, created_by: user.username,
           },
         });
       }
@@ -172,7 +174,7 @@ export class WmsService {
 
   private async pendingIssueQty(tx: Tx, woId: number, materialId: number): Promise<number> {
     const r = await tx.materialIssueLine.aggregate({
-      where: { material_id: materialId, issue: { wo_id: woId, status: 'DRAFT' } },
+      where: { material_id: materialId, issue: { wo_id: woId, status: 'DRAFT', issue_type: 'ISSUE' } }, // 未过账退料单不算待领
       _sum: { qty: true },
     });
     return round(r._sum.qty ?? 0);
@@ -249,6 +251,8 @@ export class WmsService {
       include: { lines: { orderBy: { id: 'asc' } }, work_order: { include: { materials: true } } },
     });
     if (!issue) throw new NotFound('领料单');
+    // 生产退料单（RETURN）：过账逻辑见 returns.service.ts（库存加回合格、扣减工单已领数量）
+    if (issue.issue_type === 'RETURN') return confirmMaterialReturn(tx, this.inv, user, id);
     if (issue.status !== 'DRAFT') throw new BizError('领料单已过账或已取消');
     const wo = issue.work_order;
     if (!['RELEASED', 'IN_PROGRESS'].includes(wo.status)) throw new BizError('工单状态不允许领料');
@@ -276,17 +280,17 @@ export class WmsService {
 
   // ---------------- 发货 ----------------
 
-  /** 可发货序列号：已入库(IN_STOCK) 且所在工单 DHR 已放行，按完工先后 */
+  /** 可发货序列号：已入库(IN_STOCK) 且属于已放行的放行批（DHR 分批放行，release_id 不为空），按完工先后 */
   availableSerials(tx: Tx, materialId: number, limit = 500): Promise<(SerialNumber & { work_order: WorkOrder })[]> {
     return tx.serialNumber.findMany({
-      where: { material_id: materialId, status: 'IN_STOCK', work_order: { dhr_status: 'RELEASED' } },
+      where: { material_id: materialId, status: 'IN_STOCK', release_id: { not: null }, release: { status: 'RELEASED' } },
       orderBy: [{ completed_at: 'asc' }, { sn: 'asc' }],
       take: Math.max(0, Math.trunc(limit)),
       include: { work_order: true },
     });
   }
 
-  /** 创建发货单（草稿）：序列号产品逐台校验（在库 + DHR 已放行），未扫描时按完工先后自动带出；非序列号产品按 FEFO 分配合格库存 */
+  /** 创建发货单（草稿）：序列号产品逐台校验（在库 + 属于已放行的放行批），未扫描时按完工先后自动带出；非序列号产品按 FEFO 分配合格库存 */
   async createShipment(tx: Tx, user: CurrentUser, soRef: IdRef, lines: ShipLineInput[], opts: ShipmentOptions = {}): Promise<Shipment & { lines: ShipmentLine[] }> {
     const so = await tx.salesOrder.findUnique({ where: { id: idOf(soRef) } });
     if (!so) throw new NotFound('销售订单');
@@ -312,10 +316,11 @@ export class WmsService {
       if (m.serial_control) {
         const groups = new Map<string, { lot: string; loc: number; sns: string[] }>();
         for (const s of serials) {
-          const sn = await tx.serialNumber.findUnique({ where: { sn: s }, include: { work_order: true } });
+          const sn = await tx.serialNumber.findUnique({ where: { sn: s }, include: { work_order: true, release: true } });
           if (!sn || sn.material_id !== m.id) throw new BizError(`序列号 ${s} 不存在或不是物料 ${m.code}`);
           if (sn.status !== 'IN_STOCK') throw new BizError(`序列号 ${s} 状态为【${sn.status}】，不可发货`);
-          if (sn.work_order.dhr_status !== 'RELEASED') throw new BizError(`序列号 ${s} 所在批次 ${sn.lot_no} 尚未完成 DHR 审核放行，禁止发货`);
+          if (!sn.release_id || !sn.release) throw new BizError(`序列号 ${s} 所在批次 ${sn.lot_no} 尚未完成 DHR 审核放行，禁止发货`);
+          if (sn.release.status !== 'RELEASED') throw new BizError(`序列号 ${s} 所在放行批 ${sn.release.no} 已被 QA 拒绝放行（冻结），禁止发货`);
           const key = JSON.stringify([sn.lot_no || '', sn.location_id]);
           if (!groups.has(key)) groups.set(key, { lot: sn.lot_no || '', loc: sn.location_id!, sns: [] });
           groups.get(key)!.sns.push(s);
@@ -350,7 +355,8 @@ export class WmsService {
     if (sh.status !== 'DRAFT') throw new BizError('发货单已过账或已取消');
     const so = sh.sales_order;
     const ref: Ref = { ref_type: 'SHIPMENT', ref_id: sh.id, ref_no: sh.no, username: user.username, remark: `销售订单 ${so ? so.no : ''} 发货` };
-    let ar = 0;
+    // 应收：同一订单行（可能分多个批次发出）先合并数量，再按“数量 × 单价”十进制计算并四舍五入到分
+    const arLines = new Map<number, { qty: number; price: Prisma.Decimal }>();
     for (const ln of sh.lines) {
       const sol = ln.so_line_id ? await tx.salesOrderLine.findUnique({ where: { id: ln.so_line_id } }) : null;
       if (sol && ln.qty > round(sol.qty - (sol.shipped_qty || 0)) + EPS) throw new BizError(`${ln.material.code} 发货数量超出订单未发数量`);
@@ -359,8 +365,9 @@ export class WmsService {
       });
       const serials: string[] = ln.serials ? JSON.parse(ln.serials) : [];
       for (const s of serials) {
-        const sn = await tx.serialNumber.findUnique({ where: { sn: s } });
+        const sn = await tx.serialNumber.findUnique({ where: { sn: s }, include: { release: true } });
         if (!sn || sn.status !== 'IN_STOCK') throw new BizError(`序列号 ${s} 状态已变更，不可发货`);
+        if (sn.release?.status !== 'RELEASED') throw new BizError(`序列号 ${s} 未放行（DHR 未审核放行或放行批已被拒绝），禁止发货`);
         await tx.serialNumber.update({
           where: { id: sn.id },
           data: { status: 'SHIPPED', shipment_id: sh.id, customer_id: sh.customer_id, shipped_at: new Date(), location_id: null },
@@ -368,21 +375,25 @@ export class WmsService {
       }
       if (sol) {
         await tx.salesOrderLine.update({ where: { id: sol.id }, data: { shipped_qty: round((sol.shipped_qty || 0) + ln.qty) } });
-        ar += ln.qty * num(sol.unit_price);
+        const acc = arLines.get(sol.id) ?? { qty: 0, price: sol.unit_price };
+        acc.qty = round(acc.qty + ln.qty);
+        arLines.set(sol.id, acc);
       }
     }
+    const ar = new MoneySum();
+    for (const { qty, price } of arLines.values()) ar.add(lineAmount(qty, price));
     await tx.shipment.update({ where: { id }, data: { status: 'SHIPPED', ship_date: today(), shipped_by: user.full_name } });
     if (so) {
       const soLines = await tx.salesOrderLine.findMany({ where: { order_id: so.id } });
       const done = soLines.every((l) => (l.shipped_qty || 0) + EPS >= l.qty);
       await tx.salesOrder.update({ where: { id: so.id }, data: { status: done ? 'SHIPPED' : 'PARTIAL_SHIPPED' } });
-      if (ar > 0) {
+      if (ar.value > 0) {
         const cust = so.customer;
         await tx.financeDoc.create({
           data: {
             no: await this.numbering.nextNo(tx, 'AR'), doc_type: 'AR', customer_id: so.customer_id, ref_type: 'SHIPMENT', ref_no: sh.no,
             doc_date: today(), currency: so.currency, due_date: addDays(today(), cust ? cust.payment_terms_days : 30),
-            amount: round2(ar), status: 'OPEN', remark: `销售订单 ${so.no} 发货`, created_by: user.username,
+            amount: ar.value, status: 'OPEN', remark: `销售订单 ${so.no} 发货`, created_by: user.username,
           },
         });
       }

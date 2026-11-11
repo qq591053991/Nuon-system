@@ -4,13 +4,14 @@ import type { Prisma } from '@prisma/client';
 import type { CurrentUser } from '../common/context';
 import { dateOnly, fmtDate, today } from '../common/dates';
 import { BizError, NotFound } from '../common/errors';
-import { round2 } from '../common/num';
+import { MoneySum } from '../common/money';
 import { inList, like, paginate } from '../common/paginate';
 import { inc, ser, serList } from '../common/presenter';
 import { PrismaService, type Tx } from '../common/prisma.service';
 import { NumberingService } from '../core/numbering.service';
 import { WmsService, type ReceiveLineInput } from '../wms/wms.service';
 import type { PoDto, PoLineDto, ReceiveDto } from './erp.dto';
+import { calcPoLine } from './po-line';
 import { qInt } from './query';
 
 const CH = ['lines'];
@@ -23,20 +24,20 @@ export class PurchaseService {
   private async poLines(tx: Tx, lines: PoLineDto[]) {
     if (!lines?.length) throw new BizError('请至少录入一行采购明细');
     const out: Prisma.PurchaseOrderLineUncheckedCreateWithoutOrderInput[] = [];
-    let total = 0;
+    const total = new MoneySum();
     for (const [i, ln] of lines.entries()) {
       const m = await tx.material.findUnique({ where: { id: ln.material_id } });
       if (!m) throw new NotFound('物料');
       if (m.owner_customer_id) throw new BizError(`${m.code} 是客供料，不能采购`);
-      const price = ln.unit_price ?? 0;
-      const amount = round2(ln.qty * price);
-      total += amount;
+      // 采购单位换算：qty/unit_price 为库存单位，purchase_* 记录下单单位（见 po-line.ts）
+      const c = calcPoLine(m, ln, i + 1);
+      total.add(c.amount);
       out.push({
-        line_no: i + 1, material_id: m.id, qty: ln.qty, unit_price: price, amount,
+        line_no: i + 1, material_id: m.id, ...c,
         expected_date: dateOnly(ln.expected_date), remark: ln.remark ?? null,
       });
     }
-    return { lines: out, total: round2(total) };
+    return { lines: out, total: total.value };
   }
 
   private async checkSupplier(tx: Tx, id: number) {
