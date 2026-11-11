@@ -5,7 +5,10 @@
  */
 import { Injectable } from '@nestjs/common';
 import { BizError } from '../common/errors';
-import { round } from '../common/num';
+import { EPS, round } from '../common/num';
+
+/** 退料单（RETURN）冲减领用数量 */
+const signed = (ln: { qty: number; issue: { issue_type: string } }) => (ln.issue.issue_type === 'RETURN' ? -ln.qty : ln.qty);
 import { like } from '../common/paginate';
 import type { Tx } from '../common/prisma.service';
 import { keyPartRows } from '../mes/key-parts';
@@ -19,7 +22,7 @@ export class TraceService {
   private async woMaterials(tx: Tx, woId: number) {
     const rows = new Map<string, Record<string, any>>();
     const lines = await tx.materialIssueLine.findMany({
-      where: { issue: { wo_id: woId, status: 'CONFIRMED' } }, orderBy: { id: 'asc' }, include: { material: true },
+      where: { issue: { wo_id: woId, status: 'CONFIRMED' } }, orderBy: { id: 'asc' }, include: { material: true, issue: true },
     });
     for (const ln of lines) {
       const k = `${ln.material_id}\u0000${ln.lot_no}`;
@@ -31,8 +34,10 @@ export class TraceService {
         };
         rows.set(k, r);
       }
-      r.qty = round(r.qty + ln.qty, 4);
+      r.qty = round(r.qty + signed(ln), 4);
     }
+    // 已全部退回的批次没有用到产品上，不计入追溯
+    for (const [k, r] of rows) if (r.qty <= EPS) rows.delete(k);
     for (const r of rows.values()) {
       const rl = await tx.receiptLine.findFirst({
         where: { material_id: r.material_id, lot_no: r.lot_no }, orderBy: { id: 'asc' },
@@ -114,7 +119,9 @@ export class TraceService {
     const issued = await tx.materialIssueLine.findMany({
       where: { material_id: m.id, lot_no: lotNo, issue: { status: 'CONFIRMED' } }, orderBy: { id: 'asc' }, include: { issue: true },
     });
-    for (const ln of issued) woIds.set(ln.issue.wo_id, round((woIds.get(ln.issue.wo_id) ?? 0) + ln.qty, 4));
+    for (const ln of issued) woIds.set(ln.issue.wo_id, round((woIds.get(ln.issue.wo_id) ?? 0) + signed(ln), 4));
+    // 该批次已全部退回的工单不受影响（召回范围不应扩大）
+    for (const [wid, q] of woIds) if (q <= EPS) woIds.delete(wid);
     // 该批号本身就是成品生产批
     for (const wo of await tx.workOrder.findMany({ where: { material_id: m.id, lot_no: lotNo }, orderBy: { id: 'asc' } })) {
       if (!woIds.has(wo.id)) woIds.set(wo.id, 0);

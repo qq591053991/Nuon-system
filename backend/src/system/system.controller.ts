@@ -35,11 +35,11 @@ function checkRoles(roles: string[]) {
   if (bad.length) throw new BizError(`未知角色：${bad.join(',')}`);
 }
 
-/** 用户输出（入参为 ser('User') 结果）：隐藏 PIN 哈希，补充“已设置 PIN”“锁定中”标记 */
+/** 用户输出（入参为 ser('User') 结果，PIN 哈希已由视图隐藏、has_pin 由视图计算）：补充“锁定中”标记 */
 function userView(o: Record<string, any>) {
-  const { pin_hash, ...rest } = o;
+  const { pin_hash: _hidden, ...rest } = o; // 防御：即使视图配置变化也不输出哈希
   const until = rest.locked_until ? new Date(rest.locked_until).getTime() : 0;
-  return { ...rest, has_pin: !!pin_hash, locked: until > Date.now() };
+  return { ...rest, locked: until > Date.now() };
 }
 
 @Controller('system')

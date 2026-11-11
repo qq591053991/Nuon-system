@@ -26,6 +26,17 @@ export function localStart(d: Date): Date {
 
 const pct = (n: number, total: number) => round((n / total) * 100, 1);
 
+/** 待 QA 放行的工单数：已完工待整批放行，或生产中已有入库成品可分批放行 */
+async function pendingReleaseCount(tx: Tx): Promise<number> {
+  const rows = await tx.$queryRaw<{ n: number }[]>`
+    SELECT COUNT(*)::int AS n FROM mes_work_order w
+    WHERE w.dhr_status = 'OPEN' AND (
+      w.status = 'COMPLETED'
+      OR (w.status = 'IN_PROGRESS' AND w.received_qty - w.released_qty
+          - COALESCE((SELECT SUM(r.qty) FROM mes_product_release r WHERE r.wo_id = w.id AND r.status = 'REJECTED'), 0) > 0.00001))`;
+  return Number(rows[0]?.n ?? 0);
+}
+
 @Injectable()
 export class ReportService {
   async dashboard(tx: Tx) {
@@ -121,7 +132,7 @@ export class ReportService {
         iqc_pass_rate: iqcRate,
         open_ncr: await tx.ncr.count({ where: { status: 'OPEN' } }),
         open_capa: await tx.capa.count({ where: { status: { not: 'CLOSED' } } }),
-        pending_release: await tx.workOrder.count({ where: { status: 'COMPLETED', dhr_status: 'OPEN' } }),
+        pending_release: await pendingReleaseCount(tx),
         stock_value: round2(Number(stockValue) || 0),
         below_safety: below.length,
         expiring_lots: expiring,
@@ -157,7 +168,7 @@ export class ReportService {
     };
     await add('qc', 'iqc', '待检验的来料（IQC）', () => tx.inspection.count({ where: { status: 'PENDING' } }), '/quality/inspections');
     await add('qa', 'ncr', '待评审处置的不合格品（NCR）', () => tx.ncr.count({ where: { status: 'OPEN' } }), '/quality/ncrs');
-    await add('qa', 'dhr', '待审核放行的生产批（DHR）', () => tx.workOrder.count({ where: { status: 'COMPLETED', dhr_status: 'OPEN' } }), '/quality/release');
+    await add('qa', 'dhr', '待审核放行的生产批（DHR，含可分批放行）', () => pendingReleaseCount(tx), '/quality/release');
     await add('qa', 'capa', '进行中的 CAPA', () => tx.capa.count({ where: { status: { not: 'CLOSED' } } }), '/quality/capas');
     await add('qa', 'complaint', '未关闭的客户投诉/不良事件', () => tx.complaint.count({ where: { status: { not: 'CLOSED' } } }), '/quality/complaints');
     await add('qa', 'bom_submitted', '待批准的 BOM', () => tx.bom.count({ where: { status: 'SUBMITTED' } }), '/engineering/boms?status=SUBMITTED');

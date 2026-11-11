@@ -33,7 +33,8 @@ backend/
 6. **关键质量操作必须电子签名**：`await this.esign.sign(tx, user, body.signature, '产品放行（DHR审核批准）', 'mes_work_order', wo.id, wo.no)`。
 7. **单据号**：`await this.numbering.nextNo(tx, 'SO')` → `SO261111001`。
 8. **请求体用 DTO 类 + class-validator 装饰器**。全局 `ValidationPipe` 开了 `whitelist`：**没有装饰器的字段会被丢弃**，可选字段加 `@IsOptional()`；嵌套数组用 `@ValidateNested({ each: true }) @Type(() => LineDto)`。纯日期字段按字符串接收，用 `dateOnly()` 转换。
-9. **数量/金额**：Float 存储，计算后 `round()`（数量 4 位）/ `round2()`（金额）。
+9. **数量/金额**：数量为 Float，计算后 `round()`（4 位）；金额/单价为 `Prisma.Decimal`（`Decimal(18,2)` / `Decimal(18,6)`），一律用 `src/common/money.ts`（`money`、`lineAmount`、`sumMoney`…，十进制运算、四舍五入到分），读出后计算前用 `num()` 转数字。多币别换算用 `src/erp/currency.ts`。
+11. **电子记录不可篡改**：审计追踪、电子签名、库存流水在数据库层禁止修改/删除（触发器），审计追踪定时封存为哈希链；不要尝试更新这些表。原始 SQL 写入会绕过审计钩子，必须时需手工写审计（参考 `core/inventory.service.ts` 的 addStock）。
 10. 成功的 POST 返回 200（全局拦截器处理）；错误格式统一为 `{ "detail": "..." }`。
 
 ## 测试

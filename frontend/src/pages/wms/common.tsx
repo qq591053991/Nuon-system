@@ -82,6 +82,7 @@ export function refLink(type?: string | null, id?: number | null, no?: string | 
     RECEIPT: `/wms/receipts?q=${q}`,
     ISSUE: `/wms/issues?q=${q}`,
     SHIPMENT: `/wms/shipments?q=${q}`,
+    CUSTOMER_RETURN: `/wms/customer-returns?q=${q}`,
     STOCK_COUNT: id ? `/wms/counts?id=${id}` : undefined,
     INSPECTION: id ? `/quality/inspections/${id}` : undefined,
     NCR: `/quality/ncrs?q=${q}`,

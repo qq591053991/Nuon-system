@@ -9,7 +9,7 @@
  *   需求日期 = 该周最早的需求日；建议日期 = 需求日期 − 提前期（自制件为生产周期、外购件为采购提前期），不早于今天（被压缩时备注“交期紧张”）；
  *   自制件的计划订单在“需求日期 − 生产周期”（即开工日）产生下层组件需求，按低阶码逐层展开。
  * 每个物料每周最多一条建议；自制件建议“生产”，外购件建议“采购”，客供料建议“通知客户供料”。
- * 需求日期与周次记在建议备注开头（“需求日期 YYYY-MM-DD（YYYY-Www）”），接口返回时解析为 required_date / week 字段。
+ * 需求日期与周次存于 required_date / week 字段（早期版本记在备注开头，读取时兼容）。
  */
 import { Injectable } from '@nestjs/common';
 import type { Material, MrpSuggestion, Prisma } from '@prisma/client';
@@ -45,9 +45,10 @@ export function isoWeekLabel(d: Date): string {
   return `${year}-W${String(week).padStart(2, '0')}`;
 }
 
-/** 建议备注开头的需求日期/周次 → 接口字段 required_date / week / note */
+/** 接口字段 required_date / week / note；兼容早期把需求日期/周次写在备注开头的数据 */
 const REQ_RE = /^需求日期 (\d{4}-\d{2}-\d{2})（(\d{4}-W\d{2})）；?/;
 function decorate<T extends Record<string, any>>(s: T): T & { required_date: string | null; week: string | null; note: string | null } {
+  if (s.week) return { ...s, required_date: fmtDate(s.required_date) ?? s.required_date ?? null, week: s.week, note: s.remark ?? null };
   const m = REQ_RE.exec(s.remark ?? '');
   return { ...s, required_date: m?.[1] ?? null, week: m?.[2] ?? null, note: m ? s.remark.slice(m[0].length) || null : (s.remark ?? null) };
 }
@@ -213,7 +214,7 @@ export class MrpService {
                 allMids.add(ln.component_id);
               }
             }
-            const notes = [`需求日期 ${fmtDate(req)}（${isoWeekLabel(new Date(wk))}）`];
+            const notes: string[] = [];
             if (due.getTime() < t.getTime()) notes.push('交期紧张：建议日期早于今天');
             const later = round(weeks.slice(wi + 1).reduce((s, w) => s + (rb.get(w)?.qty ?? 0), 0));
             if (later > EPS) notes.push(`其后各周另有在途/在制 ${fmtNum(later)}，可考虑催交提前`);
@@ -222,7 +223,8 @@ export class MrpService {
               net_qty: net, suggested_qty: qty, due_date: due.getTime() > t.getTime() ? due : t,
               supplier_id: action === 'PURCHASE' ? m.default_supplier_id : null,
               customer_id: action === 'CUSTOMER_SUPPLY' ? m.owner_customer_id : action === 'PRODUCE' ? m.customer_id : null,
-              remark: notes.join('；').slice(0, 256),
+              required_date: req, week: isoWeekLabel(new Date(wk)),
+              remark: notes.join('；').slice(0, 256) || null,
             });
           }
         }

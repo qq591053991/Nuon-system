@@ -25,7 +25,7 @@ const locProps: Props = { location_code: (o) => o.location?.code ?? null };
 const parseJson = (s: string | null | undefined) => (s ? JSON.parse(s) : []);
 
 export const VIEWS: Record<string, View> = {
-  User: { props: { role_list: (o) => String(o.roles || '').split(',').filter(Boolean) } },
+  User: { props: { role_list: (o) => String(o.roles || '').split(',').filter(Boolean), has_pin: (o) => !!o.pin_hash } },
   Material: {
     include: { default_supplier: true, owner_customer: true, customer: true },
     props: {

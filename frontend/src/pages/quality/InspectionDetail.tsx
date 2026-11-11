@@ -18,12 +18,14 @@ interface ItemRow {
   id?: number;
   name: string;
   standard?: string;
+  /** 检验方法（生成检验单时从检验规范复制） */
+  method?: string;
   value?: string;
   result: 'PASS' | 'FAIL';
 }
 
 const toRows = (items: Rec[] = []): ItemRow[] =>
-  items.map((i) => ({ key: `i${i.id}`, id: i.id, name: i.name, standard: i.standard ?? '', value: i.value ?? '', result: i.result === 'FAIL' ? 'FAIL' : 'PASS' }));
+  items.map((i) => ({ key: `i${i.id}`, id: i.id, name: i.name, standard: i.standard ?? '', method: i.method ?? undefined, value: i.value ?? '', result: i.result === 'FAIL' ? 'FAIL' : 'PASS' }));
 
 /** 抽样方案卡片 */
 function SamplingCard({ insp }: { insp: Rec }) {
@@ -151,8 +153,8 @@ export default function InspectionDetail() {
       title: '标准 / 要求', dataIndex: 'standard',
       render: (v: string, r: ItemRow) => (editable && !r.id ? <Input value={v} placeholder="判定标准" onChange={(e) => update(r.key, { standard: e.target.value })} /> : v || '-'),
     },
-    ...(Object.keys(methods).length
-      ? [{ title: '检验方法', key: 'method', width: 160, render: (_: any, r: ItemRow) => methods[r.name] || <Typography.Text type="secondary">-</Typography.Text> }]
+    ...(Object.keys(methods).length || (insp?.items ?? []).some((i: Rec) => i.method)
+      ? [{ title: '检验方法', key: 'method', width: 160, render: (_: any, r: ItemRow) => r.method || methods[r.name] || <Typography.Text type="secondary">-</Typography.Text> }]
       : []),
     {
       title: '实测 / 记录', dataIndex: 'value', width: 200,

@@ -39,6 +39,7 @@
 从金蝶迁移方案见 [docs/kingdee-migration.md](docs/kingdee-migration.md)，金蝶账号登录见 [docs/kingdee-sso.md](docs/kingdee-sso.md)，
 设计评审与上线前待办见 [docs/design-review.md](docs/design-review.md)，
 运维（HTTPS、备份与恢复演练、记录保存、数据库账号加固、时间同步、升级）见 [docs/operations.md](docs/operations.md)。
+硬件对接（扫码枪、标签打印、测试仪器采集、预算与采购条款）见 [docs/hardware-integration.md](docs/hardware-integration.md)。
 
 ## 核心业务流程
 

@@ -67,22 +67,27 @@ function cellRender(f: Field) {
   };
 }
 
-export function FieldInput({ f }: { f: Field }) {
+/**
+ * 按字段类型渲染输入控件。
+ * 注意：Form.Item 会向直接子组件注入 value / onChange / checked / id 等属性，这里必须原样转发给实际控件，
+ * 否则表单与控件不绑定（编辑时不回显、提交时取不到值）。
+ */
+export function FieldInput({ f, ...rest }: { f: Field } & Record<string, any>) {
   switch (f.type) {
     case 'number':
-      return <InputNumber style={{ width: '100%' }} precision={f.precision} min={f.min} />;
+      return <InputNumber style={{ width: '100%' }} precision={f.precision} min={f.min} {...rest} />;
     case 'textarea':
-      return <Input.TextArea rows={2} />;
+      return <Input.TextArea rows={2} {...rest} />;
     case 'switch':
-      return <Switch />;
+      return <Switch {...rest} />;
     case 'date':
-      return <DatePicker style={{ width: '100%' }} />;
+      return <DatePicker style={{ width: '100%' }} {...rest} />;
     case 'select':
-      return <Select allowClear options={f.options || dictOptions(f.dict!)} />;
+      return <Select allowClear options={f.options || dictOptions(f.dict!)} {...rest} />;
     case 'remote':
-      return <RemoteSelect url={f.url!} params={f.urlParams} />;
+      return <RemoteSelect url={f.url!} params={f.urlParams} {...rest} />;
     default:
-      return <Input />;
+      return <Input {...rest} />;
   }
 }
 
@@ -96,17 +101,20 @@ export default function CrudPage({ title, sub, url, perm, fields, filters, rowAc
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [form] = Form.useForm();
+  const [initValues, setInitValues] = useState<Rec>({});
+  const [formKey, setFormKey] = useState(0);
   const formFields = fields.filter((f) => f.form !== false);
 
+  // 弹窗关闭时内容会被销毁，表单在打开时才挂载：用 initialValues 回显（setFieldsValue 对未挂载的表单无效）
   const openForm = (row: Rec | null) => {
-    setEditing(row);
-    form.resetFields();
     const init: Rec = {};
     formFields.forEach((f) => {
       const v = row ? row[f.name] : f.default;
       init[f.name] = f.type === 'date' && v ? dayjs(v) : v;
     });
-    form.setFieldsValue(init);
+    setEditing(row);
+    setInitValues(init);
+    setFormKey((k) => k + 1);
     setOpen(true);
   };
 
@@ -177,7 +185,7 @@ export default function CrudPage({ title, sub, url, perm, fields, filters, rowAc
         <Table rowKey="id" size="middle" columns={columns} dataSource={rows} loading={loading} pagination={pagination} scroll={{ x: scrollX || 'max-content' }} />
       </Card>
       <Modal open={open} title={(editing ? '编辑' : '新增') + title} width={modalWidth} onCancel={() => setOpen(false)} onOk={submit} confirmLoading={saving} destroyOnHidden maskClosable={false}>
-        <Form form={form} layout="vertical">
+        <Form form={form} layout="vertical" initialValues={initValues} key={formKey}>
           <Row gutter={16}>
             {formFields.map((f) => (
               <Col span={f.span || (f.type === 'textarea' ? 24 : 12)} key={f.name}>

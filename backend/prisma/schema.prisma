@@ -561,6 +561,8 @@ model MrpSuggestion {
   status           String    @default("OPEN") @db.VarChar(16) // OPEN/CONVERTED/IGNORED
   converted_doc_no String?   @db.VarChar(32)
   remark           String?   @db.VarChar(256)
+  required_date    DateTime? @db.Date // 需求日期（分时段 MRP）
+  week             String?   @db.VarChar(10) // ISO 周次，如 2026-W46
 
   run      MrpRun    @relation(fields: [run_id], references: [id], onDelete: Cascade)
   material Material  @relation(fields: [material_id], references: [id])
@@ -1092,6 +1094,8 @@ model InspectionItem {
   inspection_id Int
   name          String  @db.VarChar(64)
   standard      String? @db.VarChar(256)
+  method        String? @db.VarChar(128) // 检验方法（生成检验单时从物料检验规范复制）
+  spec_item_id  Int? // 来源检验规范条目
   value         String? @db.VarChar(128)
   result        String  @default("PASS") @db.VarChar(8)
 

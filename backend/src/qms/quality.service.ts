@@ -12,7 +12,7 @@
  *       NCR 评审处置（REWORK/SCRAP/USE_AS_IS/RETURN），QA 电子签名
  *
  * 在 Nest 容器外（如演示数据脚本）手工构造：
- *   new QualityService(new InventoryService(), new NumberingService(), new EsignService())
+ *   new QualityService(new InventoryService(), new NumberingService(), new EsignService(new AuthService(db)))
  */
 import { Injectable } from '@nestjs/common';
 import type { Inspection, InspectionItem, Material, Ncr, Receipt, ReceiptLine } from '@prisma/client';
@@ -76,12 +76,12 @@ export class QualityService {
   ) {}
 
   /** 物料的 IQC 检验项目：已维护检验规范（启用项，按序号）则按规范；否则按物料类型的默认模板 */
-  async iqcItemsFor(tx: Tx, material: Material): Promise<{ name: string; standard: string | null; method: string | null }[]> {
+  async iqcItemsFor(tx: Tx, material: Material): Promise<{ name: string; standard: string | null; method: string | null; spec_item_id: number | null }[]> {
     const spec = await tx.materialInspectionItem.findMany({
       where: { material_id: material.id, is_active: true }, orderBy: [{ seq: 'asc' }, { id: 'asc' }],
     });
-    if (spec.length) return spec.map((s) => ({ name: s.name, standard: s.standard ?? null, method: s.method ?? null }));
-    return itemsFor(material).map(([name, standard]) => ({ name, standard, method: null }));
+    if (spec.length) return spec.map((s) => ({ name: s.name, standard: s.standard ?? null, method: s.method ?? null, spec_item_id: s.id }));
+    return itemsFor(material).map(([name, standard]) => ({ name, standard, method: null, spec_item_id: null }));
   }
 
   /** 为待检收货行创建 IQC 检验单（AQL 抽样方案 + 检验规范/默认检验项目），并回写 receipt_line.inspection_id */
@@ -96,7 +96,8 @@ export class QualityService {
         receipt_line_id: line.id, supplier_id: receipt.supplier_id ?? null, lot_qty: line.qty, aql: plan.aql,
         code_letter: plan.code_letter, sample_size: plan.sample_size, accept_num: plan.accept_num, reject_num: plan.reject_num,
         status: 'PENDING', created_by: a.username,
-        items: { create: items.map(({ name, standard }) => ({ name, standard, result: 'PASS' })) },
+        // 检验方法与规范条目随检验单一起保存：规范日后修改不影响已生成的检验记录
+        items: { create: items.map(({ name, standard, method, spec_item_id }) => ({ name, standard, method, spec_item_id, result: 'PASS' })) },
       },
     });
     await tx.receiptLine.update({ where: { id: line.id }, data: { inspection_id: insp.id } });

@@ -237,13 +237,15 @@ export class ProductionService {
     throw new BizError(`您尚未取得工序【${label}】的上岗资质，请联系质量部培训考核`);
   }
 
-  /** 已领用（过账）到工单的某物料批次 */
+  /** 已领用（过账）到工单、且未全部退回的某物料批次 */
   private async issuedLots(tx: Tx, woId: number, materialId: number): Promise<Set<string>> {
     const rows = await tx.materialIssueLine.findMany({
       where: { material_id: materialId, issue: { wo_id: woId, status: 'CONFIRMED' } },
-      select: { lot_no: true },
+      select: { lot_no: true, qty: true, issue: { select: { issue_type: true } } },
     });
-    return new Set(rows.map((r) => r.lot_no));
+    const net = new Map<string, number>();
+    for (const r of rows) net.set(r.lot_no, round((net.get(r.lot_no) ?? 0) + (r.issue.issue_type === 'RETURN' ? -r.qty : r.qty), 4));
+    return new Set([...net].filter(([, q]) => q > EPS).map(([lot]) => lot));
   }
 
   /** 开工：首次报工时工单转为“生产中” */
@@ -617,7 +619,7 @@ export class ProductionService {
     if (!wo) throw new NotFound('生产工单');
     const p = wo.material;
     const issues = await tx.materialIssueLine.findMany({
-      where: { issue: { wo_id: wo.id, status: 'CONFIRMED' } }, orderBy: { id: 'asc' }, include: { material: true },
+      where: { issue: { wo_id: wo.id, status: 'CONFIRMED' } }, orderBy: { id: 'asc' }, include: { material: true, issue: true },
     });
     const ncrs = await tx.ncr.findMany({ where: { wo_id: wo.id }, orderBy: { id: 'asc' } });
     // 返工换件补领（REWORK_ISSUE，关联本工单的 NCR）也计入物料批次追溯
@@ -628,7 +630,8 @@ export class ProductionService {
       : [];
     const matRows = new Map<string, Record<string, any>>();
     const lines = [
-      ...issues.map((ln) => ({ ...ln, source: 'ISSUE' })),
+      // 退料单冲减领用数量
+      ...issues.map((ln) => ({ ...ln, qty: ln.issue.issue_type === 'RETURN' ? -ln.qty : ln.qty, source: 'ISSUE' })),
       ...reworkMoves.map((mv) => ({ material_id: mv.material_id, material: mv.material, lot_no: mv.lot_no, qty: mv.qty, owner_customer_id: mv.owner_customer_id, source: 'REWORK' })),
     ];
     for (const ln of lines) {
@@ -684,7 +687,7 @@ export class ProductionService {
         routing_version: wo.routing?.version ?? null, serial_control: p.serial_control, uom: p.uom,
       },
       product: { code: p.code, name: p.name, model: p.model, spec: p.spec, registration_no: p.registration_no, device_class: p.device_class, gtin: p.gtin },
-      materials: [...matRows.values()],
+      materials: [...matRows.values()].filter((r) => r.qty > EPS), // 已全部退回的批次不计入
       operations: ops,
       serials: sns.map((s) => ({ sn: s.sn, udi: s.udi, status: s.status, release_no: s.release?.no ?? null, release_status: s.release?.status ?? null })),
       records: records.map((r) => ({

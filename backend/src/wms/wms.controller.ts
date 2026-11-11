@@ -196,6 +196,7 @@ export class WmsController {
     const where: any = {};
     if (q.q) where.OR = [{ no: like(q.q) }, { work_order: { no: like(q.q) } }];
     if (q.status) where.status = q.status;
+    if (q.issue_type) where.issue_type = q.issue_type; // ISSUE=领料 / RETURN=退料
     if (int(q.wo_id)) where.wo_id = int(q.wo_id);
     return paginate(this.db.client.materialIssue, 'MaterialIssue', { where, children: ['lines'] }, q);
   }
