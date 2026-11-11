@@ -1,19 +1,11 @@
-# Python
-__pycache__/
-*.pyc
-.venv/
-.pytest_cache/
-backend/*.db
-backend/*.db-shm
-backend/*.db-wal
 # Node
 node_modules/
 frontend/dist/
+backend/dist/
 *.tsbuildinfo
-# Env / OS
+# Env / OS / IDE
 .env
+backend/.env
 .DS_Store
 .idea/
 .vscode/
-server/dist/
-server/.env

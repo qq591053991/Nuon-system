@@ -18,6 +18,7 @@
 | 医疗器械合规靠纸质记录、事后补签 | **电子签名 + 审计追踪 + 电子 DHR + UDI**，系统强制执行 GMP 规则 |
 | 车间报工要坐电脑录单 | **工位终端**：扫码 → 自动显示下一道工序和测试规格 → 录入测量值自动判定 → 一键提交 |
 | 老系统数据迁移难 | **金蝶导出的 Excel 直接导入**（兼容金蝶列名），出错整单回滚 |
+| 又要多记一套账号密码 | **用金蝶云星空账号密码直接登录**，金蝶改密/停用即时生效 |
 
 ## 功能模块
 
@@ -32,10 +33,11 @@
 | **追溯** | 反向：序列号 → 工单/批号 → 每个物料批次（供应商、IQC）→ 每道工序的操作人/设备/测试数据 → 发货客户；正向：物料批次 → 工单 → 序列号 → 客户（**召回范围秒级评估**） |
 | **工程数据** | BOM（多级、位号、损耗率）、工艺路线 + 测试规格（峰值波长、辐照度、老化时长、耐压/漏电流…），**草稿 → 电子签名发布 → 升版（ECN）** |
 | **财务** | 发货自动生成应收、采购入库自动生成应付、收付款登记、账龄分析 |
-| **系统与合规** | 用户/角色/权限、**审计追踪**（字段级前后值，不可修改）、电子签名记录、金蝶数据导入 |
+| **系统与合规** | 用户/角色/权限、**金蝶云星空账号直接登录**、**审计追踪**（字段级前后值）、电子签名记录、登录锁定与登录日志、金蝶数据导入 |
 
 完整的业务规则见 [docs/architecture.md](docs/architecture.md)，合规条款对照见 [docs/compliance.md](docs/compliance.md)，
-从金蝶迁移方案见 [docs/kingdee-migration.md](docs/kingdee-migration.md)。
+从金蝶迁移方案见 [docs/kingdee-migration.md](docs/kingdee-migration.md)，金蝶账号登录见 [docs/kingdee-sso.md](docs/kingdee-sso.md)，
+设计评审与上线前待办见 [docs/design-review.md](docs/design-review.md)。
 
 ## 核心业务流程
 
@@ -71,16 +73,20 @@ docker compose up -d --build
 
 ### 方式二：本地开发
 
-后端（Python 3.11+）：
+需要 Node.js 20+ 与 PostgreSQL 14+（数据库需为 UTF8 编码；无 PostgreSQL 时可 `docker run -p 5432:5432 -e POSTGRES_PASSWORD=nuon postgres:16`）。
+
+后端（NestJS）：
 
 ```bash
 cd backend
-python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
-.venv/bin/python -m app.seed --reset --demo        # 初始化 + 演示数据（SQLite: backend/nuon.db）
-.venv/bin/uvicorn app.main:app --reload --port 8000  # API 文档：http://localhost:8000/api/docs
+cp .env.example .env                  # 修改 DATABASE_URL 等
+npm install
+npx prisma migrate deploy             # 建表/升级数据库结构
+npm run seed -- --reset --demo        # 初始化 + 演示数据
+npm run start:dev                     # API 文档：http://localhost:8000/api/docs
 ```
 
-前端（Node 20+）：
+前端：
 
 ```bash
 cd frontend
@@ -88,7 +94,7 @@ npm install
 npm run dev        # http://localhost:5173 （/api 自动代理到 8000）
 ```
 
-使用 PostgreSQL：设置 `DATABASE_URL=postgresql+psycopg://user:pwd@host:5432/nuon`（库需为 UTF8 编码）。
+金蝶云星空账号登录：配置 `KINGDEE_ENABLED / KINGDEE_URL / KINGDEE_ACCT_ID`，详见 [docs/kingdee-sso.md](docs/kingdee-sso.md)。
 
 ### 演示账号（密码均为 `Nuon@2026`）
 
@@ -115,30 +121,33 @@ npm run dev        # http://localhost:5173 （/api 自动代理到 8000）
 
 ## 技术架构
 
-- 后端：Python · FastAPI · SQLAlchemy 2 · PostgreSQL（开发可用 SQLite）· JWT · bcrypt
+- 后端：TypeScript · NestJS 11 · Prisma 6（含数据库迁移）· PostgreSQL · JWT · 金蝶云星空账号登录
 - 前端：React 18 · TypeScript · Ant Design 5（中文）· Vite · ECharts
 - 部署：Docker Compose（Nginx + API + PostgreSQL），单台服务器即可支撑数百用户
 
+前后端都是 TypeScript；NestJS 的模块/依赖注入与 Spring Boot 结构相近，熟悉 Java 的同事也容易上手。
+
 ```
-backend/app
-  models/      数据模型：主数据、ERP、WMS、MES、QMS、系统（46 张表）
-  services/    业务规则：库存核心、生产执行、质量、仓储、MRP、追溯、AQL、UDI
-  routers/     REST API（/api/docs 查看）
-  audit.py     审计追踪（ORM 自动记录字段级变更）
-  security.py  认证、角色权限、电子签名
-  seed.py      初始化与演示数据
-backend/tests  端到端测试（SQLite 与 PostgreSQL 均通过）
+backend/
+  prisma/schema.prisma   数据模型（46 张表）；prisma/migrations 数据库结构变更脚本
+  src/common/            基础设施：事务、审计追踪（Prisma 扩展，字段级前后值）、输出视图、通用 CRUD、错误格式
+  src/auth/              登录（本地 + 金蝶云星空）、角色权限、登录锁定
+  src/core/              库存核心（行锁、FEFO、客供料隔离）、单据编号、电子签名、AQL、UDI
+  src/master|erp|wms|qms|mes|report|imports/   各业务域：*.service.ts（规则）+ *.controller.ts（接口）
+  src/seed/              初始化与演示数据
+  test/                  Jest 端到端测试（34 项）
 frontend/src
-  pages/       各业务页面
-  components/  电子签名、远程搜索、配置化 CRUD、图表等通用组件
-docs/          架构说明、合规对照、金蝶迁移方案、前端开发约定
+  pages/                 各业务页面
+  components/            电子签名、远程搜索、配置化 CRUD、图表等通用组件
+docs/                    架构、合规对照、设计评审、金蝶迁移与登录集成、前后端开发约定
 ```
 
-运行测试：
+运行测试（使用独立的测试库，会被清空）：
 
 ```bash
-cd backend && .venv/bin/python -m pytest -q
-# PostgreSQL：DATABASE_URL=postgresql+psycopg://... .venv/bin/python -m pytest -q
+cd backend
+DATABASE_URL=postgresql://user:pwd@localhost:5432/nuon_test npx prisma migrate deploy
+DATABASE_URL=postgresql://user:pwd@localhost:5432/nuon_test npm test
 ```
 
 ## 路线图（建议后续迭代）
@@ -147,4 +156,5 @@ cd backend && .venv/bin/python -m pytest -q
 - 标签打印（UDI 二维码 GS1 DataMatrix、彩盒/外箱标签）、PDA 移动端收发货
 - 供应商门户（送货预约、来料证书上传）、客户门户（订单进度、DHR/COC 下载）
 - 金蝶财务凭证对接（保留金蝶总账，业务全部在本系统）
-- 数据库版本迁移（Alembic）、计算机化系统验证（CSV：IQ/OQ/PQ）文档包、单点登录
+- 计算机化系统验证（CSV：IQ/OQ/PQ）文档包
+- 上线前必须处理的问题与改进清单见 [docs/design-review.md](docs/design-review.md)

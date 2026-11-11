@@ -1,11 +1,11 @@
 # 后端开发约定（NestJS + Prisma + PostgreSQL）
 
-代码在 `server/`。启动：`cd server && npm install && npx prisma migrate deploy && npm run seed -- --demo && npm run start:dev`，接口文档 `http://localhost:8000/api/docs`。
+代码在 `backend/`。启动：`cd backend && npm install && npx prisma migrate deploy && npm run seed -- --demo && npm run start:dev`，接口文档 `http://localhost:8000/api/docs`。
 
 ## 目录
 
 ```
-server/
+backend/
   prisma/schema.prisma        数据模型（字段 snake_case，与接口 JSON 一致）；改模型后 `npx prisma migrate dev --name xxx`
   src/
     common/                   基础设施（一般不用改）
@@ -39,7 +39,7 @@ server/
 ## 测试
 
 ```bash
-cd server
+cd backend
 DATABASE_URL=postgresql://user@host/nuon_test npx prisma migrate deploy   # 测试库（会被清空！）
 DATABASE_URL=postgresql://user@host/nuon_test npm test
 ```

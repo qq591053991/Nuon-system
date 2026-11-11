@@ -19,7 +19,7 @@ export const PRIORITY_OPTIONS = [
   { value: 5, label: '5 - 最低' },
 ];
 
-/** 数字的简洁显示（去掉多余的 0，类似 Python 的 :g） */
+/** 数字的简洁显示（去掉多余的 0） */
 export const num = (v?: number | null) => (v === null || v === undefined ? '-' : String(Number(Number(v).toFixed(6))));
 
 /** 规格文本：40~60 mW/cm² / ≥4 h / ≤5 mA */

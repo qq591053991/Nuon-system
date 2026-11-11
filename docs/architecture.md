@@ -9,7 +9,7 @@ flowchart TB
     ST[车间工位终端 / 触摸屏 + 扫码枪]
   end
   PC & ST --> NG[Nginx：静态前端 + /api 反向代理]
-  NG --> API[FastAPI 应用]
+  NG --> API[NestJS 应用]
   API --> SVC[业务服务层<br/>inventory · production · quality · wms · mrp · trace]
   SVC --> DB[(PostgreSQL)]
   API -. 自动 .-> AUD[审计追踪 / 电子签名]
@@ -17,8 +17,9 @@ flowchart TB
 ```
 
 - **单体应用 + 单一数据库**：ERP/MES/WMS/QMS 同库，避免系统间接口和数据不一致；按业务域划分模块，后续可平滑拆分。
-- **所有库存变动只走 `services/inventory.py`**：余额与流水在同一事务内更新，库存不会“对不上”。
-- **审计追踪在 ORM 层统一实现**（`audit.py`，`after_flush` 钩子），任何功能新增的数据都自动有审计记录。
+- **所有库存变动只走 `backend/src/core/inventory.service.ts`**：余额与流水在同一事务内更新（行锁防并发），库存不会“对不上”。
+- **审计追踪在数据访问层统一实现**（`backend/src/common/prisma.service.ts`，Prisma 扩展），审计日志与业务数据同一事务提交，任何功能新增的数据都自动有审计记录。
+- **数据库结构由 Prisma Migrate 管理**（`backend/prisma/migrations`），升级时自动执行，可追溯每一次结构变更。
 - **时间戳由服务器生成**（工厂本地时区），客户端不能指定。
 
 ## 数据模型（46 张表）

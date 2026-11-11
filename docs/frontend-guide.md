@@ -57,8 +57,8 @@ import { fmtDate, fmtDateTime, fmtQty, fmtMoney, fmtPct, toDate } from '../../ut
 ## 后端接口
 
 * 交互式文档：启动后端后访问 `http://127.0.0.1:8000/api/docs`。
-* 路由源码：`backend/app/routers/*.py`（请求体 = Pydantic 模型；响应 = `ser()` 序列化的 dict）。
-* `ser(obj)` 输出：**所有数据库字段 + 模型上的全部 `@property`**（如 `customer_name`、`material_code`、`progress`）+ 指定的子表（如 `lines`）。看 `backend/app/models/*.py` 就能知道字段。
+* 接口源码：`backend/src/*/*.controller.ts`（请求体 = DTO 类；响应 = `ser()` 序列化结果），约定见 `docs/backend-guide.md`。
+* 响应字段 = 数据库字段（`backend/prisma/schema.prisma`，snake_case）+ `backend/src/common/presenter.ts` 中定义的计算字段（如 `customer_name`、`material_code`、`progress`）+ 指定的子表（如 `lines`）。
 * 列表接口统一返回 `{items, total, page, page_size}`，支持 `q`、`page`、`page_size` 及各自筛选参数。
 * 业务错误统一 HTTP 400 + `{detail: "中文提示"}`；无权限 403；未登录 401。
 
@@ -66,8 +66,10 @@ import { fmtDate, fmtDateTime, fmtQty, fmtMoney, fmtPct, toDate } from '../../ut
 
 ```bash
 cd backend
-DATABASE_URL=sqlite:///./dev.db .venv/bin/python -m app.seed --reset --demo
-DATABASE_URL=sqlite:///./dev.db .venv/bin/uvicorn app.main:app --port 8000
+cp .env.example .env              # 配置 DATABASE_URL（PostgreSQL）
+npm install && npx prisma migrate deploy
+npm run seed -- --reset --demo    # 基础 + 演示数据
+npm run start:dev                 # http://localhost:8000/api/docs
 cd ../frontend && npm run dev     # http://localhost:5173 ，/api 代理到 8000（VITE_API_TARGET 可改）
 ```
 

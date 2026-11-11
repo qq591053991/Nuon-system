@@ -23,12 +23,18 @@ services:
       db:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql+psycopg://nuon:${DB_PASSWORD:-nuon_change_me}@db:5432/nuon
+      DATABASE_URL: postgresql://nuon:${DB_PASSWORD:-nuon_change_me}@db:5432/nuon
       SECRET_KEY: ${SECRET_KEY:-please-set-a-long-random-secret-key-in-env-file}
       TZ_NAME: Asia/Shanghai
       SEED_ON_START: "1"
       SEED_DEMO: ${SEED_DEMO:-1}
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      # 金蝶云星空账号登录（见 docs/kingdee-sso.md）
+      KINGDEE_ENABLED: ${KINGDEE_ENABLED:-0}
+      KINGDEE_URL: ${KINGDEE_URL:-}
+      KINGDEE_ACCT_ID: ${KINGDEE_ACCT_ID:-}
+      KINGDEE_AUTO_CREATE: ${KINGDEE_AUTO_CREATE:-1}
+      KINGDEE_DEFAULT_ROLES: ${KINGDEE_DEFAULT_ROLES:-}
 
   frontend:
     build: ./frontend

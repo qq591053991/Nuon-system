@@ -20,7 +20,7 @@ http.interceptors.response.use(
     const status = err.response?.status;
     let detail = err.response?.data?.detail;
     if (Array.isArray(detail)) {
-      // FastAPI 参数校验错误
+      // 参数校验错误（数组格式）
       detail = detail.map((d: any) => `${(d.loc || []).slice(1).join('.')}: ${d.msg}`).join('；');
     }
     if (status === 401 && !location.pathname.startsWith('/login')) {
