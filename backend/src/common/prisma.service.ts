@@ -8,7 +8,7 @@ export type Tx = Prisma.TransactionClient;
 /** 审计追踪不记录的模型（自身即为记录/流水） */
 const SKIP_MODELS = new Set(['AuditLog', 'ESignature', 'Sequence', 'StockMove']);
 const SKIP_FIELDS = new Set(['password_hash', 'updated_at', 'created_at']);
-const WRITE_OPS = new Set(['create', 'update', 'upsert', 'delete', 'updateMany', 'deleteMany']);
+const WRITE_OPS = new Set(['create', 'createMany', 'update', 'upsert', 'delete', 'updateMany', 'deleteMany']);
 
 const MODELS = new Map(Prisma.dmmf.datamodel.models.map((m) => [m.name, m]));
 const tableOf = (model: string) => MODELS.get(model)?.dbName ?? model;
@@ -17,12 +17,14 @@ const scalarFields = (model: string) =>
 const delegateName = (model: string) => model.charAt(0).toLowerCase() + model.slice(1);
 
 function jsonable(key: string, v: unknown): unknown {
+  if (v instanceof Prisma.Decimal) return v.toNumber();
   if (v instanceof Date) return DATE_FIELDS.has(key) ? v.toISOString().slice(0, 10) : v.toISOString();
   return v;
 }
 
 function same(a: unknown, b: unknown): boolean {
   if (a instanceof Date && b instanceof Date) return a.getTime() === b.getTime();
+  if (a instanceof Prisma.Decimal || b instanceof Prisma.Decimal) return a != null && b != null && new Prisma.Decimal(a as any).equals(b as any);
   return a === b || (a == null && b == null);
 }
 
@@ -72,6 +74,12 @@ function withAudit(base: PrismaClient) {
             befores = b ? [b] : [];
           } else if (operation === 'updateMany' || operation === 'deleteMany') {
             befores = await delegate.findMany({ where: a.where });
+          }
+          if (operation === 'createMany') {
+            // 批量新增改为逐条 create，保证每条记录都有审计（含 ID）
+            const items: any[] = Array.isArray(a.data) ? a.data : [a.data];
+            for (const data of items) await delegate.create({ data });
+            return { count: items.length };
           }
           const result: any = await query(args);
           const rows: any[] = [];

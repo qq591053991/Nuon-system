@@ -6,7 +6,7 @@ import { Perms, User } from '../auth';
 import type { CurrentUser } from '../common/context';
 import { addDays, dateOnly, today } from '../common/dates';
 import { BizError, NotFound } from '../common/errors';
-import { round, round2 } from '../common/num';
+import { num, round, round2 } from '../common/num';
 import { inc, like, paginate, ser } from '../common/paginate';
 import { PrismaService } from '../common/prisma.service';
 import { WmsService } from './wms.service';
@@ -121,7 +121,7 @@ export class WmsController {
       const row = {
         material_id: m.id, material_code: m.code, material_name: m.name, spec: m.spec, uom: m.uom, category: m.category,
         available: avail, quarantine: a.QUARANTINE ?? 0, rejected: a.REJECTED ?? 0, hold: a.HOLD ?? 0, safety_stock: m.safety_stock,
-        below_safety: avail < (m.safety_stock || 0), customer_supplied: !!m.owner_customer_id, amount: round2(total * (m.std_cost || 0)),
+        below_safety: avail < (m.safety_stock || 0), customer_supplied: !!m.owner_customer_id, amount: round2(total * num(m.std_cost)),
       };
       if (belowOnly && !row.below_safety) continue;
       if (!Object.keys(a).length && !belowOnly && !q.q) continue;

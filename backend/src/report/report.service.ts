@@ -3,7 +3,7 @@ import { Injectable } from '@nestjs/common';
 import { userPermissions } from '../auth/roles';
 import type { CurrentUser } from '../common/context';
 import { addDays, fmtDate, localDateStr, today } from '../common/dates';
-import { g, round, round2 } from '../common/num';
+import { g, num, round, round2 } from '../common/num';
 import type { Tx } from '../common/prisma.service';
 import { config } from '../config';
 
@@ -99,7 +99,7 @@ export class ReportService {
     return {
       kpi: {
         open_so: openSo.length,
-        open_so_amount: round2(openSo.reduce((s, o) => s + (o.total_amount || 0), 0)),
+        open_so_amount: round2(openSo.reduce((s, o) => s + num(o.total_amount), 0)),
         overdue_so: overdueSo.length,
         wip_wo: (woStatus.RELEASED ?? 0) + (woStatus.IN_PROGRESS ?? 0),
         wip_qty: round2(wipQty),

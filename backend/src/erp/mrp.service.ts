@@ -11,7 +11,7 @@ import type { Material, MrpSuggestion, Prisma } from '@prisma/client';
 import type { CurrentUser } from '../common/context';
 import { addDays, today } from '../common/dates';
 import { BizError, NotFound } from '../common/errors';
-import { round, round2 } from '../common/num';
+import { num, round, round2 } from '../common/num';
 import { paginate } from '../common/paginate';
 import { inc, ser } from '../common/presenter';
 import { PrismaService, type Tx } from '../common/prisma.service';
@@ -216,7 +216,7 @@ export class MrpService {
       for (const [supplierId, items] of bySupplier) {
         let total = 0;
         const lines = items.map((s, n) => {
-          const price = s.material.std_cost || 0;
+          const price = num(s.material.std_cost);
           total += price * s.suggested_qty;
           return { line_no: n + 1, material_id: s.material_id, qty: s.suggested_qty, unit_price: price, amount: round2(price * s.suggested_qty), expected_date: s.due_date };
         });

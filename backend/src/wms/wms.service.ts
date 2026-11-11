@@ -21,11 +21,11 @@
  *   const wms = new WmsService(inv, numbering, new QualityService(inv, numbering, new EsignService(new AuthService(db))));
  */
 import { Injectable } from '@nestjs/common';
-import type { MaterialIssue, MaterialIssueLine, PurchaseOrder, Receipt, ReceiptLine, SerialNumber, Shipment, ShipmentLine, Stock, StockCount, StockCountLine, WorkOrder } from '@prisma/client';
+import type { Prisma, MaterialIssue, MaterialIssueLine, PurchaseOrder, Receipt, ReceiptLine, SerialNumber, Shipment, ShipmentLine, Stock, StockCount, StockCountLine, WorkOrder } from '@prisma/client';
 import type { CurrentUser } from '../common/context';
 import { addDays, dateOnly, fmtDate, today } from '../common/dates';
 import { BizError, NotFound } from '../common/errors';
-import { EPS, g, round, round2 } from '../common/num';
+import { EPS, g, num, round, round2 } from '../common/num';
 import { inc } from '../common/presenter';
 import type { Tx } from '../common/prisma.service';
 import { InventoryService, STATUS_TEXT, type Ref } from '../core/inventory.service';
@@ -51,7 +51,7 @@ export interface ReceiveArgs {
   lines: ReceiveLineInput[];
   supplier_id?: number | null;
   customer_id?: number | null;
-  po?: (PurchaseOrder & { lines: { id: number; qty: number; received_qty: number; material_id: number; unit_price: number }[] }) | null;
+  po?: (PurchaseOrder & { lines: { id: number; qty: number; received_qty: number; material_id: number; unit_price: Prisma.Decimal | number }[] }) | null;
   delivery_note?: string | null;
   remark?: string | null;
 }
@@ -129,7 +129,7 @@ export class WmsService {
         const remain = round(pl.qty - (pl.received_qty || 0));
         if (qty > remain * 1.05 + EPS) throw new BizError(`${m.code} 超收：订单剩余 ${g(remain)}，本次 ${g(qty)}（允许超收 5%）`); // 允许 5% 超收
         await tx.purchaseOrderLine.update({ where: { id: pl.id }, data: { received_qty: round((pl.received_qty || 0) + qty) } });
-        ap += qty * (pl.unit_price || 0);
+        ap += qty * num(pl.unit_price);
         poLineId = pl.id;
       }
       const locId = ln.location_id;
@@ -368,7 +368,7 @@ export class WmsService {
       }
       if (sol) {
         await tx.salesOrderLine.update({ where: { id: sol.id }, data: { shipped_qty: round((sol.shipped_qty || 0) + ln.qty) } });
-        ar += ln.qty * (sol.unit_price || 0);
+        ar += ln.qty * num(sol.unit_price);
       }
     }
     await tx.shipment.update({ where: { id }, data: { status: 'SHIPPED', ship_date: today(), shipped_by: user.full_name } });

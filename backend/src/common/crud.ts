@@ -32,6 +32,7 @@ function coerce(model: string, body: Record<string, any>, creating: boolean, lab
       case 'Int':
         if (!Number.isInteger(Number(v))) throw new BizError(`字段 ${f.name} 必须为整数`);
         v = Number(v); break;
+      case 'Decimal':
       case 'Float':
         if (Number.isNaN(Number(v))) throw new BizError(`字段 ${f.name} 必须为数字`);
         v = Number(v); break;

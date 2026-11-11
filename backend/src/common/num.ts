@@ -1,3 +1,8 @@
+import { Prisma } from '@prisma/client';
+
+/** Decimal / number / null → number（金额字段为 Decimal） */
+export const num = (v: Prisma.Decimal | number | string | null | undefined): number => (v === null || v === undefined ? 0 : Number(v));
+
 export const round = (v: number, digits = 4): number => {
   const f = 10 ** digits;
   return Math.round((v + Number.EPSILON) * f) / f;

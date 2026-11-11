@@ -4,7 +4,7 @@
  * 计算字段需要的关联在 include 中声明；查询时用 inc(model, children) 生成 Prisma include。
  */
 import { Prisma } from '@prisma/client';
-import { round } from './num';
+import { num, round } from './num';
 
 type Props = Record<string, (o: any) => unknown>;
 interface View { include?: Record<string, any>; props?: Props; order?: Record<string, any> }
@@ -77,7 +77,7 @@ export const VIEWS: Record<string, View> = {
     include: { customer: true, supplier: true },
     props: {
       partner_name: (o) => (o.customer ? o.customer.name : nm(o.supplier)),
-      balance: (o) => round((o.amount || 0) - (o.paid_amount || 0), 4),
+      balance: (o) => round(num(o.amount) - num(o.paid_amount), 2),
     },
     order: { payments: { id: 'asc' } },
   },
@@ -89,8 +89,8 @@ export const VIEWS: Record<string, View> = {
       warehouse_name: (o) => nm(o.location?.warehouse),
       owner_customer_name: (o) => nm(o.owner_customer),
       supplier_name: (o) => nm(o.supplier),
-      unit_cost: (o) => o.material?.std_cost ?? 0,
-      amount: (o) => round((o.qty || 0) * (o.material?.std_cost || 0), 2),
+      unit_cost: (o) => num(o.material?.std_cost),
+      amount: (o) => round((o.qty || 0) * num(o.material?.std_cost), 2),
     },
   },
   StockMove: {

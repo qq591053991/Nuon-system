@@ -33,6 +33,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
 }
 
 function toJson(v: unknown, key = ''): unknown {
+  if (v instanceof Prisma.Decimal) return v.toNumber();
   if (v instanceof Date) return DATE_FIELDS.has(key) ? v.toISOString().slice(0, 10) : v.toISOString();
   if (Array.isArray(v)) return v.map((x) => toJson(x, key));
   if (v && typeof v === 'object' && v.constructor === Object) {
