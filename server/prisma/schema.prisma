@@ -1,0 +1,1131 @@
+// Nuon 智造云 数据模型（46 张表）
+// 约定：字段名使用 snake_case，与 REST 接口返回的 JSON 字段保持一致；
+//       数量/金额使用 Float（服务层统一 round4/round2），纯日期字段使用 @db.Date。
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================ 系统 ============================
+
+model User {
+  id            Int      @id @default(autoincrement())
+  username      String   @unique @db.VarChar(64)
+  full_name     String   @db.VarChar(64)
+  password_hash String   @db.VarChar(128)
+  roles         String   @default("") @db.VarChar(256) // 逗号分隔
+  department    String?  @db.VarChar(64)
+  email         String?  @db.VarChar(128)
+  is_active     Boolean  @default(true)
+  created_at    DateTime @default(now())
+  updated_at    DateTime @default(now()) @updatedAt
+  created_by    String?  @db.VarChar(64)
+
+  @@map("sys_user")
+}
+
+/// 审计追踪（只增不改不删）
+model AuditLog {
+  id        Int      @id @default(autoincrement())
+  ts        DateTime @default(now())
+  username  String?  @db.VarChar(64)
+  full_name String?  @db.VarChar(64)
+  entity    String   @db.VarChar(64)
+  entity_id Int?
+  action    String   @db.VarChar(16) // CREATE / UPDATE / DELETE
+  changes   String?  @db.Text // JSON
+
+  @@index([ts])
+  @@index([entity, entity_id])
+  @@index([username])
+  @@map("sys_audit_log")
+}
+
+/// 电子签名（21 CFR Part 11 §11.50）
+model ESignature {
+  id        Int      @id @default(autoincrement())
+  ts        DateTime @default(now())
+  username  String   @db.VarChar(64)
+  full_name String   @db.VarChar(64)
+  meaning   String   @db.VarChar(64)
+  entity    String   @db.VarChar(64)
+  entity_id Int
+  doc_no    String?  @db.VarChar(64)
+  reason    String?  @db.VarChar(256)
+
+  @@index([entity, entity_id])
+  @@map("sys_esignature")
+}
+
+model Sequence {
+  key   String @id @db.VarChar(64)
+  value Int    @default(0)
+
+  @@map("sys_sequence")
+}
+
+// ============================ 主数据 ============================
+
+/// 客户 = 品牌方 / 医疗器械注册人
+model Customer {
+  id                       Int       @id @default(autoincrement())
+  code                     String    @unique @db.VarChar(32)
+  name                     String    @db.VarChar(128)
+  short_name               String?   @db.VarChar(64)
+  country                  String?   @db.VarChar(32)
+  contact                  String?   @db.VarChar(64)
+  phone                    String?   @db.VarChar(32)
+  email                    String?   @db.VarChar(128)
+  address                  String?   @db.VarChar(256)
+  mah_name                 String?   @db.VarChar(128)
+  tax_no                   String?   @db.VarChar(64)
+  currency                 String    @default("CNY") @db.VarChar(8)
+  payment_terms_days       Int       @default(30)
+  quality_agreement_no     String?   @db.VarChar(64)
+  quality_agreement_expiry DateTime? @db.Date
+  is_active                Boolean   @default(true)
+  remark                   String?   @db.Text
+  created_at               DateTime  @default(now())
+  updated_at               DateTime  @default(now()) @updatedAt
+  created_by               String?   @db.VarChar(64)
+
+  owned_materials Material[]      @relation("MaterialOwner")
+  brand_materials Material[]      @relation("MaterialCustomer")
+  sales_orders    SalesOrder[]
+  mrp_suggestions MrpSuggestion[]
+  fin_docs        FinanceDoc[]
+  stocks          Stock[]
+  receipts        Receipt[]
+  shipments       Shipment[]
+  work_orders     WorkOrder[]
+  serials         SerialNumber[]
+  ncrs            Ncr[]
+
+  @@map("md_customer")
+}
+
+/// 供应商 / 合格供方名录
+model Supplier {
+  id                   Int       @id @default(autoincrement())
+  code                 String    @unique @db.VarChar(32)
+  name                 String    @db.VarChar(128)
+  short_name           String?   @db.VarChar(64)
+  category             String?   @db.VarChar(64)
+  contact              String?   @db.VarChar(64)
+  phone                String?   @db.VarChar(32)
+  email                String?   @db.VarChar(128)
+  address              String?   @db.VarChar(256)
+  status               String    @default("PENDING") @db.VarChar(16) // QUALIFIED/PENDING/SUSPENDED/DISQUALIFIED
+  qualification_expiry DateTime? @db.Date
+  iso13485             Boolean   @default(false)
+  currency             String    @default("CNY") @db.VarChar(8)
+  payment_terms_days   Int       @default(30)
+  is_active            Boolean   @default(true)
+  remark               String?   @db.Text
+  created_at           DateTime  @default(now())
+  updated_at           DateTime  @default(now()) @updatedAt
+  created_by           String?   @db.VarChar(64)
+
+  materials       Material[]
+  purchase_orders PurchaseOrder[]
+  mrp_suggestions MrpSuggestion[]
+  fin_docs        FinanceDoc[]
+  stocks          Stock[]
+  receipts        Receipt[]
+  inspections     Inspection[]
+  ncrs            Ncr[]
+
+  @@map("md_supplier")
+}
+
+/// 物料主数据（原材料/半成品/成品/包材）
+model Material {
+  id                  Int      @id @default(autoincrement())
+  code                String   @unique @db.VarChar(64)
+  name                String   @db.VarChar(128)
+  spec                String?  @db.VarChar(256)
+  category            String   @default("RAW") @db.VarChar(16) // RAW/SEMI/FINISHED/PACKAGING/CONSUMABLE
+  uom                 String   @default("PCS") @db.VarChar(16)
+  lot_control         Boolean  @default(true)
+  serial_control      Boolean  @default(false)
+  shelf_life_days     Int?
+  safety_stock        Float    @default(0)
+  lead_time_days      Int      @default(7)
+  min_order_qty       Float    @default(0)
+  std_cost            Float    @default(0)
+  default_supplier_id Int?
+  owner_customer_id   Int? // 非空 = 客供料
+  customer_id         Int? // 成品所属品牌客户
+  iqc_required        Boolean  @default(true)
+  aql                 Float    @default(1.0)
+  wavelength_nm       String?  @db.VarChar(64)
+  msl_level           String?  @db.VarChar(8)
+  esd_sensitive       Boolean  @default(false)
+  model               String?  @db.VarChar(64)
+  registration_no     String?  @db.VarChar(64)
+  device_class        String?  @db.VarChar(8)
+  gtin                String?  @db.VarChar(14)
+  sn_prefix           String?  @db.VarChar(16)
+  is_active           Boolean  @default(true)
+  remark              String?  @db.Text
+  created_at          DateTime @default(now())
+  updated_at          DateTime @default(now()) @updatedAt
+  created_by          String?  @db.VarChar(64)
+
+  default_supplier Supplier? @relation(fields: [default_supplier_id], references: [id])
+  owner_customer   Customer? @relation("MaterialOwner", fields: [owner_customer_id], references: [id])
+  customer         Customer? @relation("MaterialCustomer", fields: [customer_id], references: [id])
+
+  boms             Bom[]
+  bom_lines        BomLine[]
+  routings         Routing[]
+  key_part_ops     RoutingOperation[]
+  so_lines         SalesOrderLine[]
+  po_lines         PurchaseOrderLine[]
+  mrp_suggestions  MrpSuggestion[]
+  stocks           Stock[]
+  stock_moves      StockMove[]
+  receipt_lines    ReceiptLine[]
+  issue_lines      MaterialIssueLine[]
+  shipment_lines   ShipmentLine[]
+  count_lines      StockCountLine[]
+  work_orders      WorkOrder[]
+  wo_materials     WorkOrderMaterial[]
+  serials          SerialNumber[]
+  key_parts        KeyPartBinding[]
+  inspections      Inspection[]
+  ncrs             Ncr[]
+
+  @@map("md_material")
+}
+
+/// BOM（受控：草稿 → 电子签名发布 → 升版）
+model Bom {
+  id             Int       @id @default(autoincrement())
+  material_id    Int
+  version        String    @default("A0") @db.VarChar(16)
+  status         String    @default("DRAFT") @db.VarChar(16) // DRAFT/RELEASED/OBSOLETE
+  ecn_no         String?   @db.VarChar(64)
+  effective_date DateTime? @db.Date
+  released_by    String?   @db.VarChar(64)
+  released_at    DateTime?
+  remark         String?   @db.Text
+  created_at     DateTime  @default(now())
+  updated_at     DateTime  @default(now()) @updatedAt
+  created_by     String?   @db.VarChar(64)
+
+  material    Material    @relation(fields: [material_id], references: [id])
+  lines       BomLine[]
+  work_orders WorkOrder[]
+
+  @@index([material_id])
+  @@map("eng_bom")
+}
+
+model BomLine {
+  id           Int     @id @default(autoincrement())
+  bom_id       Int
+  line_no      Int     @default(10)
+  component_id Int
+  qty_per      Float   @default(1)
+  scrap_rate   Float   @default(0)
+  designator   String? @db.VarChar(256)
+  remark       String? @db.VarChar(256)
+
+  bom       Bom      @relation(fields: [bom_id], references: [id], onDelete: Cascade)
+  component Material @relation(fields: [component_id], references: [id])
+
+  @@index([bom_id])
+  @@map("eng_bom_line")
+}
+
+model WorkCenter {
+  id          Int      @id @default(autoincrement())
+  code        String   @unique @db.VarChar(32)
+  name        String   @db.VarChar(64)
+  description String?  @db.VarChar(256)
+  is_active   Boolean  @default(true)
+  created_at  DateTime @default(now())
+  updated_at  DateTime @default(now()) @updatedAt
+  created_by  String?  @db.VarChar(64)
+
+  routing_ops RoutingOperation[]
+  equipment   Equipment[]
+  wo_ops      WorkOrderOperation[]
+
+  @@map("md_work_center")
+}
+
+/// 工艺路线 + 测试规格
+model Routing {
+  id          Int       @id @default(autoincrement())
+  material_id Int
+  version     String    @default("A0") @db.VarChar(16)
+  name        String?   @db.VarChar(128)
+  status      String    @default("DRAFT") @db.VarChar(16)
+  released_by String?   @db.VarChar(64)
+  released_at DateTime?
+  remark      String?   @db.Text
+  created_at  DateTime  @default(now())
+  updated_at  DateTime  @default(now()) @updatedAt
+  created_by  String?   @db.VarChar(64)
+
+  material    Material           @relation(fields: [material_id], references: [id])
+  operations  RoutingOperation[]
+  work_orders WorkOrder[]
+
+  @@index([material_id])
+  @@map("eng_routing")
+}
+
+model RoutingOperation {
+  id                   Int     @id @default(autoincrement())
+  routing_id           Int
+  seq                  Int
+  code                 String  @db.VarChar(32)
+  name                 String  @db.VarChar(64)
+  op_type              String  @default("ASSEMBLY") @db.VarChar(16) // ASSEMBLY/SMT/TEST_OPTICAL/AGING/TEST_SAFETY/INSPECTION/PACKING/OTHER
+  work_center_id       Int?
+  std_minutes          Float   @default(0)
+  requires_equipment   Boolean @default(false)
+  key_part_material_id Int?
+  sop_no               String? @db.VarChar(64)
+  instructions         String? @db.Text
+
+  routing           Routing        @relation(fields: [routing_id], references: [id], onDelete: Cascade)
+  work_center       WorkCenter?    @relation(fields: [work_center_id], references: [id])
+  key_part_material Material?      @relation(fields: [key_part_material_id], references: [id])
+  params            RoutingParam[]
+
+  @@index([routing_id])
+  @@map("eng_routing_op")
+}
+
+model RoutingParam {
+  id           Int     @id @default(autoincrement())
+  operation_id Int
+  code         String  @db.VarChar(32)
+  name         String  @db.VarChar(64)
+  unit         String? @db.VarChar(16)
+  lower        Float?
+  upper        Float?
+  target       Float?
+
+  operation RoutingOperation @relation(fields: [operation_id], references: [id], onDelete: Cascade)
+
+  @@index([operation_id])
+  @@map("eng_routing_param")
+}
+
+/// 设备/仪器台账（校准过期禁止报工）
+model Equipment {
+  id                     Int       @id @default(autoincrement())
+  code                   String    @unique @db.VarChar(32)
+  name                   String    @db.VarChar(64)
+  model                  String?   @db.VarChar(64)
+  serial_no              String?   @db.VarChar(64)
+  equipment_type         String    @default("PRODUCTION") @db.VarChar(16) // PRODUCTION/TEST/AGING
+  work_center_id         Int?
+  status                 String    @default("NORMAL") @db.VarChar(16) // NORMAL/MAINTENANCE/DISABLED
+  calibration_required   Boolean   @default(false)
+  calibration_cycle_days Int?
+  last_calibration_date  DateTime? @db.Date
+  next_calibration_date  DateTime? @db.Date
+  remark                 String?   @db.Text
+  created_at             DateTime  @default(now())
+  updated_at             DateTime  @default(now()) @updatedAt
+  created_by             String?   @db.VarChar(64)
+
+  work_center  WorkCenter?         @relation(fields: [work_center_id], references: [id])
+  calibrations CalibrationRecord[]
+  op_records   OperationRecord[]
+
+  @@map("md_equipment")
+}
+
+model CalibrationRecord {
+  id               Int       @id @default(autoincrement())
+  equipment_id     Int
+  calibration_date DateTime  @db.Date
+  result           String    @default("PASS") @db.VarChar(8)
+  certificate_no   String?   @db.VarChar(64)
+  agency           String?   @db.VarChar(128)
+  next_due_date    DateTime? @db.Date
+  remark           String?   @db.VarChar(256)
+  created_at       DateTime  @default(now())
+  updated_at       DateTime  @default(now()) @updatedAt
+  created_by       String?   @db.VarChar(64)
+
+  equipment Equipment @relation(fields: [equipment_id], references: [id])
+
+  @@index([equipment_id])
+  @@map("md_calibration")
+}
+
+model Warehouse {
+  id             Int      @id @default(autoincrement())
+  code           String   @unique @db.VarChar(32)
+  name           String   @db.VarChar(64)
+  warehouse_type String   @default("RAW") @db.VarChar(16) // RAW/FG/CUSTOMER/REJECT/WIP
+  address        String?  @db.VarChar(256)
+  is_active      Boolean  @default(true)
+  created_at     DateTime @default(now())
+  updated_at     DateTime @default(now()) @updatedAt
+  created_by     String?  @db.VarChar(64)
+
+  locations    Location[]
+  stock_counts StockCount[]
+
+  @@map("md_warehouse")
+}
+
+model Location {
+  id            Int      @id @default(autoincrement())
+  warehouse_id  Int
+  code          String   @unique @db.VarChar(32)
+  name          String?  @db.VarChar(64)
+  location_type String   @default("STORAGE") @db.VarChar(16) // STORAGE/DRY_CABINET/REJECT/STAGING
+  is_active     Boolean  @default(true)
+  created_at    DateTime @default(now())
+  updated_at    DateTime @default(now()) @updatedAt
+  created_by    String?  @db.VarChar(64)
+
+  warehouse      Warehouse           @relation(fields: [warehouse_id], references: [id])
+  stocks         Stock[]
+  moves_from     StockMove[]         @relation("MoveFrom")
+  moves_to       StockMove[]         @relation("MoveTo")
+  receipt_lines  ReceiptLine[]
+  issue_lines    MaterialIssueLine[]
+  shipment_lines ShipmentLine[]
+  count_lines    StockCountLine[]
+  serials        SerialNumber[]
+
+  @@index([warehouse_id])
+  @@map("md_location")
+}
+
+// ============================ ERP ============================
+
+model SalesOrder {
+  id            Int       @id @default(autoincrement())
+  no            String    @unique @db.VarChar(32)
+  customer_id   Int
+  order_date    DateTime  @db.Date
+  delivery_date DateTime? @db.Date
+  customer_po   String?   @db.VarChar(64)
+  status        String    @default("DRAFT") @db.VarChar(20) // DRAFT/CONFIRMED/IN_PRODUCTION/PARTIAL_SHIPPED/SHIPPED/CLOSED/CANCELLED
+  currency      String    @default("CNY") @db.VarChar(8)
+  total_amount  Float     @default(0)
+  ship_to       String?   @db.VarChar(256)
+  remark        String?   @db.Text
+  created_at    DateTime  @default(now())
+  updated_at    DateTime  @default(now()) @updatedAt
+  created_by    String?   @db.VarChar(64)
+
+  customer    Customer         @relation(fields: [customer_id], references: [id])
+  lines       SalesOrderLine[]
+  work_orders WorkOrder[]
+  shipments   Shipment[]
+
+  @@index([customer_id])
+  @@map("erp_sales_order")
+}
+
+model SalesOrderLine {
+  id            Int       @id @default(autoincrement())
+  order_id      Int
+  line_no       Int       @default(1)
+  material_id   Int
+  qty           Float
+  unit_price    Float     @default(0)
+  amount        Float     @default(0)
+  shipped_qty   Float     @default(0)
+  delivery_date DateTime? @db.Date
+  remark        String?   @db.VarChar(256)
+
+  order          SalesOrder     @relation(fields: [order_id], references: [id], onDelete: Cascade)
+  material       Material       @relation(fields: [material_id], references: [id])
+  work_orders    WorkOrder[]
+  shipment_lines ShipmentLine[]
+
+  @@index([order_id])
+  @@map("erp_sales_order_line")
+}
+
+model PurchaseOrder {
+  id            Int       @id @default(autoincrement())
+  no            String    @unique @db.VarChar(32)
+  supplier_id   Int
+  order_date    DateTime  @db.Date
+  expected_date DateTime? @db.Date
+  status        String    @default("DRAFT") @db.VarChar(20) // DRAFT/APPROVED/PARTIAL_RECEIVED/RECEIVED/CLOSED/CANCELLED
+  currency      String    @default("CNY") @db.VarChar(8)
+  total_amount  Float     @default(0)
+  approved_by   String?   @db.VarChar(64)
+  approved_at   DateTime?
+  source        String?   @db.VarChar(64)
+  remark        String?   @db.Text
+  created_at    DateTime  @default(now())
+  updated_at    DateTime  @default(now()) @updatedAt
+  created_by    String?   @db.VarChar(64)
+
+  supplier Supplier            @relation(fields: [supplier_id], references: [id])
+  lines    PurchaseOrderLine[]
+  receipts Receipt[]
+
+  @@index([supplier_id])
+  @@map("erp_purchase_order")
+}
+
+model PurchaseOrderLine {
+  id            Int       @id @default(autoincrement())
+  order_id      Int
+  line_no       Int       @default(1)
+  material_id   Int
+  qty           Float
+  unit_price    Float     @default(0)
+  amount        Float     @default(0)
+  received_qty  Float     @default(0)
+  expected_date DateTime? @db.Date
+  remark        String?   @db.VarChar(256)
+
+  order         PurchaseOrder @relation(fields: [order_id], references: [id], onDelete: Cascade)
+  material      Material      @relation(fields: [material_id], references: [id])
+  receipt_lines ReceiptLine[]
+
+  @@index([order_id])
+  @@map("erp_purchase_order_line")
+}
+
+model MrpRun {
+  id         Int      @id @default(autoincrement())
+  no         String   @unique @db.VarChar(32)
+  run_at     DateTime
+  run_by     String?  @db.VarChar(64)
+  summary    String?  @db.Text
+  created_at DateTime @default(now())
+  updated_at DateTime @default(now()) @updatedAt
+  created_by String?  @db.VarChar(64)
+
+  suggestions MrpSuggestion[]
+
+  @@map("erp_mrp_run")
+}
+
+model MrpSuggestion {
+  id               Int       @id @default(autoincrement())
+  run_id           Int
+  material_id      Int
+  level            Int       @default(0)
+  action           String    @db.VarChar(20) // PURCHASE/PRODUCE/CUSTOMER_SUPPLY
+  gross_qty        Float     @default(0)
+  on_hand_qty      Float     @default(0)
+  on_order_qty     Float     @default(0)
+  safety_stock     Float     @default(0)
+  net_qty          Float     @default(0)
+  suggested_qty    Float     @default(0)
+  due_date         DateTime? @db.Date
+  supplier_id      Int?
+  customer_id      Int?
+  status           String    @default("OPEN") @db.VarChar(16) // OPEN/CONVERTED/IGNORED
+  converted_doc_no String?   @db.VarChar(32)
+  remark           String?   @db.VarChar(256)
+
+  run      MrpRun    @relation(fields: [run_id], references: [id], onDelete: Cascade)
+  material Material  @relation(fields: [material_id], references: [id])
+  supplier Supplier? @relation(fields: [supplier_id], references: [id])
+  customer Customer? @relation(fields: [customer_id], references: [id])
+
+  @@index([run_id])
+  @@map("erp_mrp_suggestion")
+}
+
+/// 应收(AR) / 应付(AP)
+model FinanceDoc {
+  id          Int       @id @default(autoincrement())
+  no          String    @unique @db.VarChar(32)
+  doc_type    String    @db.VarChar(4)
+  customer_id Int?
+  supplier_id Int?
+  ref_type    String?   @db.VarChar(32)
+  ref_no      String?   @db.VarChar(32)
+  doc_date    DateTime  @db.Date
+  due_date    DateTime? @db.Date
+  currency    String    @default("CNY") @db.VarChar(8)
+  amount      Float     @default(0)
+  paid_amount Float     @default(0)
+  status      String    @default("OPEN") @db.VarChar(16) // OPEN/PARTIAL/PAID
+  remark      String?   @db.Text
+  created_at  DateTime  @default(now())
+  updated_at  DateTime  @default(now()) @updatedAt
+  created_by  String?   @db.VarChar(64)
+
+  customer Customer? @relation(fields: [customer_id], references: [id])
+  supplier Supplier? @relation(fields: [supplier_id], references: [id])
+  payments Payment[]
+
+  @@map("fin_doc")
+}
+
+model Payment {
+  id         Int      @id @default(autoincrement())
+  doc_id     Int
+  pay_date   DateTime @db.Date
+  amount     Float
+  method     String?  @db.VarChar(32)
+  reference  String?  @db.VarChar(64)
+  remark     String?  @db.VarChar(256)
+  created_at DateTime @default(now())
+  updated_at DateTime @default(now()) @updatedAt
+  created_by String?  @db.VarChar(64)
+
+  doc FinanceDoc @relation(fields: [doc_id], references: [id], onDelete: Cascade)
+
+  @@index([doc_id])
+  @@map("fin_payment")
+}
+
+// ============================ WMS ============================
+
+/// 库存余额：物料 + 库位 + 批次 + 质量状态 + 货主
+model Stock {
+  id                Int       @id @default(autoincrement())
+  material_id       Int
+  location_id       Int
+  lot_no            String    @default("") @db.VarChar(64)
+  status            String    @default("AVAILABLE") @db.VarChar(16) // QUARANTINE/AVAILABLE/REJECTED/HOLD
+  owner_customer_id Int?
+  qty               Float     @default(0)
+  mfg_date          DateTime? @db.Date
+  expiry_date       DateTime? @db.Date
+  supplier_id       Int?
+  supplier_lot      String?   @db.VarChar(64)
+  received_at       DateTime?
+
+  material       Material  @relation(fields: [material_id], references: [id])
+  location       Location  @relation(fields: [location_id], references: [id])
+  owner_customer Customer? @relation(fields: [owner_customer_id], references: [id])
+  supplier       Supplier? @relation(fields: [supplier_id], references: [id])
+
+  @@index([material_id])
+  @@index([location_id])
+  @@index([lot_no])
+  @@index([status])
+  @@map("wms_stock")
+}
+
+/// 库存流水（只增不改）
+model StockMove {
+  id                Int      @id @default(autoincrement())
+  ts                DateTime @default(now())
+  move_type         String   @db.VarChar(20)
+  material_id       Int
+  lot_no            String   @default("") @db.VarChar(64)
+  qty               Float
+  from_location_id  Int?
+  to_location_id    Int?
+  from_status       String?  @db.VarChar(16)
+  to_status         String?  @db.VarChar(16)
+  owner_customer_id Int?
+  ref_type          String?  @db.VarChar(32)
+  ref_id            Int?
+  ref_no            String?  @db.VarChar(32)
+  username          String?  @db.VarChar(64)
+  remark            String?  @db.VarChar(256)
+
+  material      Material  @relation(fields: [material_id], references: [id])
+  from_location Location? @relation("MoveFrom", fields: [from_location_id], references: [id])
+  to_location   Location? @relation("MoveTo", fields: [to_location_id], references: [id])
+
+  @@index([ts])
+  @@index([material_id])
+  @@index([lot_no])
+  @@index([ref_no])
+  @@map("wms_stock_move")
+}
+
+model Receipt {
+  id            Int      @id @default(autoincrement())
+  no            String   @unique @db.VarChar(32)
+  receipt_type  String   @db.VarChar(20) // PURCHASE/CUSTOMER_SUPPLIED/PRODUCTION/OPENING/OTHER
+  supplier_id   Int?
+  customer_id   Int?
+  po_id         Int?
+  wo_id         Int?
+  status        String   @default("CONFIRMED") @db.VarChar(16)
+  receipt_date  DateTime @db.Date
+  delivery_note String?  @db.VarChar(64)
+  remark        String?  @db.Text
+  created_at    DateTime @default(now())
+  updated_at    DateTime @default(now()) @updatedAt
+  created_by    String?  @db.VarChar(64)
+
+  supplier       Supplier?      @relation(fields: [supplier_id], references: [id])
+  customer       Customer?      @relation(fields: [customer_id], references: [id])
+  purchase_order PurchaseOrder? @relation(fields: [po_id], references: [id])
+  work_order     WorkOrder?     @relation(fields: [wo_id], references: [id])
+  lines          ReceiptLine[]
+  inspections    Inspection[]
+
+  @@map("wms_receipt")
+}
+
+model ReceiptLine {
+  id            Int       @id @default(autoincrement())
+  receipt_id    Int
+  line_no       Int       @default(1)
+  material_id   Int
+  po_line_id    Int?
+  qty           Float
+  lot_no        String    @default("") @db.VarChar(64)
+  supplier_lot  String?   @db.VarChar(64)
+  location_id   Int
+  status        String    @default("QUARANTINE") @db.VarChar(16)
+  mfg_date      DateTime? @db.Date
+  expiry_date   DateTime? @db.Date
+  inspection_id Int?
+
+  receipt  Receipt            @relation(fields: [receipt_id], references: [id], onDelete: Cascade)
+  material Material           @relation(fields: [material_id], references: [id])
+  po_line  PurchaseOrderLine? @relation(fields: [po_line_id], references: [id])
+  location Location           @relation(fields: [location_id], references: [id])
+
+  @@index([receipt_id])
+  @@index([material_id, lot_no])
+  @@map("wms_receipt_line")
+}
+
+/// 生产领料单（FEFO 推荐批次，过账后批次与工单绑定）
+model MaterialIssue {
+  id           Int       @id @default(autoincrement())
+  no           String    @unique @db.VarChar(32)
+  wo_id        Int
+  status       String    @default("DRAFT") @db.VarChar(16) // DRAFT/CONFIRMED/CANCELLED
+  confirmed_by String?   @db.VarChar(64)
+  confirmed_at DateTime?
+  remark       String?   @db.Text
+  created_at   DateTime  @default(now())
+  updated_at   DateTime  @default(now()) @updatedAt
+  created_by   String?   @db.VarChar(64)
+
+  work_order WorkOrder           @relation(fields: [wo_id], references: [id])
+  lines      MaterialIssueLine[]
+
+  @@index([wo_id])
+  @@map("wms_issue")
+}
+
+model MaterialIssueLine {
+  id                Int       @id @default(autoincrement())
+  issue_id          Int
+  material_id       Int
+  lot_no            String    @default("") @db.VarChar(64)
+  location_id       Int
+  owner_customer_id Int?
+  qty               Float
+  expiry_date       DateTime? @db.Date
+
+  issue    MaterialIssue @relation(fields: [issue_id], references: [id], onDelete: Cascade)
+  material Material      @relation(fields: [material_id], references: [id])
+  location Location      @relation(fields: [location_id], references: [id])
+
+  @@index([issue_id])
+  @@index([material_id, lot_no])
+  @@map("wms_issue_line")
+}
+
+model Shipment {
+  id          Int       @id @default(autoincrement())
+  no          String    @unique @db.VarChar(32)
+  so_id       Int?
+  customer_id Int
+  status      String    @default("DRAFT") @db.VarChar(16) // DRAFT/SHIPPED/CANCELLED
+  ship_date   DateTime? @db.Date
+  carrier     String?   @db.VarChar(64)
+  tracking_no String?   @db.VarChar(64)
+  ship_to     String?   @db.VarChar(256)
+  shipped_by  String?   @db.VarChar(64)
+  remark      String?   @db.Text
+  created_at  DateTime  @default(now())
+  updated_at  DateTime  @default(now()) @updatedAt
+  created_by  String?   @db.VarChar(64)
+
+  sales_order SalesOrder?    @relation(fields: [so_id], references: [id])
+  customer    Customer       @relation(fields: [customer_id], references: [id])
+  lines       ShipmentLine[]
+  serials     SerialNumber[]
+
+  @@index([so_id])
+  @@map("wms_shipment")
+}
+
+model ShipmentLine {
+  id          Int     @id @default(autoincrement())
+  shipment_id Int
+  so_line_id  Int?
+  material_id Int
+  lot_no      String  @default("") @db.VarChar(64)
+  location_id Int
+  qty         Float
+  serials     String? @db.Text // JSON 数组
+
+  shipment Shipment        @relation(fields: [shipment_id], references: [id], onDelete: Cascade)
+  so_line  SalesOrderLine? @relation(fields: [so_line_id], references: [id])
+  material Material        @relation(fields: [material_id], references: [id])
+  location Location        @relation(fields: [location_id], references: [id])
+
+  @@index([shipment_id])
+  @@map("wms_shipment_line")
+}
+
+model StockCount {
+  id           Int       @id @default(autoincrement())
+  no           String    @unique @db.VarChar(32)
+  warehouse_id Int
+  status       String    @default("OPEN") @db.VarChar(16) // OPEN/POSTED/CANCELLED
+  posted_by    String?   @db.VarChar(64)
+  posted_at    DateTime?
+  remark       String?   @db.Text
+  created_at   DateTime  @default(now())
+  updated_at   DateTime  @default(now()) @updatedAt
+  created_by   String?   @db.VarChar(64)
+
+  warehouse Warehouse        @relation(fields: [warehouse_id], references: [id])
+  lines     StockCountLine[]
+
+  @@map("wms_stock_count")
+}
+
+model StockCountLine {
+  id                Int     @id @default(autoincrement())
+  count_id          Int
+  material_id       Int
+  location_id       Int
+  lot_no            String  @default("") @db.VarChar(64)
+  status            String  @default("AVAILABLE") @db.VarChar(16)
+  owner_customer_id Int?
+  system_qty        Float   @default(0)
+  counted_qty       Float?
+
+  count    StockCount @relation(fields: [count_id], references: [id], onDelete: Cascade)
+  material Material   @relation(fields: [material_id], references: [id])
+  location Location   @relation(fields: [location_id], references: [id])
+
+  @@index([count_id])
+  @@map("wms_stock_count_line")
+}
+
+// ============================ MES ============================
+
+model WorkOrder {
+  id            Int       @id @default(autoincrement())
+  no            String    @unique @db.VarChar(32)
+  material_id   Int
+  customer_id   Int?
+  so_id         Int?
+  so_line_id    Int?
+  bom_id        Int?
+  routing_id    Int?
+  planned_qty   Float
+  completed_qty Float     @default(0)
+  scrap_qty     Float     @default(0)
+  received_qty  Float     @default(0)
+  lot_no        String?   @db.VarChar(64)
+  planned_start DateTime? @db.Date
+  planned_end   DateTime? @db.Date
+  actual_start  DateTime?
+  actual_end    DateTime?
+  status        String    @default("PLANNED") @db.VarChar(16) // PLANNED/RELEASED/IN_PROGRESS/COMPLETED/CLOSED/CANCELLED
+  dhr_status    String    @default("OPEN") @db.VarChar(16) // OPEN/RELEASED/REJECTED
+  released_by   String?   @db.VarChar(64)
+  priority      Int       @default(3)
+  source        String?   @db.VarChar(64)
+  remark        String?   @db.Text
+  created_at    DateTime  @default(now())
+  updated_at    DateTime  @default(now()) @updatedAt
+  created_by    String?   @db.VarChar(64)
+
+  material    Material             @relation(fields: [material_id], references: [id])
+  customer    Customer?            @relation(fields: [customer_id], references: [id])
+  sales_order SalesOrder?          @relation(fields: [so_id], references: [id])
+  so_line     SalesOrderLine?      @relation(fields: [so_line_id], references: [id])
+  bom         Bom?                 @relation(fields: [bom_id], references: [id])
+  routing     Routing?             @relation(fields: [routing_id], references: [id])
+  materials   WorkOrderMaterial[]
+  operations  WorkOrderOperation[]
+  serials     SerialNumber[]
+  records     OperationRecord[]
+  issues      MaterialIssue[]
+  receipts    Receipt[]
+  ncrs        Ncr[]
+
+  @@index([material_id])
+  @@index([so_id])
+  @@index([status])
+  @@index([lot_no])
+  @@map("mes_work_order")
+}
+
+/// 工单用料（下达时 BOM 快照）
+model WorkOrderMaterial {
+  id           Int   @id @default(autoincrement())
+  wo_id        Int
+  material_id  Int
+  qty_per      Float @default(1)
+  required_qty Float @default(0)
+  issued_qty   Float @default(0)
+
+  work_order WorkOrder @relation(fields: [wo_id], references: [id], onDelete: Cascade)
+  material   Material  @relation(fields: [material_id], references: [id])
+
+  @@index([wo_id])
+  @@map("mes_wo_material")
+}
+
+/// 工单工序（下达时工艺快照，含测试规格 params_json）
+model WorkOrderOperation {
+  id                   Int     @id @default(autoincrement())
+  wo_id                Int
+  seq                  Int
+  code                 String  @db.VarChar(32)
+  name                 String  @db.VarChar(64)
+  op_type              String  @db.VarChar(16)
+  work_center_id       Int?
+  requires_equipment   Boolean @default(false)
+  key_part_material_id Int?
+  sop_no               String? @db.VarChar(64)
+  instructions         String? @db.Text
+  params_json          String? @db.Text
+  good_qty             Float   @default(0)
+  ng_qty               Float   @default(0)
+
+  work_order  WorkOrder   @relation(fields: [wo_id], references: [id], onDelete: Cascade)
+  work_center WorkCenter? @relation(fields: [work_center_id], references: [id])
+
+  @@index([wo_id])
+  @@map("mes_wo_operation")
+}
+
+/// 产品序列号 + UDI。status: CREATED/IN_PROCESS/NG/COMPLETED/IN_STOCK/SHIPPED/SCRAPPED
+model SerialNumber {
+  id           Int       @id @default(autoincrement())
+  sn           String    @unique @db.VarChar(64)
+  wo_id        Int
+  material_id  Int
+  lot_no       String?   @db.VarChar(64)
+  udi          String?   @db.VarChar(128)
+  status       String    @default("CREATED") @db.VarChar(16)
+  last_seq     Int       @default(0)
+  ng_seq       Int?
+  location_id  Int?
+  shipment_id  Int?
+  customer_id  Int?
+  completed_at DateTime?
+  shipped_at   DateTime?
+  created_at   DateTime  @default(now())
+  updated_at   DateTime  @default(now()) @updatedAt
+  created_by   String?   @db.VarChar(64)
+
+  work_order WorkOrder        @relation(fields: [wo_id], references: [id])
+  material   Material         @relation(fields: [material_id], references: [id])
+  location   Location?        @relation(fields: [location_id], references: [id])
+  shipment   Shipment?        @relation(fields: [shipment_id], references: [id])
+  customer   Customer?        @relation(fields: [customer_id], references: [id])
+  records    OperationRecord[]
+  key_parts  KeyPartBinding[]
+
+  @@index([wo_id])
+  @@index([status])
+  @@index([lot_no])
+  @@map("mes_serial")
+}
+
+/// 过站/报工记录
+model OperationRecord {
+  id            Int      @id @default(autoincrement())
+  ts            DateTime @default(now())
+  wo_id         Int
+  sn_id         Int?
+  seq           Int
+  op_code       String   @db.VarChar(32)
+  op_name       String   @db.VarChar(64)
+  result        String   @db.VarChar(8) // PASS/FAIL
+  qty           Float    @default(1)
+  operator      String   @db.VarChar(64)
+  operator_name String?  @db.VarChar(64)
+  equipment_id  Int?
+  is_rework     Boolean  @default(false)
+  remark        String?  @db.VarChar(256)
+
+  work_order WorkOrder        @relation(fields: [wo_id], references: [id])
+  serial     SerialNumber?    @relation(fields: [sn_id], references: [id])
+  equipment  Equipment?       @relation(fields: [equipment_id], references: [id])
+  values     TestValue[]
+  key_parts  KeyPartBinding[]
+
+  @@index([ts])
+  @@index([wo_id])
+  @@index([sn_id])
+  @@map("mes_op_record")
+}
+
+model TestValue {
+  id        Int     @id @default(autoincrement())
+  record_id Int
+  code      String  @db.VarChar(32)
+  name      String  @db.VarChar(64)
+  unit      String? @db.VarChar(16)
+  value     Float?
+  lower     Float?
+  upper     Float?
+  result    String  @db.VarChar(8)
+
+  record OperationRecord @relation(fields: [record_id], references: [id], onDelete: Cascade)
+
+  @@index([record_id])
+  @@map("mes_test_value")
+}
+
+/// 关键件绑定（单台追溯）
+model KeyPartBinding {
+  id          Int      @id @default(autoincrement())
+  ts          DateTime @default(now())
+  sn_id       Int
+  material_id Int
+  lot_no      String?  @db.VarChar(64)
+  part_sn     String?  @db.VarChar(64)
+  record_id   Int?
+  operator    String?  @db.VarChar(64)
+
+  serial   SerialNumber     @relation(fields: [sn_id], references: [id])
+  material Material         @relation(fields: [material_id], references: [id])
+  record   OperationRecord? @relation(fields: [record_id], references: [id])
+
+  @@index([sn_id])
+  @@index([lot_no])
+  @@map("mes_key_part")
+}
+
+// ============================ QMS ============================
+
+model Inspection {
+  id                Int       @id @default(autoincrement())
+  no                String    @unique @db.VarChar(32)
+  insp_type         String    @db.VarChar(8) // IQC/IPQC/FQC/OQC
+  material_id       Int
+  lot_no            String    @default("") @db.VarChar(64)
+  location_id       Int?
+  owner_customer_id Int?
+  receipt_id        Int?
+  receipt_line_id   Int?
+  wo_id             Int?
+  supplier_id       Int?
+  lot_qty           Float     @default(0)
+  aql               Float?
+  code_letter       String?   @db.VarChar(2)
+  sample_size       Int?
+  accept_num        Int?
+  reject_num        Int?
+  defect_qty        Int       @default(0)
+  status            String    @default("PENDING") @db.VarChar(16) // PENDING/PASSED/REJECTED/CONCESSION
+  inspector         String?   @db.VarChar(64)
+  inspected_at      DateTime?
+  result_remark     String?   @db.Text
+  created_at        DateTime  @default(now())
+  updated_at        DateTime  @default(now()) @updatedAt
+  created_by        String?   @db.VarChar(64)
+
+  material Material         @relation(fields: [material_id], references: [id])
+  supplier Supplier?        @relation(fields: [supplier_id], references: [id])
+  receipt  Receipt?         @relation(fields: [receipt_id], references: [id])
+  items    InspectionItem[]
+  ncrs     Ncr[]
+
+  @@index([status])
+  @@index([material_id, lot_no])
+  @@map("qms_inspection")
+}
+
+model InspectionItem {
+  id            Int     @id @default(autoincrement())
+  inspection_id Int
+  name          String  @db.VarChar(64)
+  standard      String? @db.VarChar(256)
+  value         String? @db.VarChar(128)
+  result        String  @default("PASS") @db.VarChar(8)
+
+  inspection Inspection @relation(fields: [inspection_id], references: [id], onDelete: Cascade)
+
+  @@index([inspection_id])
+  @@map("qms_inspection_item")
+}
+
+/// 不合格品报告
+model Ncr {
+  id                 Int       @id @default(autoincrement())
+  no                 String    @unique @db.VarChar(32)
+  source             String    @db.VarChar(16) // IQC/PROCESS/FQC/CUSTOMER/OTHER
+  severity           String    @default("MAJOR") @db.VarChar(16)
+  material_id        Int?
+  lot_no             String?   @db.VarChar(64)
+  sn                 String?   @db.VarChar(64)
+  wo_id              Int?
+  op_seq             Int?
+  op_name            String?   @db.VarChar(64)
+  inspection_id      Int?
+  supplier_id        Int?
+  customer_id        Int?
+  qty                Float     @default(1)
+  description        String    @db.Text
+  status             String    @default("OPEN") @db.VarChar(16) // OPEN/DISPOSITIONED/CLOSED
+  disposition        String?   @db.VarChar(16) // REWORK/SCRAP/USE_AS_IS/RETURN
+  disposition_remark String?   @db.Text
+  disposition_by     String?   @db.VarChar(64)
+  disposition_at     DateTime?
+  capa_id            Int?
+  created_at         DateTime  @default(now())
+  updated_at         DateTime  @default(now()) @updatedAt
+  created_by         String?   @db.VarChar(64)
+
+  material   Material?   @relation(fields: [material_id], references: [id])
+  work_order WorkOrder?  @relation(fields: [wo_id], references: [id])
+  inspection Inspection? @relation(fields: [inspection_id], references: [id])
+  supplier   Supplier?   @relation(fields: [supplier_id], references: [id])
+  customer   Customer?   @relation(fields: [customer_id], references: [id])
+  capa       Capa?       @relation(fields: [capa_id], references: [id])
+
+  @@index([sn])
+  @@index([wo_id])
+  @@index([status])
+  @@map("qms_ncr")
+}
+
+model Capa {
+  id                Int       @id @default(autoincrement())
+  no                String    @unique @db.VarChar(32)
+  title             String    @db.VarChar(128)
+  source            String    @default("NCR") @db.VarChar(16) // NCR/COMPLAINT/AUDIT/OTHER
+  description       String?   @db.Text
+  root_cause        String?   @db.Text
+  correction        String?   @db.Text
+  corrective_action String?   @db.Text
+  preventive_action String?   @db.Text
+  owner             String?   @db.VarChar(64)
+  due_date          DateTime? @db.Date
+  status            String    @default("OPEN") @db.VarChar(16) // OPEN/IN_PROGRESS/VERIFYING/CLOSED
+  effectiveness     String?   @db.Text
+  closed_by         String?   @db.VarChar(64)
+  closed_at         DateTime?
+  created_at        DateTime  @default(now())
+  updated_at        DateTime  @default(now()) @updatedAt
+  created_by        String?   @db.VarChar(64)
+
+  ncrs Ncr[]
+
+  @@map("qms_capa")
+}
