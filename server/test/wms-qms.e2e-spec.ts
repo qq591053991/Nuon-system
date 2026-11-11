@@ -1,81 +1,15 @@
 /** 仓储与质量：采购收货/IQC/NCR、客供料隔离、调拨盘点（移植自 backend/tests/test_supply_chain.py），以及领料 FEFO、发货放行校验、NCR/CAPA 流程 */
-import { dateOnly, addDays, today } from '../src/common/dates';
+import { addDays, today } from '../src/common/dates';
 import { InventoryService } from '../src/core/inventory.service';
 import { bootApp, SIG, type Api } from './harness';
 
 type T = Awaited<ReturnType<typeof bootApp>>;
 
-// >>> TEMP-ERP-FALLBACK：ERP 接口（采购订单/财务单据）尚未移植时，用 Prisma + WmsService 模拟；ERP 完成后删除本段
-import { WmsService } from '../src/wms/wms.service';
-import { ser } from '../src/common/presenter';
-const routeMissing = (r: any) => r.status === 404 && String(r.body?.detail ?? '').startsWith('Cannot ');
-async function erpFallback(t: T, method: 'get' | 'post', url: string, body: any, user: string) {
-  const db = t.db.client;
-  let m: RegExpExecArray | null;
-  if (method === 'post' && url === '/api/purchase-orders') {
-    const po = await db.purchaseOrder.create({
-      data: {
-        no: `PO-T${Date.now()}${Math.floor(Math.random() * 1000)}`, supplier_id: body.supplier_id, order_date: today(), status: 'DRAFT', created_by: user,
-        lines: { create: body.lines.map((l: any, i: number) => ({ line_no: i + 1, material_id: l.material_id, qty: l.qty, unit_price: l.unit_price ?? 0, amount: l.qty * (l.unit_price ?? 0) })) },
-      },
-      include: { lines: { orderBy: { id: 'asc' } } },
-    });
-    return ser('PurchaseOrder', po, ['lines']);
-  }
-  if (method === 'post' && (m = /^\/api\/purchase-orders\/(\d+)\/approve$/.exec(url))) {
-    return db.purchaseOrder.update({ where: { id: Number(m[1]) }, data: { status: 'APPROVED' } });
-  }
-  if (method === 'get' && (m = /^\/api\/purchase-orders\/(\d+)$/.exec(url))) {
-    return ser('PurchaseOrder', await db.purchaseOrder.findUnique({ where: { id: Number(m[1]) }, include: { lines: true } }), ['lines']);
-  }
-  if (method === 'get' && url === '/api/finance/docs') {
-    return { items: await db.financeDoc.findMany({ where: { doc_type: body?.doc_type }, orderBy: { id: 'desc' } }) };
-  }
-  if (method === 'post' && (m = /^\/api\/purchase-orders\/(\d+)\/receive$/.exec(url))) {
-    const u: any = await db.user.findUnique({ where: { username: user } });
-    const wms = t.app.get(WmsService);
-    try {
-      return { status: 200, body: await t.db.tx(async (tx) => {
-        const po = await tx.purchaseOrder.findUnique({ where: { id: Number(m![1]) }, include: { lines: true } });
-        const lines = [];
-        for (const ln of body.lines) {
-          const pl = await tx.purchaseOrderLine.findUnique({ where: { id: ln.po_line_id } });
-          lines.push({ ...ln, material_id: pl!.material_id });
-        }
-        const rc = await wms.receive(tx, u, { receipt_type: 'PURCHASE', lines, supplier_id: po!.supplier_id, po, delivery_note: body.delivery_note, remark: body.remark });
-        return ser('Receipt', rc, ['lines']);
-      }) };
-    } catch (e: any) {
-      return { status: e.getStatus?.() ?? 500, body: e.getResponse?.() ?? { detail: String(e) } };
-    }
-  }
-  throw new Error(`no fallback for ${method} ${url}`);
-}
-// <<< TEMP-ERP-FALLBACK
-
-/** ERP 接口调用（采购订单、财务单据） */
-async function erp(t: T, user: string, method: 'get' | 'post', url: string, body?: any): Promise<{ status: number; body: any }> {
-  const api = t.api.as(user);
-  const r = method === 'get' ? await api.get(url, body) : await api.post(url, body);
-  // >>> TEMP-ERP-FALLBACK
-  if (routeMissing(r)) {
-    const out: any = await erpFallback(t, method, url, body, user);
-    return out && typeof out.status === 'number' && 'body' in out ? out : { status: 200, body: out };
-  }
-  // <<< TEMP-ERP-FALLBACK
-  return { status: r.status, body: r.body };
-}
-async function erpOk(t: T, user: string, method: 'get' | 'post', url: string, body?: any) {
-  const r = await erp(t, user, method, url, body);
-  if (r.status !== 200) throw new Error(`${method.toUpperCase()} ${url} -> ${r.status}: ${JSON.stringify(r.body)}`);
-  return r.body;
-}
-
 /** 新建并审批采购订单（与 Python 测试 _po 相同） */
-async function po(t: T, supplierCode: string, materialId: number, qty = 1000, price = 0.35) {
-  const sup = await t.api.find('/api/suppliers', { q: supplierCode });
-  const o = await erpOk(t, 'buyer', 'post', '/api/purchase-orders', { supplier_id: sup.id, lines: [{ material_id: materialId, qty, unit_price: price }] });
-  await erpOk(t, 'buyer', 'post', `/api/purchase-orders/${o.id}/approve`);
+async function po(api: Api, supplierCode: string, materialId: number, qty = 1000, price = 0.35) {
+  const sup = await api.find('/api/suppliers', { q: supplierCode });
+  const o = await api.as('buyer').ok('post', '/api/purchase-orders', { supplier_id: sup.id, lines: [{ material_id: materialId, qty, unit_price: price }] });
+  await api.as('buyer').ok('post', `/api/purchase-orders/${o.id}/approve`);
   return o;
 }
 
@@ -91,20 +25,20 @@ describe('仓储与质量', () => {
     const { api } = t;
     const ref = await api.ids();
     const led = ref.m['LED-850-3030'];
-    const o = await po(t, 'S001', led, 1000, 0.42);
+    const o = await po(api, 'S001', led, 1000, 0.42);
     // 超收（>5%）被拒
-    let r = await erp(t, 'wh', 'post', `/api/purchase-orders/${o.id}/receive`, {
+    let r = await api.as('wh').post(`/api/purchase-orders/${o.id}/receive`, {
       lines: [{ po_line_id: o.lines[0].id, qty: 1100, location_id: ref.loc['DRY-01'] }],
     });
     expect(r.status).toBe(400);
     expect(r.body.detail).toContain('超收');
-    const rc = await erpOk(t, 'wh', 'post', `/api/purchase-orders/${o.id}/receive`, {
+    const rc = await api.as('wh').ok('post', `/api/purchase-orders/${o.id}/receive`, {
       delivery_note: 'DN-1', lines: [{ po_line_id: o.lines[0].id, qty: 1000, location_id: ref.loc['DRY-01'], lot_no: 'NEW-850' }],
     });
     expect(rc.lines[0].status).toBe('QUARANTINE');
     expect(rc.lines[0].inspection_id).toBeTruthy();
-    expect((await erpOk(t, 'admin', 'get', `/api/purchase-orders/${o.id}`)).status).toBe('RECEIVED');
-    const ap = (await erpOk(t, 'admin', 'get', '/api/finance/docs', { doc_type: 'AP' })).items[0];
+    expect((await api.ok('get', `/api/purchase-orders/${o.id}`)).status).toBe('RECEIVED');
+    const ap = (await api.ok('get', '/api/finance/docs', { doc_type: 'AP' })).items[0];
     expect(ap.amount).toBe(420.0);
 
     const insp = await api.find('/api/inspections', { q: 'NEW-850' });
@@ -144,8 +78,8 @@ describe('仓储与质量', () => {
     const ref = await api.ids();
     const cases: [string, number, boolean, string][] = [['OK-1', 0, false, 'PASSED'], ['CON-1', 5, true, 'CONCESSION']];
     for (const [lot, defects, concession, expected] of cases) {
-      const o = await po(t, 'S004', ref.m['HSG-RL300-U'], 200, 12);
-      await erpOk(t, 'wh', 'post', `/api/purchase-orders/${o.id}/receive`, {
+      const o = await po(api, 'S004', ref.m['HSG-RL300-U'], 200, 12);
+      await api.as('wh').ok('post', `/api/purchase-orders/${o.id}/receive`, {
         lines: [{ po_line_id: o.lines[0].id, qty: 200, location_id: ref.loc['RAW-A02'], lot_no: lot }],
       });
       const insp = await api.find('/api/inspections', { q: lot });
@@ -295,12 +229,14 @@ describe('仓储与质量', () => {
     expect(issue.shortages).toEqual([
       { material_id: ref.m['PSU-24V-5A'], material_code: 'PSU-24V-5A', material_name: '医用电源适配器 24V/5A', required: 50, shortage: 15, customer_supplied: false },
     ]);
-    // 未过账领料单占用的数量不再重复分配
-    let r = await api.as('wh').post(`/api/work-orders/${wo.id}/issues`, {});
-    expect(r.body.detail).toBe('没有可领用的合格库存（缺料：PSU-24V-5A）');
+    // 未过账领料单已占用的需求不再重复生成（只补未覆盖部分）
+    const issue2 = await api.as('wh').ok('post', `/api/work-orders/${wo.id}/issues`, {});
+    expect(issue2.lines.map((l: any) => [l.material_code, l.lot_no, l.qty])).toEqual([['PSU-24V-5A', 'HY2609A', 15]]);
+    expect(issue2.shortages).toEqual([]);
+    expect((await api.as('wh').ok('post', `/api/issues/${issue2.id}/cancel`)).status).toBe('CANCELLED');
     // 手工指定待检批次被拒
     const q660 = (await stockOf(api, 'Q-660'))[0];
-    r = await api.as('wh').post(`/api/work-orders/${wo.id}/issues`, { lines: [{ material_id: LED, stock_id: q660.id, qty: 1 }] });
+    let r = await api.as('wh').post(`/api/work-orders/${wo.id}/issues`, { lines: [{ material_id: LED, stock_id: q660.id, qty: 1 }] });
     expect(r.body.detail).toBe('批次 Q-660 质量状态为【待检/待放行】，不能领用');
     r = await api.as('wh').post(`/api/work-orders/${wo.id}/issues`, { lines: [{ material_id: ref.m['FAN-6015-24V'], stock_id: q660.id, qty: 1 }] });
     expect(r.body.detail).toBe('非本工单 BOM 物料，不能领用');
@@ -314,6 +250,8 @@ describe('仓储与质量', () => {
     expect(mats.map((m) => m.issued_qty)).toEqual([100, 10, 35]);
     expect((await api.as('wh').post(`/api/issues/${issue.id}/confirm`)).body.detail).toBe('领料单已过账或已取消');
     expect((await api.as('wh').post(`/api/issues/${issue.id}/cancel`)).body.detail).toBe('只能取消未过账的领料单');
+    r = await api.as('wh').post(`/api/work-orders/${wo.id}/issues`, {});
+    expect(r.body.detail).toBe('没有可领用的合格库存（缺料：PSU-24V-5A）');
     const issueMoves = (await api.ok('get', '/api/stock-moves', { ref_no: issue.no })).items;
     expect(issueMoves.every((m: any) => m.move_type === 'WO_ISSUE')).toBe(true);
     expect(issueMoves).toHaveLength(4);
@@ -334,14 +272,14 @@ describe('仓储与质量', () => {
     await db.client.workOrder.update({ where: { id: wo2.id }, data: { status: 'PLANNED' } });
     r = await api.as('wh').post(`/api/work-orders/${wo2.id}/issues`, {});
     expect(r.body.detail).toBe('工单未下达或已完工，不能领料');
-    expect((await api.ok('get', '/api/issues', { wo_id: wo.id })).total).toBe(1);
+    expect((await api.ok('get', '/api/issues', { wo_id: wo.id })).total).toBe(2);
   });
 
   test('发货：DHR 未放行禁止发货；放行后按序列号发货并生成应收', async () => {
     const { api, db } = t;
     const ref = await api.ids();
     const inv = t.app.get(InventoryService);
-    const so = await db.client.salesOrder.findFirstOrThrow({ where: { customer_po: 'LUM-PO-26-118' }, include: { lines: true } });
+    const so = await api.ok('get', `/api/sales-orders/${(await api.find('/api/sales-orders', { q: 'LUM-PO-26-118' })).id}`);
     const sol = so.lines[0];
     const fg = ref.m['FG-RL300'];
     const wo = await db.client.workOrder.create({
@@ -391,11 +329,11 @@ describe('仓储与质量', () => {
       ['SHIPPED', sh.id, so.customer_id, null], ['SHIPPED', sh.id, so.customer_id, null], ['IN_STOCK', null, null, ref.loc['FG-01']],
     ]);
     expect((await stockOf(api, 'B-T-SH'))[0].qty).toBe(1);
-    const so2 = await db.client.salesOrder.findUniqueOrThrow({ where: { id: so.id }, include: { lines: true } });
+    const so2 = await api.ok('get', `/api/sales-orders/${so.id}`);
     expect([so2.status, so2.lines[0].shipped_qty]).toEqual(['PARTIAL_SHIPPED', 2]);
-    const ar = await db.client.financeDoc.findFirstOrThrow({ where: { doc_type: 'AR' } });
-    expect([ar.amount, ar.ref_no, ar.customer_id, ar.currency]).toEqual([176, sh.no, so.customer_id, 'USD']);
-    expect(ar.due_date?.toISOString().slice(0, 10)).toBe(addDays(today(), 60).toISOString().slice(0, 10));
+    const ar = (await api.ok('get', '/api/finance/docs', { doc_type: 'AR' })).items[0];
+    expect([ar.amount, ar.ref_no, ar.customer_id, ar.currency, ar.partner_name]).toEqual([176, sh.no, so.customer_id, 'USD', 'Lumina Health Inc.']);
+    expect(ar.due_date).toBe(addDays(today(), 60).toISOString().slice(0, 10));
     expect((await api.as('wh').post(`/api/shipments/${sh.id}/confirm`)).body.detail).toBe('发货单已过账或已取消');
     expect((await api.as('wh').post(`/api/shipments/${sh.id}/cancel`)).body.detail).toBe('已发货不能取消');
     expect((await api.ok('get', '/api/shipments', { so_id: so.id })).items).toHaveLength(1);
@@ -454,10 +392,10 @@ describe('仓储与质量', () => {
     expect(rows.find((x: any) => x.material_code === 'PKG-RL300-BOX').customer_supplied).toBe(true);
     const below = await api.ok('get', '/api/stock/summary', { below_safety: 'true' });
     expect(below.every((x: any) => x.below_safety)).toBe(true);
-    expect(below.map((x: any) => x.material_code)).toContain('PCB-CTRL-01'); // 60 > 50? 否则 PSU 35 < 50
+    expect(below.map((x: any) => x.material_code)).toContain('PSU-24V-5A'); // 35 < 安全库存 50
+    expect(below.map((x: any) => x.material_code)).not.toContain('PCB-CTRL-01'); // 60 ≥ 50
     const exp = (await api.ok('get', '/api/stock', { expiring_days: 400 })).items;
     expect(exp.length).toBeGreaterThan(0);
     expect(exp.every((s: any) => s.expiry_date)).toBe(true);
-    void dateOnly;
   });
 });

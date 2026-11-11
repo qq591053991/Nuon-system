@@ -100,7 +100,9 @@ export class ProductionService {
     private readonly esign: EsignService,
   ) {}
 
-  async getWo(tx: Tx, woId: number) {
+  /** 读取工单；lock=true 时先锁定工单行（SELECT ... FOR UPDATE），防止并发报工/入库造成数量丢失更新或重复下达 */
+  async getWo(tx: Tx, woId: number, lock = false) {
+    if (lock) await tx.$queryRaw`SELECT id FROM mes_work_order WHERE id = ${woId} FOR NO KEY UPDATE`;
     const wo = await tx.workOrder.findUnique({ where: { id: woId }, include: { material: true } });
     if (!wo) throw new NotFound('生产工单');
     return wo;
@@ -119,7 +121,7 @@ export class ProductionService {
 
   // ---------------- 工单下达 ----------------
   async releaseWorkOrder(tx: Tx, woId: number, user: CurrentUser): Promise<WorkOrder> {
-    const wo = await this.getWo(tx, woId);
+    const wo = await this.getWo(tx, woId, true);
     if (wo.status !== 'PLANNED') throw new BizError('只有“计划”状态的工单才能下达');
     const product = wo.material;
     const bom = wo.bom_id
@@ -229,8 +231,9 @@ export class ProductionService {
 
   /** 序列号过站报工：防跳站、设备校准校验、测试数据自动判定、关键件绑定、不合格自动开 NCR */
   async reportSerial(tx: Tx, user: CurrentUser, a: ReportSerialArgs) {
-    const sn = await this.getSn(tx, a.sn);
-    const wo = await this.getWo(tx, sn.wo_id);
+    const found = await this.getSn(tx, a.sn);
+    const wo = await this.getWo(tx, found.wo_id, true);
+    const sn = (await tx.serialNumber.findUnique({ where: { id: found.id } }))!; // 锁定工单后重新读取
     if (!ACTIVE.includes(wo.status)) throw new BizError(`工单 ${wo.no} 状态为【${wo.status}】，不能报工`);
     if (sn.status === 'NG') throw new BizError(`${sn.sn} 存在未处置的不合格（NCR），请先由 QA 评审处置（返工/报废）`);
     if (['COMPLETED', 'IN_STOCK', 'SHIPPED'].includes(sn.status)) throw new BizError(`${sn.sn} 已完成全部工序`);
@@ -313,7 +316,7 @@ export class ProductionService {
 
   /** 非序列号产品按批量报工；本工序合格+不合格数量不得超过上道工序合格数量（防超报）。 */
   async reportBatch(tx: Tx, user: CurrentUser, woId: number, a: ReportBatchArgs) {
-    const wo = await this.getWo(tx, woId);
+    const wo = await this.getWo(tx, woId, true);
     const good = Number(a.good_qty || 0);
     const ng = Number(a.ng_qty || 0);
     if (wo.material.serial_control) throw new BizError('序列号管理的产品请逐台扫码报工');
@@ -400,7 +403,7 @@ export class ProductionService {
   // ---------------- 完工入库 ----------------
   /** 完工入库：成品进入成品仓，质量状态为“待放行”（QUARANTINE），DHR 审核放行后才可发货。返回入库单 id */
   async fgReceipt(tx: Tx, user: CurrentUser, woId: number, locationId: number, qty?: number | null): Promise<number> {
-    const wo = await this.getWo(tx, woId);
+    const wo = await this.getWo(tx, woId, true);
     if (!['IN_PROGRESS', 'COMPLETED'].includes(wo.status)) throw new BizError('工单未开工或已关闭，不能完工入库');
     const status = wo.dhr_status === 'RELEASED' ? 'AVAILABLE' : 'QUARANTINE';
     const t = today();
@@ -529,7 +532,7 @@ export class ProductionService {
 
   /** DHR 审核与产品放行（QA 电子签名）：批准 → 成品批次 待放行→合格、工单关闭；拒绝 → 冻结 */
   async releaseDhr(tx: Tx, user: CurrentUser, woId: number, approve: boolean, sig: SignatureDto | null | undefined, reason?: string | null): Promise<WorkOrder> {
-    const wo = await this.getWo(tx, woId);
+    const wo = await this.getWo(tx, woId, true);
     if (wo.dhr_status === 'RELEASED') throw new BizError('该批已放行');
     if (approve) {
       const bad = (await this.dhrChecks(tx, wo.id)).filter((c) => !c.ok).map((c) => c.item);

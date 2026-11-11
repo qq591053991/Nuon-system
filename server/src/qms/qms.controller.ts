@@ -21,7 +21,7 @@ const int = (v?: string): number | undefined => {
 
 // ---------- DTO ----------
 class InspItemDto {
-  @IsOptional() @IsInt() id?: number | null;
+  @IsOptional() @Type(() => Number) @IsInt() id?: number | null;
   @IsString() name: string;
   @IsOptional() @IsString() standard?: string | null;
   @IsOptional() @IsString() value?: string | null;
@@ -29,7 +29,7 @@ class InspItemDto {
 }
 
 class InspSubmitDto {
-  @IsOptional() @IsInt() defect_qty: number = 0;
+  @IsOptional() @Type(() => Number) @IsInt() defect_qty: number = 0;
   @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => InspItemDto) items: InspItemDto[] = [];
   /** 不合格时申请让步接收（需 QA） */
   @IsOptional() @IsBoolean() concession: boolean = false;
@@ -40,12 +40,12 @@ class InspSubmitDto {
 class NcrDto {
   @IsOptional() @IsString() source: string = 'OTHER'; // CUSTOMER/OTHER/FQC...
   @IsOptional() @IsString() severity: string = 'MAJOR';
-  @IsOptional() @IsInt() material_id?: number | null;
+  @IsOptional() @Type(() => Number) @IsInt() material_id?: number | null;
   @IsOptional() @IsString() lot_no?: string | null;
   @IsOptional() @IsString() sn?: string | null;
-  @IsOptional() @IsInt() customer_id?: number | null;
-  @IsOptional() @IsInt() supplier_id?: number | null;
-  @IsOptional() @IsNumber() qty: number = 1;
+  @IsOptional() @Type(() => Number) @IsInt() customer_id?: number | null;
+  @IsOptional() @Type(() => Number) @IsInt() supplier_id?: number | null;
+  @IsOptional() @Type(() => Number) @IsNumber() qty: number = 1;
   @IsString() description: string;
 }
 
@@ -56,7 +56,7 @@ class DispositionDto {
 }
 
 class NcrCloseDto {
-  @IsOptional() @IsInt() capa_id?: number | null;
+  @IsOptional() @Type(() => Number) @IsInt() capa_id?: number | null;
 }
 
 /** CAPA 字段（PUT 时只更新请求中出现的字段） */
@@ -65,7 +65,7 @@ const CAPA_FIELDS = ['title', 'source', 'description', 'root_cause', 'correction
 class CapaDto {
   @IsString() title: string;
   @IsOptional() @IsString() source?: string | null;
-  @IsOptional() @IsInt() ncr_id?: number | null;
+  @IsOptional() @Type(() => Number) @IsInt() ncr_id?: number | null;
   @IsOptional() @IsString() description?: string | null;
   @IsOptional() @IsString() root_cause?: string | null;
   @IsOptional() @IsString() correction?: string | null;

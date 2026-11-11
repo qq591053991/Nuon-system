@@ -21,9 +21,9 @@ const bool = (v?: string) => ['1', 'true', 'yes', 'on'].includes(String(v ?? '')
 
 // ---------- DTO ----------
 class ReceiptLineDto {
-  @IsInt() material_id: number;
-  @IsNumber() @IsPositive() qty: number;
-  @IsInt() location_id: number;
+  @Type(() => Number) @IsInt() material_id: number;
+  @Type(() => Number) @IsNumber() @IsPositive() qty: number;
+  @Type(() => Number) @IsInt() location_id: number;
   @IsOptional() @IsString() lot_no?: string | null;
   @IsOptional() @IsString() supplier_lot?: string | null;
   @IsOptional() @IsString() mfg_date?: string | null;
@@ -32,24 +32,24 @@ class ReceiptLineDto {
 
 class ReceiptDto {
   @IsOptional() @IsString() receipt_type: string = 'CUSTOMER_SUPPLIED'; // CUSTOMER_SUPPLIED / OTHER / OPENING
-  @IsOptional() @IsInt() customer_id?: number | null;
-  @IsOptional() @IsInt() supplier_id?: number | null;
+  @IsOptional() @Type(() => Number) @IsInt() customer_id?: number | null;
+  @IsOptional() @Type(() => Number) @IsInt() supplier_id?: number | null;
   @IsOptional() @IsString() delivery_note?: string | null;
   @IsOptional() @IsString() remark?: string | null;
   @IsArray() @ValidateNested({ each: true }) @Type(() => ReceiptLineDto) lines: ReceiptLineDto[];
 }
 
 class TransferDto {
-  @IsInt() stock_id: number;
-  @IsNumber() @IsPositive() qty: number;
-  @IsInt() to_location_id: number;
+  @Type(() => Number) @IsInt() stock_id: number;
+  @Type(() => Number) @IsNumber() @IsPositive() qty: number;
+  @Type(() => Number) @IsInt() to_location_id: number;
   @IsOptional() @IsString() remark?: string | null;
 }
 
 class IssueLineDto {
-  @IsInt() material_id: number;
-  @IsInt() stock_id: number;
-  @IsNumber() @IsPositive() qty: number;
+  @Type(() => Number) @IsInt() material_id: number;
+  @Type(() => Number) @IsInt() stock_id: number;
+  @Type(() => Number) @IsNumber() @IsPositive() qty: number;
 }
 
 class IssueDto {
@@ -58,13 +58,13 @@ class IssueDto {
 }
 
 class ShipLineDto {
-  @IsInt() so_line_id: number;
-  @IsOptional() @IsNumber() qty: number = 0;
+  @Type(() => Number) @IsInt() so_line_id: number;
+  @IsOptional() @Type(() => Number) @IsNumber() qty: number = 0;
   @IsOptional() @IsArray() @IsString({ each: true }) serials?: string[] | null;
 }
 
 class ShipmentDto {
-  @IsInt() so_id: number;
+  @Type(() => Number) @IsInt() so_id: number;
   @IsOptional() @IsString() carrier?: string | null;
   @IsOptional() @IsString() tracking_no?: string | null;
   @IsOptional() @IsString() ship_to?: string | null;
@@ -73,13 +73,13 @@ class ShipmentDto {
 }
 
 class CountDto {
-  @IsInt() warehouse_id: number;
+  @Type(() => Number) @IsInt() warehouse_id: number;
   @IsOptional() @IsString() remark?: string | null;
 }
 
 class CountLineDto {
-  @IsInt() id: number;
-  @IsNumber() @Min(0) counted_qty: number;
+  @Type(() => Number) @IsInt() id: number;
+  @Type(() => Number) @IsNumber() @Min(0) counted_qty: number;
 }
 
 @Controller()
