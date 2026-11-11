@@ -43,7 +43,15 @@ def _row_changes(obj, action: str) -> dict:
     return out
 
 
+_installed: set[int] = set()
+
+
 def install(session_cls) -> None:
+    """注册审计钩子（幂等，重复调用不会重复记录）。"""
+    if id(session_cls) in _installed:
+        return
+    _installed.add(id(session_cls))
+
     @event.listens_for(session_cls, "after_flush")
     def _after_flush(session: Session, ctx):  # noqa: ANN001
         user = session.info.get("user")

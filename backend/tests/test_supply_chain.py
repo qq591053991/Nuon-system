@@ -154,3 +154,45 @@ def test_import_materials_from_kingdee_excel(api):
     assert not res["ok"] and res["errors"][0]["row"] == 3  # 有错误时整体回滚
     assert find(api, "/api/materials", q="LED-630-2835")["name"] == "红光LED 630nm"
     assert api.as_("engineer").get("/api/import/templates/boms").status_code == 200
+
+
+def _xlsx(rows):
+    wb = Workbook()
+    ws = wb.active
+    for r in rows:
+        ws.append(r)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return {"file": ("data.xlsx", buf.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+
+
+def test_import_bom_and_opening_stock(api):
+    api.as_("engineer").ok("post", "/api/import/materials", files=_xlsx([
+        ["物料编码", "物料名称", "物料类别"], ["FG-MASK-M1", "LED面罩 M1", "成品"]]))
+    res = api.as_("engineer").ok("post", "/api/import/boms", files=_xlsx([
+        ["父项物料编码", "BOM版本", "子项物料编码", "用量:分子", "用量:分母", "损耗率(%)", "位号"],
+        ["FG-MASK-M1", "A0", "LED-660-3030", 120, 1, 2, "D1-D120"],
+        ["FG-MASK-M1", "A0", "SCREW-M3X8", 1, 2, 0, None]]))
+    assert res["created"] == 1
+    bom = find(api, "/api/boms", q="FG-MASK-M1")
+    detail = api.ok("get", f"/api/boms/{bom['id']}")
+    assert detail["status"] == "DRAFT"  # 导入的 BOM 需工程师审核后发布
+    lines = {l["component_code"]: l for l in detail["lines"]}
+    assert lines["LED-660-3030"]["scrap_rate"] == 0.02 and lines["SCREW-M3X8"]["qty_per"] == 0.5
+    # 重复导入同版本 BOM 被拒（受控文件不允许覆盖）
+    res = api.as_("engineer").ok("post", "/api/import/boms", files=_xlsx([
+        ["父项物料编码", "BOM版本", "子项物料编码", "用量"], ["FG-MASK-M1", "A0", "LED-660-3030", 1]]))
+    assert not res["ok"]
+
+    res = api.as_("wh").ok("post", "/api/import/stock", files=_xlsx([
+        ["物料编码", "库位编码", "批号", "数量", "生产日期", "有效期至"],
+        ["LED-630-X", "RAW-A01", "L1", 10, None, None]]))
+    assert not res["ok"] and "不存在" in res["errors"][0]["message"]
+    res = api.as_("wh").ok("post", "/api/import/stock", files=_xlsx([
+        ["物料编码", "库位编码", "批号", "数量", "生产日期", "有效期至"],
+        ["LED-660-3030", "DRY-01", "KD-OPEN-1", 800, "2026-10-01", "2027-10-01"],
+        ["PKG-RL300-IFU", "CS-01", "KD-IFU-1", 30, None, None]]))
+    assert res == {"ok": True, "created": 2, "updated": 0, "errors": []}
+    st = {s["lot_no"]: s for s in api.ok("get", "/api/stock", params={"q": "KD-"})["items"]}
+    assert st["KD-OPEN-1"]["status"] == "AVAILABLE" and st["KD-OPEN-1"]["expiry_date"] == "2027-10-01"
+    assert st["KD-IFU-1"]["owner_customer_name"] == "Lumina Health Inc."  # 客供料期初记入货主名下

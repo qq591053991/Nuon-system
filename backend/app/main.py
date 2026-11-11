@@ -1,4 +1,5 @@
 """Nuon 智造云 —— 光疗医疗器械代工（OEM/ODM）一体化平台：ERP + MES + WMS + QMS。"""
+import logging
 import os
 from pathlib import Path
 
@@ -15,6 +16,10 @@ from .models import Base
 from .routers import auth, erp, imports, master, mes, qms, report, system, wms
 
 audit.install(Session)
+log = logging.getLogger("nuon")
+
+if settings.SECRET_KEY.startswith("nuon-dev-secret-key"):
+    log.warning("正在使用默认 SECRET_KEY，生产环境请通过环境变量 SECRET_KEY 设置随机密钥！")
 
 
 def create_app() -> FastAPI:
