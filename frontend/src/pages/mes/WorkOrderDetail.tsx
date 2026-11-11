@@ -4,6 +4,7 @@ import {
 } from 'antd';
 import {
   ArrowLeftOutlined, EditOutlined, ExportOutlined, FileProtectOutlined, FormOutlined, InboxOutlined, ReloadOutlined, ScanOutlined, SendOutlined,
+  SplitCellsOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -15,6 +16,7 @@ import { EquipmentSelect, LocationSelect } from '../../components/RemoteSelect';
 import StatusTag from '../../components/StatusTag';
 import { dictLabel } from '../../utils/dict';
 import { fmtDate, fmtDateTime, fmtQty, toDate } from '../../utils/format';
+import { ReleaseBatchModal, WoReleaseHistory } from './ReleaseBatch';
 import { PRIORITY_OPTIONS, ParamsText, inSpec, num, specText, type SpecParam } from './spec';
 
 const r4 = (v: number) => Math.round(v * 1e4) / 1e4;
@@ -57,12 +59,15 @@ function guide(wo: Rec): { type: 'info' | 'success' | 'warning' | 'error'; text:
     case 'IN_PROGRESS':
       return {
         type: 'info',
-        text: `生产中：${wo.serial_control ? '各工位扫码过站，测试数据自动判定，不合格自动开 NCR' : '按工序批量报工，不良数量自动开 NCR'}。${pendingFg > 0 ? `已有 ${num(pendingFg)} 件完工未入库，可分批【完工入库】。` : ''}`,
+        text: `生产中：${wo.serial_control ? '各工位扫码过站，测试数据自动判定，不合格自动开 NCR' : '按工序批量报工，不良数量自动开 NCR'}。${pendingFg > 0 ? `已有 ${num(pendingFg)} 件完工未入库，可分批【完工入库】。` : ''}${(wo.received_qty || 0) > (wo.released_qty || 0) ? '已入库的成品可由 QA【分批放行】后先行发货。' : ''}`,
       };
     case 'COMPLETED':
       if (pendingFg > 0) return { type: 'warning', text: `下一步：还有 ${num(pendingFg)} 件完工产品未入库，请【完工入库】（入库后为“待放行”）。` };
       if (wo.dhr_status === 'REJECTED') return { type: 'error', text: 'QA 已拒绝放行，该批成品已冻结（HOLD），请根据拒绝原因处理。' };
-      return { type: 'warning', text: '生产已完工并全部入库，等待 QA 审核 DHR 并电子签名放行；放行前成品不能发货。' };
+      return {
+        type: 'warning',
+        text: `生产已完工并全部入库，等待 QA 审核 DHR 并电子签名放行（可分批放行，或【放行全部剩余】）；未放行的成品不能发货。${(wo.released_qty || 0) > 0 ? `已放行 ${num(wo.released_qty)} / 已入库 ${num(wo.received_qty)}。` : ''}`,
+      };
     case 'CLOSED':
       return { type: 'success', text: '该批已由 QA 审核 DHR 并放行，成品为合格库存，可以发货。' };
     case 'CANCELLED':
@@ -344,6 +349,8 @@ export default function WorkOrderDetail() {
   const [batchOpen, setBatchOpen] = useState(false);
   const [fgOpen, setFgOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
+  const [releaseOpen, setReleaseOpen] = useState(false);
+  const [relKey, setRelKey] = useState(0);
 
   const load = useCallback(async () => {
     try {
@@ -379,6 +386,8 @@ export default function WorkOrderDetail() {
   const pendingFg = r4((wo.completed_qty || 0) - (wo.received_qty || 0));
   const canReceive = (st === 'IN_PROGRESS' || st === 'COMPLETED') && pendingFg > 0;
   const needIssue = (wo.materials || []).some((m: Rec) => (m.issued_qty || 0) < m.required_qty - 1e-9);
+  /** QA 可分批放行：已入库、尚未放行的成品（拒绝的批次在弹窗中扣除） */
+  const canRelease = can('qa') && wo.dhr_status === 'OPEN' && (st === 'IN_PROGRESS' || st === 'COMPLETED') && (wo.received_qty || 0) > (wo.released_qty || 0) + 1e-9;
   const draftIssue = issues.some((i) => i.status === 'DRAFT');
   const primary = st === 'PLANNED' ? 'release' : canReceive ? 'fg' : active && needIssue && !draftIssue ? 'issue' : active ? 'report' : 'dhr';
   const g = guide(wo);
@@ -449,6 +458,9 @@ export default function WorkOrderDetail() {
       )}
       {canReceive && can('wms', 'plan') && (
         <Button type="primary" icon={<InboxOutlined />} onClick={() => setFgOpen(true)}>完工入库（{num(pendingFg)}）</Button>
+      )}
+      {canRelease && (
+        <Button icon={<SplitCellsOutlined />} onClick={() => setReleaseOpen(true)}>分批放行</Button>
       )}
       {st !== 'PLANNED' && st !== 'CANCELLED' && (
         <Button type={primary === 'dhr' ? 'primary' : 'default'} icon={<FileProtectOutlined />} onClick={() => nav(`/quality/dhr/${id}`)}>查看 DHR</Button>
@@ -547,6 +559,10 @@ export default function WorkOrderDetail() {
                 { title: '状态', dataIndex: 'status', render: (v) => <StatusTag dict="sn_status" value={v} /> },
                 { title: '已通过工序', dataIndex: 'last_seq', render: (v) => (v ? `${v} ${opName[v] ?? ''}` : <Typography.Text type="secondary">未开始</Typography.Text>) },
                 { title: '完工时间', dataIndex: 'completed_at', render: (v) => fmtDateTime(v) },
+                {
+                  title: '放行批', dataIndex: 'release_no',
+                  render: (v, r) => (v ? <Space size={4}><span className="mono">{v}</span><StatusTag dict="release_status" value={r.release_status} /></Space> : <Typography.Text type="secondary">-</Typography.Text>),
+                },
               ]} />
           </>
         ),
@@ -625,6 +641,24 @@ export default function WorkOrderDetail() {
           ]} />
       ),
     },
+    ...(st !== 'PLANNED' && st !== 'CANCELLED'
+      ? [{
+        key: 'releases',
+        label: `放行记录${(wo.released_qty || 0) > 0 ? `（已放行 ${num(wo.released_qty)}）` : ''}`,
+        children: (
+          <>
+            <Space style={{ marginBottom: 12 }} wrap>
+              <Typography.Text type="secondary">
+                已入库 {fmtQty(wo.received_qty)} / 已放行 {fmtQty(wo.released_qty)} {wo.uom ?? ''}；DHR 审核放行按“放行批”记录，只有已放行批中的产品可以发货。
+              </Typography.Text>
+              {canRelease && <Button type="primary" size="small" icon={<SplitCellsOutlined />} onClick={() => setReleaseOpen(true)}>分批放行</Button>}
+              <Button size="small" icon={<FileProtectOutlined />} onClick={() => nav(`/quality/dhr/${id}`)}>查看 DHR</Button>
+            </Space>
+            <WoReleaseHistory woId={id!} refreshKey={relKey} />
+          </>
+        ),
+      }]
+      : []),
     {
       key: 'ncrs',
       label: (
@@ -671,7 +705,11 @@ export default function WorkOrderDetail() {
                 { title: '下达', description: wo.released_by ? `${wo.released_by}` : '锁定版本、生成批号/UDI' },
                 { title: '生产', description: wo.actual_start ? `开工 ${fmtDateTime(wo.actual_start)}` : '领料、报工' },
                 { title: '完工', description: wo.actual_end ? fmtDateTime(wo.actual_end) : `完工 ${num(wo.completed_qty)} / ${num(wo.planned_qty)}` },
-                { title: '放行', description: wo.dhr_status === 'RELEASED' ? 'QA 已放行' : wo.dhr_status === 'REJECTED' ? '拒绝放行' : 'QA 审核 DHR' },
+                {
+                  title: '放行',
+                  description: wo.dhr_status === 'RELEASED' ? 'QA 已放行' : wo.dhr_status === 'REJECTED' ? '拒绝放行'
+                    : (wo.released_qty || 0) > 0 ? `已分批放行 ${num(wo.released_qty)}` : 'QA 审核 DHR',
+                },
               ]}
             />
           )}
@@ -688,7 +726,7 @@ export default function WorkOrderDetail() {
                 key: 'qty', label: '计划 / 完工 / 报废',
                 children: <span>{fmtQty(wo.planned_qty)} / <b>{fmtQty(wo.completed_qty)}</b> / <span style={{ color: wo.scrap_qty > 0 ? '#cf1322' : undefined }}>{fmtQty(wo.scrap_qty)}</span> {wo.uom}</span>,
               },
-              { key: 'rcv', label: '已入库', children: `${fmtQty(wo.received_qty)} ${wo.uom ?? ''}` },
+              { key: 'rcv', label: '已入库 / 已放行', children: `${fmtQty(wo.received_qty)} / ${fmtQty(wo.released_qty)} ${wo.uom ?? ''}` },
               { key: 'prog', label: '完工进度', children: <Progress percent={wo.progress} size="small" style={{ width: 180, margin: 0 }} /> },
               { key: 'plan', label: '计划开始 ~ 完成', children: `${fmtDate(wo.planned_start)} ~ ${fmtDate(wo.planned_end)}` },
               { key: 'act', label: '实际开工 ~ 完工', children: `${fmtDateTime(wo.actual_start)} ~ ${fmtDateTime(wo.actual_end)}` },
@@ -709,6 +747,11 @@ export default function WorkOrderDetail() {
       <BatchReportModal wo={wo} open={batchOpen} onClose={() => setBatchOpen(false)} onDone={load} />
       <FgReceiptModal wo={wo} open={fgOpen} onClose={() => setFgOpen(false)} onDone={load} />
       <EditWoModal wo={wo} open={editOpen} onClose={() => setEditOpen(false)} onDone={load} />
+      <ReleaseBatchModal wo={wo} open={releaseOpen} onClose={() => setReleaseOpen(false)}
+        onDone={() => {
+          setRelKey((k) => k + 1);
+          load();
+        }} />
     </>
   );
 }

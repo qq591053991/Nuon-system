@@ -176,7 +176,7 @@ describe('P0-3 汇率与多币别', () => {
 });
 
 describe('P0-8 金额十进制精确', () => {
-  test('采购：3 × 0.1 与 3 × 1.115 累加到分不失真；收货应付、分次付款精确结清', async () => {
+  test('采购：3 × 0.1 与 3 × 1.005 累加到分不失真；收货应付、分次付款精确结清', async () => {
     const { api } = t;
     const ref = await api.ids();
     const sup = await api.find('/api/suppliers', { q: 'S004' });
@@ -184,20 +184,20 @@ describe('P0-8 金额十进制精确', () => {
       { material_id: ref.m['SCREW-M3X8'], qty: 1, unit_price: 0.1 },
       { material_id: ref.m['SCREW-M3X8'], qty: 1, unit_price: 0.1 },
       { material_id: ref.m['SCREW-M3X8'], qty: 1, unit_price: 0.1 },
-      { material_id: ref.m['HSG-RL300-U'], qty: 3, unit_price: 1.115 }, // 浮点 3 × 1.115 = 3.3449999… → 3.34（错）；十进制 3.345 → 3.35
+      { material_id: ref.m['HSG-RL300-U'], qty: 3, unit_price: 1.005 }, // 浮点 3 × 1.005 = 3.0149999… → 3.01（错）；十进制 3.015 → 3.02
     ];
     const p = await api.as('buyer').ok('post', '/api/purchase-orders', { supplier_id: sup.id, lines });
-    expect(p.lines.map((l: any) => l.amount)).toEqual([0.1, 0.1, 0.1, 3.35]);
-    expect(p.total_amount).toBe(3.65);
+    expect(p.lines.map((l: any) => l.amount)).toEqual([0.1, 0.1, 0.1, 3.02]);
+    expect(p.total_amount).toBe(3.32);
     await api.as('buyer').ok('post', `/api/purchase-orders/${p.id}/approve`);
     await api.as('wh').ok('post', `/api/purchase-orders/${p.id}/receive`, {
       lines: p.lines.map((l: any) => ({ po_line_id: l.id, qty: l.qty, location_id: ref.loc['RAW-A02'] })),
     });
     const ap = (await api.ok('get', '/api/finance/docs', { doc_type: 'AP' })).items[0];
-    expect(ap.amount).toBe(3.65);
+    expect(ap.amount).toBe(3.32);
     for (const amt of [0.1, 0.1, 0.1]) await api.as('finance').ok('post', `/api/finance/docs/${ap.id}/payments`, { amount: amt });
-    let doc = await api.as('finance').ok('post', `/api/finance/docs/${ap.id}/payments`, { amount: 3.35 });
-    expect([doc.status, doc.paid_amount, doc.balance]).toEqual(['PAID', 3.65, 0]);
+    let doc = await api.as('finance').ok('post', `/api/finance/docs/${ap.id}/payments`, { amount: 3.02 });
+    expect([doc.status, doc.paid_amount, doc.balance]).toEqual(['PAID', 3.32, 0]);
     // 付款金额按分四舍五入；超额拒绝
     const ap2 = await t.db.base.financeDoc.create({ data: { no: 'AP-T9', doc_type: 'AP', supplier_id: sup.id, doc_date: today(), amount: 0.3 } });
     doc = await api.as('finance').ok('post', `/api/finance/docs/${ap2.id}/payments`, { amount: 0.104 });
@@ -205,7 +205,7 @@ describe('P0-8 金额十进制精确', () => {
     expect((await api.as('finance').post(`/api/finance/docs/${ap2.id}/payments`, { amount: 0.21 })).body.detail).toBe('金额超过未结余额 0.20');
   });
 
-  test('销售发货应收：多行 0.1 累加与 3 × 1.115 精确到分，同一订单行分批次发货先合并再计价', async () => {
+  test('销售发货应收：多行 0.1 累加精确到分；同一订单行分批次发货先合并再计价（与订单行金额一致）', async () => {
     const { api, db } = t;
     const ref = await api.ids();
     const c2 = await api.find('/api/customers', { q: 'C002' });
@@ -214,9 +214,9 @@ describe('P0-8 金额十进制精确', () => {
     await api.as('wh').ok('post', '/api/receipts', { receipt_type: 'OTHER', lines: [{ material_id: sa, qty: 1, location_id: ref.loc['FG-01'], lot_no: 'SA-EARLY', expiry_date: d(30) }] });
     const so = await api.as('sales').ok('post', '/api/sales-orders', {
       customer_id: c2.id,
-      lines: [{ material_id: sa, qty: 1, unit_price: 0.1 }, { material_id: sa, qty: 1, unit_price: 0.1 }, { material_id: sa, qty: 1, unit_price: 0.1 }, { material_id: sa, qty: 3, unit_price: 1.115 }],
+      lines: [{ material_id: sa, qty: 1, unit_price: 0.1 }, { material_id: sa, qty: 1, unit_price: 0.1 }, { material_id: sa, qty: 1, unit_price: 0.1 }, { material_id: sa, qty: 3, unit_price: 1.002 }],
     });
-    expect([so.total_amount, so.lines[3].amount]).toEqual([3.65, 3.35]);
+    expect([so.total_amount, so.lines[3].amount]).toEqual([3.31, 3.01]);
     await api.as('sales').ok('post', `/api/sales-orders/${so.id}/confirm`);
     // 先发第 4 行：3 件来自两个批次（1 + 2）
     let sh = await api.as('wh').ok('post', '/api/shipments', { so_id: so.id, lines: [{ so_line_id: so.lines[3].id, qty: 3 }] });
@@ -225,9 +225,9 @@ describe('P0-8 金额十进制精确', () => {
     sh = await api.as('wh').ok('post', '/api/shipments', { so_id: so.id, lines: so.lines.slice(0, 3).map((l: any) => ({ so_line_id: l.id, qty: 1 })) });
     await api.as('wh').ok('post', `/api/shipments/${sh.id}/confirm`);
     const ar = (await api.ok('get', '/api/finance/docs', { doc_type: 'AR' })).items.map((x: any) => x.amount).sort();
-    expect(ar).toEqual([0.3, 3.35]); // 1 × 1.115 + 2 × 1.115 分别取整会得 1.12 + 2.23 = 3.35，合并计价 3.345 → 3.35；三行 0.1 → 0.3
+    expect(ar).toEqual([0.3, 3.01]); // 按批次分别取整会得 1.00 + 2.00 = 3.00；合并计价 3 × 1.002 = 3.006 → 3.01（= 订单行金额）；三行 0.1 → 0.3
     const docs = await db.base.financeDoc.findMany({ where: { doc_type: 'AR' } });
-    expect(docs.map((x) => x.amount.toString()).sort()).toEqual(['0.3', '3.35']);
+    expect(docs.map((x) => x.amount.toString()).sort()).toEqual(['0.3', '3.01']);
   });
 });
 

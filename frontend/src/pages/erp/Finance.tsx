@@ -1,5 +1,5 @@
 import {
-  AutoComplete, Button, Card, Col, DatePicker, Form, Input, InputNumber, Modal, Row, Select, Space, Statistic, Table, Tabs, Typography, message,
+  Alert, AutoComplete, Button, Card, Col, DatePicker, Form, Input, InputNumber, Modal, Row, Select, Space, Statistic, Table, Tabs, Tag, Typography, message,
   type TableColumnsType,
 } from 'antd';
 import { DollarOutlined, ReloadOutlined } from '@ant-design/icons';
@@ -23,6 +23,10 @@ const TEXT = {
 const METHODS = ['银行转账', '电汇(T/T)', '承兑汇票', '信用证(L/C)', '支票', '现金', '其他'].map((v) => ({ value: v }));
 const BUCKETS = ['未到期', '1-30天', '31-90天', '90天以上'] as const;
 const amt = (v?: number) => (v ? Number(v).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : <span style={{ color: '#bfbfbf' }}>-</span>);
+/** 金额 + 币别（常用币别带符号，其余显示代码） */
+const cur = (v: number | null | undefined, c: string) =>
+  ['CNY', 'USD', 'EUR'].includes(c) ? fmtMoney(v, c) : `${c} ${Number(v ?? 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const BLANK: Rec = {};
 
 /** 来源单据链接（发货单 / 入库单） */
 function RefLink({ doc }: { doc: Rec }) {
@@ -91,13 +95,15 @@ function PaymentModal({ doc, onClose, onDone }: { doc: Rec | null; onClose: () =
   );
 }
 
-function FinDocs({ docType, summary, onChanged }: { docType: DocType; summary: Rec[]; onChanged: () => void }) {
+function FinDocs({ docType, totals, base, onChanged }: { docType: DocType; totals: Rec; base: string; onChanged: () => void }) {
   const { can } = useAuth();
   const t = TEXT[docType];
   const { rows, loading, setQuery, reload, pagination } = usePaged('/finance/docs', { doc_type: docType });
   const [paying, setPaying] = useState<Rec | null>(null);
-  const total = summary.reduce((s, r) => s + (r.total || 0), 0);
-  const overdue = summary.reduce((s, r) => s + (r['1-30天'] || 0) + (r['31-90天'] || 0) + (r['90天以上'] || 0), 0);
+  const total = totals.total || 0;
+  const overdue = (totals['1-30天'] || 0) + (totals['31-90天'] || 0) + (totals['90天以上'] || 0);
+  const byCur: Rec[] = totals.by_currency || [];
+  const missing: string[] = totals.missing_rates || [];
 
   const columns: TableColumnsType<Rec> = [
     { title: '单号', dataIndex: 'no', fixed: 'left', render: (v) => <span className="mono">{v}</span> },
@@ -105,9 +111,10 @@ function FinDocs({ docType, summary, onChanged }: { docType: DocType; summary: R
     { title: '来源单据', key: 'ref', render: (_, r) => <RefLink doc={r} /> },
     { title: '单据日期', dataIndex: 'doc_date', render: fmtDate },
     { title: '到期日', dataIndex: 'due_date', render: (v, r) => <DueDate value={v} overdue={r.status !== 'PAID' && isPast(v)} hint="已逾期未结清" /> },
-    { title: '金额', dataIndex: 'amount', align: 'right', render: (v, r) => fmtMoney(v, r.currency) },
-    { title: t.paid, dataIndex: 'paid_amount', align: 'right', render: (v, r) => fmtMoney(v, r.currency) },
-    { title: '未结余额', dataIndex: 'balance', align: 'right', render: (v, r) => <b>{fmtMoney(v, r.currency)}</b> },
+    { title: '币别', dataIndex: 'currency', render: (v) => <Tag>{v}</Tag> },
+    { title: '金额', dataIndex: 'amount', align: 'right', render: (v, r) => cur(v, r.currency) },
+    { title: t.paid, dataIndex: 'paid_amount', align: 'right', render: (v, r) => cur(v, r.currency) },
+    { title: '未结余额', dataIndex: 'balance', align: 'right', render: (v, r) => <b>{cur(v, r.currency)}</b> },
     { title: '状态', dataIndex: 'status', render: (v) => <StatusTag dict="fin_status" value={v} /> },
     { title: '摘要', dataIndex: 'remark', ellipsis: true, width: 200, render: (v) => v || '-' },
   ];
@@ -130,13 +137,22 @@ function FinDocs({ docType, summary, onChanged }: { docType: DocType; summary: R
   return (
     <>
       <Row gutter={16} style={{ marginBottom: 16 }}>
-        <Col xs={12} md={6}><Card size="small"><Statistic title={`${t.name}余额合计`} value={total} precision={2} /></Card></Col>
-        <Col xs={12} md={6}><Card size="small"><Statistic title="其中已逾期" value={overdue} precision={2} valueStyle={{ color: overdue > 0 ? '#cf1322' : undefined }} /></Card></Col>
+        <Col xs={12} md={6}><Card size="small"><Statistic title={`${t.name}余额合计（折合 ${base}）`} value={total} precision={2} /></Card></Col>
+        <Col xs={12} md={6}><Card size="small"><Statistic title={`其中已逾期（折合 ${base}）`} value={overdue} precision={2} valueStyle={{ color: overdue > 0 ? '#cf1322' : undefined }} /></Card></Col>
         <Col xs={24} md={12}>
-          <Typography.Text type="secondary" style={{ display: 'block', paddingTop: 8 }}>
+          <Typography.Paragraph type="secondary" style={{ paddingTop: 8, marginBottom: 0 }}>
             {docType === 'AR' ? '发货过账后系统自动生成应收单，到期日 = 发货日 + 客户账期。' : '采购收货后系统自动生成应付单，到期日 = 收货日 + 供应商账期。'}
-            合计金额按原币直接相加，仅供参考。
-          </Typography.Text>
+            单据按原币记账；合计按今日适用汇率折算为本位币 {base}。
+          </Typography.Paragraph>
+          {byCur.length > 0 && (
+            <Space wrap size={[8, 4]}>
+              <Typography.Text type="secondary">按币别未结：</Typography.Text>
+              {byCur.map((r) => <Tag key={r.currency}>{cur(r.amount, r.currency)}</Tag>)}
+            </Space>
+          )}
+          {missing.length > 0 && (
+            <Alert type="warning" showIcon style={{ marginTop: 8 }} message={`缺少 ${missing.join('、')} 汇率，这些币别未计入本位币合计。请在“基础资料 → 汇率”中维护。`} />
+          )}
         </Col>
       </Row>
       <Space wrap style={{ marginBottom: 16 }}>
@@ -176,21 +192,27 @@ function FinDocs({ docType, summary, onChanged }: { docType: DocType; summary: R
   );
 }
 
-function AgingTable({ title, partner, rows }: { title: string; partner: string; rows: Rec[] }) {
+function AgingTable({ title, partner, rows, totals, base }: { title: string; partner: string; rows: Rec[]; totals: Rec; base: string }) {
   const columns: TableColumnsType<Rec> = [
     { title: partner, dataIndex: 'partner', ellipsis: true, width: 260, render: (v) => v || '-' },
+    { title: '币别', dataIndex: 'currency', width: 70, render: (v) => <Tag>{v}</Tag> },
     ...BUCKETS.map((b) => ({
       title: b,
       dataIndex: b,
       align: 'right' as const,
       render: (v: number) => (b !== '未到期' && v > 0 ? <span style={{ color: b === '1-30天' ? '#d48806' : '#cf1322' }}>{amt(v)}</span> : amt(v)),
     })),
-    { title: '合计', dataIndex: 'total', align: 'right', render: (v) => <b>{amt(v)}</b> },
+    { title: '合计（原币）', dataIndex: 'total', align: 'right', render: (v, r) => <b>{cur(v, r.currency)}</b> },
+    {
+      title: `折合 ${base}`, dataIndex: 'total_base', align: 'right',
+      render: (v, r) => (v === null || v === undefined ? <Typography.Text type="warning">缺 {r.currency} 汇率</Typography.Text> : amt(v)),
+    },
   ];
+  const missing: string[] = totals.missing_rates || [];
   return (
     <Card size="small" title={title}>
       <Table
-        rowKey={(r) => r.partner ?? '-'}
+        rowKey={(r) => `${r.partner ?? '-'}|${r.currency}`}
         size="middle"
         columns={columns}
         dataSource={rows}
@@ -199,11 +221,15 @@ function AgingTable({ title, partner, rows }: { title: string; partner: string; 
         summary={(data) =>
           data.length ? (
             <Table.Summary.Row>
-              <Table.Summary.Cell index={0}><b>合计</b></Table.Summary.Cell>
+              <Table.Summary.Cell index={0} colSpan={2}>
+                <b>合计（折合 {base}）</b>
+                {missing.length > 0 && <Typography.Text type="warning" style={{ fontSize: 12, marginLeft: 8 }}>不含 {missing.join('、')}</Typography.Text>}
+              </Table.Summary.Cell>
               {BUCKETS.map((b, i) => (
-                <Table.Summary.Cell key={b} index={i + 1} align="right"><b>{amt(data.reduce((s, r) => s + (r[b] || 0), 0))}</b></Table.Summary.Cell>
+                <Table.Summary.Cell key={b} index={i + 2} align="right"><b>{amt(totals[b])}</b></Table.Summary.Cell>
               ))}
-              <Table.Summary.Cell index={5} align="right"><b>{amt(data.reduce((s, r) => s + (r.total || 0), 0))}</b></Table.Summary.Cell>
+              <Table.Summary.Cell index={6} align="right">-</Table.Summary.Cell>
+              <Table.Summary.Cell index={7} align="right"><b>{amt(totals.total)}</b></Table.Summary.Cell>
             </Table.Summary.Row>
           ) : null
         }
@@ -213,7 +239,9 @@ function AgingTable({ title, partner, rows }: { title: string; partner: string; 
 }
 
 export default function Finance() {
-  const [summary, setSummary] = useState<Rec>({ AR: [], AP: [] });
+  const [summary, setSummary] = useState<Rec>({ AR: [], AP: [], totals: {} });
+  const base: string = summary.base_currency || 'CNY';
+  const totals: Rec = summary.totals || BLANK;
   const loadSummary = useCallback(() => {
     get('/finance/summary').then(setSummary);
   }, []);
@@ -227,19 +255,19 @@ export default function Finance() {
       <Card>
         <Tabs
           items={[
-            { key: 'AR', label: '应收账款（AR）', children: <FinDocs docType="AR" summary={summary.AR || []} onChanged={loadSummary} /> },
-            { key: 'AP', label: '应付账款（AP）', children: <FinDocs docType="AP" summary={summary.AP || []} onChanged={loadSummary} /> },
+            { key: 'AR', label: '应收账款（AR）', children: <FinDocs docType="AR" totals={totals.AR || BLANK} base={base} onChanged={loadSummary} /> },
+            { key: 'AP', label: '应付账款（AP）', children: <FinDocs docType="AP" totals={totals.AP || BLANK} base={base} onChanged={loadSummary} /> },
             {
               key: 'aging',
               label: '账龄分析',
               children: (
                 <Space direction="vertical" size={16} style={{ width: '100%' }}>
                   <Space style={{ width: '100%', justifyContent: 'space-between' }}>
-                    <Typography.Text type="secondary">按到期日计算逾期天数，统计未结清余额（原币金额直接汇总）。</Typography.Text>
+                    <Typography.Text type="secondary">按到期日计算逾期天数，统计未结清余额：每行为往来单位 + 币别的原币金额，合计行按今日适用汇率折算为本位币 {base}。</Typography.Text>
                     <Button icon={<ReloadOutlined />} onClick={loadSummary}>刷新</Button>
                   </Space>
-                  <AgingTable title="应收账龄（客户）" partner="客户" rows={summary.AR || []} />
-                  <AgingTable title="应付账龄（供应商）" partner="供应商" rows={summary.AP || []} />
+                  <AgingTable title="应收账龄（客户）" partner="客户" rows={summary.AR || []} totals={totals.AR || BLANK} base={base} />
+                  <AgingTable title="应付账龄（供应商）" partner="供应商" rows={summary.AP || []} totals={totals.AP || BLANK} base={base} />
                 </Space>
               ),
             },

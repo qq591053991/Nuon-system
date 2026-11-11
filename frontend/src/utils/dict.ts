@@ -48,6 +48,7 @@ export const DICT: Record<string, Record<string, Entry>> = {
     FG_RECEIPT: ['完工入库', 'cyan'], FG_RELEASE: ['产品放行', 'green'], SHIPMENT: ['销售出库', 'geekblue'], TRANSFER: ['调拨'],
     ADJUST: ['盘点调整', 'gold'], SCRAP: ['报废', 'red'], RETURN_SUPPLIER: ['退供应商', 'volcano'], STATUS_CHANGE: ['状态变更', 'purple'],
     CUSTOMER_RETURN: ['客户退货', 'magenta'], RETURN_TO_CUSTOMER: ['返还客户', 'magenta'],
+    REWORK_ISSUE: ['返工补料', 'orange'],
   },
   mrp_action: { PURCHASE: ['采购', 'blue'], PRODUCE: ['生产', 'green'], CUSTOMER_SUPPLY: ['通知客户供料', 'purple'] },
   mrp_status: { OPEN: ['待处理', 'gold'], CONVERTED: ['已转单', 'green'], IGNORED: ['已忽略', 'default'] },
@@ -59,6 +60,10 @@ export const DICT: Record<string, Record<string, Entry>> = {
   issue_type: { ISSUE: ['领料', 'blue'], RETURN: ['退料', 'orange'] },
   rma_status: { RECEIVED: ['待处置', 'gold'], CLOSED: ['已关闭', 'green'] },
   complaint_status: { OPEN: ['已登记', 'gold'], INVESTIGATING: ['调查中', 'processing'], CLOSED: ['已关闭', 'green'] },
+  // 生产（代理 3）：放行批、关键件/返工换件、上岗资质
+  release_status: { RELEASED: ['已放行', 'green'], REJECTED: ['拒绝放行', 'red'] },
+  key_part_action: { BIND: ['装配绑定', 'blue'], REMOVE: ['返工拆下', 'volcano'], INSTALL: ['返工装上', 'green'] },
+  qual_level: { TRAINEE: ['培训中', 'gold'], QUALIFIED: ['合格上岗', 'green'], TRAINER: ['带教/培训师', 'purple'] },
 };
 
 export function dictLabel(dict: string, value?: string | null): string {

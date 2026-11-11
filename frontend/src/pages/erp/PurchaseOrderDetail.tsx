@@ -29,6 +29,19 @@ const NEXT_HINT: Record<string, string> = {
 
 const remainOf = (l: Rec) => Math.max(0, Math.round((l.qty - (l.received_qty || 0)) * 10000) / 10000);
 
+/** 采购单位换算率（下单时记录：1 采购单位 = qty / purchase_qty 库存单位） */
+const factorOf = (l: Rec) => (l.purchase_uom && l.purchase_qty ? l.qty / l.purchase_qty : 0);
+/** 库存单位数量折合采购单位（提示用） */
+const inPurchase = (l: Rec, q: number) => {
+  const f = factorOf(l);
+  return f ? `≈ ${fmtQty(q / f)} ${l.purchase_uom}` : null;
+};
+/** 单价（最多 6 位小数） */
+const fmtPrice = (v: number | null | undefined, currency: string) =>
+  v === null || v === undefined
+    ? '-'
+    : `${currency === 'USD' ? '$' : currency === 'EUR' ? '€' : '¥'}${Number(v).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 6 })}`;
+
 function PoSteps({ po }: { po: Rec | null }) {
   const st = po?.status || 'DRAFT';
   if (st === 'CANCELLED') return <Alert type="warning" showIcon message="订单已取消" />;
@@ -87,8 +100,25 @@ function PoEditor({ po, onSaved }: { po: Rec | null; onSaved: (d: Rec) => void }
   const nav = useNavigate();
   const [form] = Form.useForm();
   const [lines, setLines] = useState<LineRow[]>(() =>
-    po?.lines?.length ? po.lines.map((l: Rec) => ({ ...l, _key: uid() })) : [{ _key: uid() }],
+    po?.lines?.length
+      ? po.lines.map((l: Rec) => ({ ...l, _key: uid(), purchase_uom_def: l.purchase_uom ?? null, purchase_factor: factorOf(l) || null }))
+      : [{ _key: uid() }],
   );
+  // 修改草稿：读取物料的采购单位设置（已按采购单位下单的行保留下单时的换算率）
+  useEffect(() => {
+    const ids = [...new Set(((po?.lines || []) as Rec[]).map((l) => l.material_id))];
+    if (!ids.length) return;
+    Promise.all(ids.map((mid) => get(`/materials/${mid}`, undefined, true).catch(() => null))).then((mats) => {
+      const byId = new Map((mats.filter(Boolean) as Rec[]).map((m) => [m.id, m]));
+      setLines((old) =>
+        old.map((r) => {
+          const m = byId.get(r.material_id);
+          return !m || r.purchase_uom ? r : { ...r, purchase_uom_def: m.purchase_uom ?? null, purchase_factor: m.purchase_factor ?? null };
+        }),
+      );
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [busy, setBusy] = useState<string>();
   const currency: string = Form.useWatch('currency', form) || po?.currency || 'CNY';
   const expected = Form.useWatch('expected_date', form);
@@ -187,13 +217,18 @@ function PoEditor({ po, onSaved }: { po: Rec | null; onSaved: (d: Rec) => void }
             </Row>
           </Form>
         </Card>
-        <Card title="采购明细" size="small" extra={<Typography.Text type="secondary">选择物料后自动带出标准成本作为参考单价</Typography.Text>}>
+        <Card
+          title="采购明细"
+          size="small"
+          extra={<Typography.Text type="secondary">选择物料后自动带出标准成本作为参考单价；设置了采购单位的物料（如 LED 按卷）默认按采购单位下单，系统自动换算为库存单位</Typography.Text>}
+        >
           <OrderLinesEditor
             value={lines}
             onChange={setLines}
             dateField="expected_date"
             dateLabel="预计到货"
             currency={currency}
+            purchaseUnit
             defaultDate={expected ? dayjs(expected).format('YYYY-MM-DD') : null}
             defaultPrice={(m) => (m.std_cost ? Number(m.std_cost) : undefined)}
           />
@@ -275,13 +310,27 @@ function ReceiveModal({ po, open, onClose, onDone }: { po: Rec; open: boolean; o
       ),
     },
     {
-      title: '订单 / 已收 / 未收', key: 'q', width: 150,
-      render: (_, r) => `${fmtQty(r.line.qty)} / ${fmtQty(r.line.received_qty || 0)} / ${fmtQty(remainOf(r.line))} ${r.line.uom || ''}`,
+      title: '订单 / 已收 / 未收', key: 'q', width: 170,
+      render: (_, r) => (
+        <div>
+          {`${fmtQty(r.line.qty)} / ${fmtQty(r.line.received_qty || 0)} / ${fmtQty(remainOf(r.line))} ${r.line.uom || ''}`}
+          {r.line.purchase_uom && (
+            <Typography.Text type="secondary" style={{ display: 'block', fontSize: 12 }}>
+              下单 {fmtQty(r.line.purchase_qty)} {r.line.purchase_uom}（1 {r.line.purchase_uom} = {fmtQty(factorOf(r.line))} {r.line.uom}）
+            </Typography.Text>
+          )}
+        </div>
+      ),
     },
     {
-      title: '本次收货', key: 'qty', width: 120,
+      title: '本次收货（库存单位）', key: 'qty', width: 140,
       render: (_, r) => (
-        <InputNumber min={0} max={Math.round(remainOf(r.line) * 1.05 * 10000) / 10000} style={{ width: 110 }} value={r.qty} onChange={(v) => patch(r._key, { qty: v })} />
+        <div>
+          <InputNumber min={0} max={Math.round(remainOf(r.line) * 1.05 * 10000) / 10000} style={{ width: 120 }} value={r.qty} onChange={(v) => patch(r._key, { qty: v })} />
+          {inPurchase(r.line, Number(r.qty) || 0) && (
+            <Typography.Text type="secondary" style={{ display: 'block', fontSize: 12 }}>{inPurchase(r.line, Number(r.qty) || 0)}</Typography.Text>
+          )}
+        </div>
       ),
     },
     {
@@ -318,7 +367,7 @@ function ReceiveModal({ po, open, onClose, onDone }: { po: Rec; open: boolean; o
         type="info"
         showIcon
         style={{ marginBottom: 16 }}
-        message="需检验的物料收货后为“待检”状态，IQC 检验合格后才能领用；本次收货数量默认为未收数量，允许超收 5%。数量填 0 的行不收货。"
+        message="收货一律按库存单位（如 PCS）登记，按采购单位下单的行会提示折合的采购单位数量。需检验的物料收货后为“待检”状态，IQC 检验合格后才能领用；本次收货数量默认为未收数量，允许超收 5%。数量填 0 的行不收货。"
       />
       <Form form={form} layout="inline" style={{ marginBottom: 16, rowGap: 8 }} preserve={false}>
         <Form.Item name="delivery_note" label="送货单号"><Input style={{ width: 180 }} placeholder="供应商送货单号" /></Form.Item>
@@ -371,8 +420,27 @@ function PoView({ po, reload }: { po: Rec; reload: () => Promise<unknown> }) {
     { title: '物料名称', dataIndex: 'material_name' },
     { title: '规格', dataIndex: 'material_spec', ellipsis: true, width: 200, render: (v) => v || '-' },
     { title: '单位', dataIndex: 'uom' },
-    { title: '数量', dataIndex: 'qty', align: 'right', render: (v) => fmtQty(v) },
-    { title: '单价', dataIndex: 'unit_price', align: 'right', render: (v) => fmtMoney(v, po.currency) },
+    {
+      title: '数量', dataIndex: 'qty', align: 'right',
+      render: (v, l) => (
+        <div>
+          {fmtQty(v)}
+          {l.purchase_uom && <Typography.Text type="secondary" style={{ display: 'block', fontSize: 12 }}>= {fmtQty(l.purchase_qty)} {l.purchase_uom}</Typography.Text>}
+        </div>
+      ),
+    },
+    {
+      title: '单价', dataIndex: 'unit_price', align: 'right',
+      render: (v, l) =>
+        l.purchase_uom ? (
+          <div>
+            {fmtPrice(l.purchase_price, po.currency)}/{l.purchase_uom}
+            <Typography.Text type="secondary" style={{ display: 'block', fontSize: 12 }}>= {fmtPrice(v, po.currency)}/{l.uom}</Typography.Text>
+          </div>
+        ) : (
+          fmtPrice(v, po.currency)
+        ),
+    },
     { title: '金额', dataIndex: 'amount', align: 'right', render: (v) => fmtMoney(v, po.currency) },
     {
       title: '预计到货', dataIndex: 'expected_date',

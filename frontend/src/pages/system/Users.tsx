@@ -199,9 +199,9 @@ function UsersAdmin() {
     { title: '部门', dataIndex: 'department', width: 110, render: (v) => v || '-' },
     { title: '邮箱', dataIndex: 'email', width: 180, render: (v) => v || '-' },
     {
-      title: '状态', dataIndex: 'is_active', width: 110,
+      title: '状态', dataIndex: 'is_active', width: 170,
       render: (v, r) => (
-        <Space size={4} wrap>
+        <Space size={4}>
           {!v ? <Tag>停用</Tag> : !(r.role_list || []).length ? <Tag color="orange">待分配角色</Tag> : <Tag color="green">启用</Tag>}
           {r.locked && (
             <Tooltip title={`密码/PIN 连续错误，锁定至 ${fmtDateTime(r.locked_until)}；编辑并保存即可解锁`}>

@@ -117,6 +117,114 @@ function IssueDrawer({ issue, onClose, onChanged }: { issue: Rec | null; onClose
   );
 }
 
+/** 新建生产退料单：选工单 → 列出该工单已领批次（可退数量 = 已领 − 已退 − 未过账退料）→ 填退料数量与库位 */
+function ReturnModal({ open, woId: initWo, onClose, onDone }: { open: boolean; woId?: number; onClose: () => void; onDone: (r: Rec) => void }) {
+  const [woId, setWoId] = useState<number | undefined>(initWo);
+  const [lots, setLots] = useState<Rec[]>([]);
+  const [qty, setQty] = useState<Record<string, number | null>>({});
+  const [loc, setLoc] = useState<Record<string, number | undefined>>({});
+  const [remark, setRemark] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const keyOf = (l: Rec) => `${l.material_id}|${l.lot_no}|${l.owner_customer_id ?? ''}`;
+
+  useEffect(() => {
+    if (open) {
+      setWoId(initWo);
+      setRemark('');
+    }
+  }, [open, initWo]);
+
+  useEffect(() => {
+    setLots([]);
+    setQty({});
+    setLoc({});
+    if (!open || !woId) return;
+    setLoading(true);
+    get<Rec[]>(`/work-orders/${woId}/returnable`)
+      .then((d) => {
+        setLots(d);
+        setLoc(Object.fromEntries(d.map((l) => [keyOf(l), l.location_id])));
+      })
+      .finally(() => setLoading(false));
+  }, [open, woId]);
+
+  const picked = lots.filter((l) => (qty[keyOf(l)] ?? 0) > 0);
+
+  const submit = async () => {
+    if (!woId) {
+      message.warning('请选择生产工单');
+      return;
+    }
+    if (!picked.length) {
+      message.warning('请至少填写一行退料数量');
+      return;
+    }
+    const noLoc = picked.find((l) => !loc[keyOf(l)]);
+    if (noLoc) {
+      message.warning(`请选择 ${noLoc.material_code} 的退回库位`);
+      return;
+    }
+    setSaving(true);
+    try {
+      const r = await post(`/work-orders/${woId}/returns`, {
+        remark: remark || null,
+        lines: picked.map((l) => ({ material_id: l.material_id, lot_no: l.lot_no, owner_customer_id: l.owner_customer_id ?? null, location_id: loc[keyOf(l)], qty: qty[keyOf(l)] })),
+      });
+      message.success(`退料单 ${r.no} 已生成，请清点实物后过账`);
+      onDone(r);
+      onClose();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const columns: TableColumnsType<Rec> = [
+    {
+      title: '物料', key: 'm',
+      render: (_, r) => <MaterialCell code={r.material_code} name={r.material_name} spec={r.material_spec} extra={r.owner_customer_id ? <CsTag /> : undefined} />,
+    },
+    { title: '批号', dataIndex: 'lot_no', render: (v, r) => <LotLink code={r.material_code} lot={v} /> },
+    { title: '已领', dataIndex: 'issued_qty', align: 'right', render: (v, r) => <Qty qty={v} uom={r.uom} /> },
+    { title: '已退', dataIndex: 'returned_qty', align: 'right', render: (v) => fmtQty(v) },
+    { title: '待过账退料', dataIndex: 'pending_qty', align: 'right', render: (v) => (v ? <Typography.Text type="warning">{fmtQty(v)}</Typography.Text> : '-') },
+    { title: '可退', dataIndex: 'returnable_qty', align: 'right', render: (v, r) => <Qty qty={v} uom={r.uom} strong /> },
+    {
+      title: '本次退料', key: 'qty', width: 120,
+      render: (_, r) => (
+        <InputNumber min={0} max={r.returnable_qty} style={{ width: 110 }} disabled={!r.returnable_qty} value={qty[keyOf(r)] ?? null}
+          placeholder={r.returnable_qty ? `≤ ${fmtQty(r.returnable_qty)}` : '已无可退'} onChange={(v) => setQty((q) => ({ ...q, [keyOf(r)]: v as number | null }))} />
+      ),
+    },
+    {
+      title: '退回库位', key: 'loc', width: 200,
+      render: (_, r) => (
+        <LocationSelect style={{ width: 190 }} value={loc[keyOf(r)]} disabled={!r.returnable_qty} onChange={(v) => setLoc((m) => ({ ...m, [keyOf(r)]: v as number | undefined }))} />
+      ),
+    },
+  ];
+
+  return (
+    <Modal open={open} width={1150} title={<span><RollbackOutlined style={{ marginRight: 8 }} />新建生产退料单</span>} okText="生成退料单"
+      confirmLoading={saving} onOk={submit} onCancel={onClose} destroyOnHidden maskClosable={false}>
+      <Alert type="info" showIcon style={{ marginBottom: 16 }}
+        message="只能退回本工单已领用的批次，数量不超过“已领 − 已退 − 未过账退料”。退料只退回合格品库位（默认原领料库位）；不良物料请开具 NCR，不走退料。" />
+      <Space wrap style={{ marginBottom: 12 }}>
+        <span>生产工单：</span>
+        <RemoteSelect url="/work-orders" params={{ status: 'RELEASED,IN_PROGRESS,COMPLETED' }} style={{ width: 360 }} value={woId}
+          onChange={(v) => setWoId(v as number | undefined)} placeholder="搜索工单号 / 产品"
+          labelOf={(r) => `${r.no} ${r.material_code} ${r.material_name}（${r.lot_no ?? ''}）`} />
+        <Input style={{ width: 360 }} placeholder="退料原因 / 备注（如：工单完工剩余）" value={remark} onChange={(e) => setRemark(e.target.value)} />
+      </Space>
+      {loading ? <div style={{ textAlign: 'center', padding: 32 }}><Spin /></div> : woId ? (
+        <Table rowKey={keyOf} size="small" columns={columns} dataSource={lots} pagination={false} scroll={{ x: 'max-content' }}
+          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="该工单没有已过账的领料" /> }} />
+      ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请选择工单（已下达 / 生产中 / 已完工）" />}
+      {picked.length > 0 && <Typography.Paragraph type="secondary" style={{ marginTop: 8 }}>本次退料 {picked.length} 行。</Typography.Paragraph>}
+    </Modal>
+  );
+}
+
 export default function Issues() {
   const [sp, setSp] = useSearchParams();
   const woId = sp.get('wo_id');
@@ -125,6 +233,8 @@ export default function Issues() {
     wo_id: woId ? Number(woId) : undefined,
   });
   const [current, setCurrent] = useState<Rec | null>(null);
+  const [returnOpen, setReturnOpen] = useState(false);
+  const { can } = useAuth();
 
   const changed = (r: Rec) => {
     setCurrent((c) => (c && c.id === r.id ? r : c));
@@ -153,16 +263,20 @@ export default function Issues() {
 
   return (
     <>
-      <PageHeader title="生产领料" sub="领料单由生产工单生成；仓管按单拣料、过账。点击行查看拣料清单。" />
+      <PageHeader
+        title="生产领料 / 退料"
+        sub="领料单由生产工单生成；仓管按单拣料、过账。工单多领或完工剩余的物料用退料单退回。点击行查看明细。"
+        extra={can('wms') && <Button icon={<RollbackOutlined />} onClick={() => setReturnOpen(true)}>新建退料单</Button>}
+      />
       <Alert
         type="info"
         showIcon
         style={{ marginBottom: 16 }}
-        message="系统已按 FEFO（先到期先出）推荐批次，仓管按单拣料后过账；过账后批次即与工单绑定用于追溯。只能领用“合格”库存。"
+        message="系统已按 FEFO（先到期先出）推荐批次，仓管按单拣料后过账；过账后批次即与工单绑定用于追溯。只能领用“合格”库存。退料只能退本工单已领批次、且不超过已领数量。"
       />
       <Card>
         <Space wrap style={{ marginBottom: 16 }}>
-          <Input.Search allowClear placeholder="领料单号 / 工单号" defaultValue={sp.get('q') || ''} style={{ width: 240 }} onSearch={(q) => setQuery({ q: q.trim() })} />
+          <Input.Search allowClear placeholder="领料/退料单号 / 工单号" defaultValue={sp.get('q') || ''} style={{ width: 240 }} onSearch={(q) => setQuery({ q: q.trim() })} />
           <Select allowClear placeholder="状态" style={{ width: 130 }} options={STATUS_OPTIONS} onChange={(v) => setQuery({ status: v })} />
           {woId && (
             <Tag
@@ -192,6 +306,7 @@ export default function Issues() {
         />
       </Card>
       <IssueDrawer issue={current} onClose={() => setCurrent(null)} onChanged={changed} />
+      <ReturnModal open={returnOpen} woId={woId ? Number(woId) : undefined} onClose={() => setReturnOpen(false)} onDone={(r) => { reload(); setCurrent(r); }} />
     </>
   );
 }

@@ -199,8 +199,10 @@ function BomBody({ bom, versions, reload }: { bom: Rec; versions: Rec[]; reload:
   const reject = async () => {
     const signature = await signed({
       meaning: 'BOM驳回',
-      description: '驳回后退回草稿，由工程师修改后重新提交。请在下方填写驳回原因。',
+      description: '驳回后退回草稿，由工程师修改后重新提交。',
       reasonRequired: true,
+      reasonLabel: '驳回原因',
+      reasonPlaceholder: '如：组件用量与图纸不符，请复核后重新提交',
     });
     if (!signature) return;
     setBusy('reject');

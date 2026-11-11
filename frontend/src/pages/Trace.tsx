@@ -142,6 +142,8 @@ function SerialResult({ d }: { d: Rec }) {
     { title: '关键件', key: 'm', render: (_, r) => <MaterialCell code={r.material_code} name={r.material_name} /> },
     { title: '批号', dataIndex: 'lot_no', render: (v, r) => <LotLink code={r.material_code} lot={v} /> },
     { title: '部件序列号', dataIndex: 'part_sn', render: (v) => (v ? <span className="mono">{v}</span> : '-') },
+    // 返工换件（代理 3）：BIND 装配绑定 / REMOVE 返工拆下 / INSTALL 返工装上（关联 NCR）
+    { title: '动作', dataIndex: 'action', render: (v, r) => <span><StatusTag dict="key_part_action" value={v || 'BIND'} />{r.ncr_no ? ` ${r.ncr_no}` : ''}</span> },
     { title: '绑定时间', dataIndex: 'ts', render: (v) => fmtDateTime(v) },
   ];
 

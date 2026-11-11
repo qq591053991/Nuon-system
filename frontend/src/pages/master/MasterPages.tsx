@@ -5,7 +5,7 @@ import { useEffect, useState } from 'react';
 import { get, post, type Rec } from '../../api/http';
 import { useAuth } from '../../auth';
 import CrudPage, { type Field } from '../../components/CrudPage';
-import { fmtDate } from '../../utils/format';
+import { fmtDate, fmtQty } from '../../utils/format';
 
 const active: Field = { name: 'is_active', label: '启用', type: 'switch', default: true, width: 70 };
 
@@ -84,7 +84,12 @@ export function Materials() {
         { name: 'name', label: '物料名称', required: true, width: 180 },
         { name: 'spec', label: '规格型号', width: 200 },
         { name: 'category', label: '物料类别', type: 'select', dict: 'material_category', default: 'RAW', required: true, width: 90 },
-        { name: 'uom', label: '单位', default: 'PCS', width: 60 },
+        { name: 'uom', label: '库存单位', default: 'PCS', width: 80, help: '库存、领料、BOM 用量、收货均按此单位' },
+        {
+          name: 'purchase_uom', label: '采购单位', width: 140, help: '供应商按此单位报价/发货（如 LED 按“卷”）；为空表示按库存单位采购',
+          render: (v, r) => (v && v !== r.uom ? `1 ${v} = ${fmtQty(r.purchase_factor)} ${r.uom}` : '-'),
+        },
+        { name: 'purchase_factor', label: '换算率（1 采购单位 = ? 库存单位）', type: 'number', default: 1, min: 0, list: false, help: '如 1 卷 = 4000 PCS 填 4000；采购订单按采购单位下单时自动换算为库存单位' },
         { name: 'default_supplier_id', label: '默认供应商', type: 'remote', url: '/suppliers', displayName: 'default_supplier_name', width: 150 },
         { name: 'owner_customer_id', label: '货主客户（客供料）', type: 'remote', url: '/customers', displayName: 'owner_customer_name', width: 130, help: '设置后为客供料：只能客供料收货、只能用于该客户工单、不参与采购' },
         { name: 'customer_id', label: '所属品牌客户（成品）', type: 'remote', url: '/customers', displayName: 'customer_name', list: false },
@@ -108,6 +113,7 @@ export function Materials() {
         active,
         { name: 'remark', label: '备注', type: 'textarea', list: false },
       ]}
+      beforeSubmit={(v) => ({ ...v, purchase_uom: v.purchase_uom?.trim() || null, purchase_factor: v.purchase_factor ?? 1 })}
       filters={[
         { name: 'category', label: '物料类别', dict: 'material_category' },
         { name: 'serial_control', label: '序列号管理', options: [{ value: true, label: '是' }, { value: false, label: '否' }] },

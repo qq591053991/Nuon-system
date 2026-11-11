@@ -7,7 +7,7 @@ export type Tx = Prisma.TransactionClient;
 
 /** 审计追踪不记录的模型（自身即为记录/流水） */
 const SKIP_MODELS = new Set(['AuditLog', 'ESignature', 'Sequence', 'StockMove']);
-const SKIP_FIELDS = new Set(['password_hash', 'updated_at', 'created_at']);
+const SKIP_FIELDS = new Set(['password_hash', 'pin_hash', 'updated_at', 'created_at']);
 const WRITE_OPS = new Set(['create', 'createMany', 'update', 'upsert', 'delete', 'updateMany', 'deleteMany']);
 
 const MODELS = new Map(Prisma.dmmf.datamodel.models.map((m) => [m.name, m]));

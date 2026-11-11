@@ -216,20 +216,27 @@ function CreateModal({ open, onClose, onDone }: { open: boolean; onClose: () => 
 
 // ---------------- 关闭（按 NCR 处置执行，电子签名） ----------------
 function CloseModal({ rma, onClose, onDone }: { rma: Rec | null; onClose: () => void; onDone: (r: Rec) => void }) {
-  const [form] = Form.useForm();
+  const [locId, setLocId] = useState<number | undefined>();
+  const [remark, setRemark] = useState('');
+  const [touched, setTouched] = useState(false);
   const [sign, signHolder] = useESign();
   const [saving, setSaving] = useState(false);
   const disp = rma?.ncr_disposition as string | undefined;
   const restock = disp === 'REWORK' || disp === 'USE_AS_IS';
+  useEffect(() => {
+    setLocId(undefined);
+    setRemark('');
+    setTouched(false);
+  }, [rma]);
   return (
     <Modal open={!!rma} title={`关闭客户退货 ${rma?.no ?? ''}`} width={620} okText="签名并关闭" confirmLoading={saving} onCancel={onClose} destroyOnHidden maskClosable={false}
-      afterOpenChange={(o) => o && form.resetFields()}
       onOk={async () => {
-        const v = await form.validateFields();
+        setTouched(true);
+        if (restock && !locId) return;
         try {
           const signature = await sign({ meaning: '客户退货关闭', description: `${rma!.no}：按 ${rma!.ncr_no} 处置【${dictLabel('disposition', disp)}】执行。${CLOSE_EFFECT[disp ?? ''] ?? ''}` });
           setSaving(true);
-          const r = await post(`/customer-returns/${rma!.id}/close`, { location_id: v.location_id ?? null, remark: v.remark || null, signature });
+          const r = await post(`/customer-returns/${rma!.id}/close`, { location_id: locId ?? null, remark: remark.trim() || null, signature });
           message.success(`${rma!.no} 已关闭`);
           onDone(r);
           onClose();
@@ -243,14 +250,14 @@ function CloseModal({ rma, onClose, onDone }: { rma: Rec | null; onClose: () => 
       <Alert type="warning" showIcon style={{ marginBottom: 16 }}
         message={<span>NCR 处置：<StatusTag dict="disposition" value={disp} /></span>}
         description={CLOSE_EFFECT[disp ?? ''] ?? ''} />
-      <Form form={form} layout="vertical">
+      <Form layout="vertical">
         {restock && (
-          <Form.Item name="location_id" label="合格品上架库位" rules={[{ required: true, message: '请选择上架库位（不能是不合格品区）' }]}>
-            <LocationSelect params={{ is_active: true }} />
+          <Form.Item label="合格品上架库位" required validateStatus={touched && !locId ? 'error' : undefined} help={touched && !locId ? '请选择上架库位（不能是不合格品区）' : undefined}>
+            <LocationSelect params={{ is_active: true }} value={locId} onChange={(v) => setLocId(v as number | undefined)} />
           </Form.Item>
         )}
-        <Form.Item name="remark" label="关闭说明">
-          <Input.TextArea rows={2} placeholder="如：返修更换电源板，复测合格" />
+        <Form.Item label="关闭说明">
+          <Input.TextArea rows={2} value={remark} onChange={(e) => setRemark(e.target.value)} placeholder="如：返修更换电源板，复测合格" />
         </Form.Item>
       </Form>
     </Modal>

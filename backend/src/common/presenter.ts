@@ -10,7 +10,7 @@ type Props = Record<string, (o: any) => unknown>;
 interface View { include?: Record<string, any>; props?: Props; order?: Record<string, any> }
 
 const MODELS = new Map(Prisma.dmmf.datamodel.models.map((m) => [m.name, m]));
-const HIDDEN = new Set(['password_hash', 'params_json', 'serials']);
+const HIDDEN = new Set(['password_hash', 'pin_hash', 'params_json', 'serials']);
 
 const nm = (o: any) => (o ? o.name ?? null : null);
 const matInclude = { material: true };

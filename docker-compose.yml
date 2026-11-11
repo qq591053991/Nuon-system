@@ -1,4 +1,13 @@
 # 一键部署：docker compose up -d   →  浏览器打开 http://<服务器IP>:8080
+# 上线前请阅读 docs/operations.md（HTTPS、备份与恢复演练、数据库账号加固、时间同步、升级流程）
+
+# 容器日志轮转：单文件 20MB，保留 10 个（防止日志写满磁盘）
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "10"
+
 services:
   db:
     image: postgres:16-alpine
@@ -15,6 +24,7 @@ services:
       test: ["CMD-SHELL", "pg_isready -U nuon -d nuon"]
       interval: 5s
       retries: 20
+    logging: *logging
 
   backend:
     build: ./backend
@@ -29,12 +39,17 @@ services:
       SEED_ON_START: "1"
       SEED_DEMO: ${SEED_DEMO:-1}
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      # 附件（检验照片、COA、校准证书…）存储目录：持久卷，纳入备份
+      ATTACHMENT_DIR: /app/data/attachments
       # 金蝶云星空账号登录（见 docs/kingdee-sso.md）
       KINGDEE_ENABLED: ${KINGDEE_ENABLED:-0}
       KINGDEE_URL: ${KINGDEE_URL:-}
       KINGDEE_ACCT_ID: ${KINGDEE_ACCT_ID:-}
       KINGDEE_AUTO_CREATE: ${KINGDEE_AUTO_CREATE:-1}
       KINGDEE_DEFAULT_ROLES: ${KINGDEE_DEFAULT_ROLES:-}
+    volumes:
+      - attachments:/app/data/attachments
+    logging: *logging
 
   frontend:
     build: ./frontend
@@ -42,6 +57,37 @@ services:
     depends_on: [backend]
     ports:
       - "${HTTP_PORT:-8080}:80"
+    logging: *logging
+
+  # 自动备份：每天 BACKUP_AT（默认 02:30）pg_dump -Fc 全量备份数据库 + 增量复制附件到 ./backups，
+  # 保留 BACKUP_KEEP_DAYS 天。./backups 须再同步到异地/离线介质（见 docs/operations.md）。
+  # 立即备份：docker compose exec backup sh /usr/local/bin/nuon-backup.sh
+  # 恢复演练：docker compose exec backup sh /usr/local/bin/nuon-restore.sh /backups/db/<文件>.dump nuon_restore_test
+  backup:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGUSER: nuon
+      PGPASSWORD: ${DB_PASSWORD:-nuon_change_me}
+      PGDATABASE: nuon
+      BACKUP_DIR: /backups
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-30}
+      BACKUP_AT: ${BACKUP_AT:-02:30}
+      ATTACHMENT_DIR: /attachments
+      TZ: Asia/Shanghai
+    volumes:
+      - ${BACKUP_HOST_DIR:-./backups}:/backups
+      - attachments:/attachments:ro
+      - ./scripts/backup.sh:/usr/local/bin/nuon-backup.sh:ro
+      - ./scripts/restore.sh:/usr/local/bin/nuon-restore.sh:ro
+    entrypoint: ["/bin/sh", "/usr/local/bin/nuon-backup.sh", "--loop"]
+    logging: *logging
 
 volumes:
   pgdata:
+  attachments:

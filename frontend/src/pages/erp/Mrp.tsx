@@ -1,5 +1,5 @@
 import {
-  Alert, Button, Card, Col, Descriptions, Empty, Modal, Popconfirm, Row, Segmented, Select, Space, Spin, Statistic, Table, Tooltip, Typography, message,
+  Alert, Button, Card, Col, Descriptions, Empty, Modal, Popconfirm, Row, Segmented, Select, Space, Spin, Statistic, Table, Tag, Tooltip, Typography, message,
   type TableColumnsType,
 } from 'antd';
 import { SwapOutlined, ThunderboltOutlined } from '@ant-design/icons';
@@ -92,18 +92,44 @@ export default function Mrp() {
 
   const sugs: Rec[] = run?.suggestions || [];
   const count = (a: string) => (a === 'ALL' ? sugs.length : sugs.filter((s) => s.action === a).length);
-  const data = useMemo(() => (action === 'ALL' ? sugs : sugs.filter((s) => s.action === action)), [sugs, action]);
+  // 按物料分组（层级 → 物料编码 → 需求日期），同一物料的各周建议合并显示物料信息
+  const data = useMemo(() => {
+    const rows = action === 'ALL' ? sugs : sugs.filter((s) => s.action === action);
+    const dateOf = (r: Rec) => String(r.required_date ?? r.due_date ?? '');
+    return [...rows].sort(
+      (a, b) => a.level - b.level || String(a.material_code).localeCompare(String(b.material_code)) || dateOf(a).localeCompare(dateOf(b)) || a.id - b.id,
+    );
+  }, [sugs, action]);
+  const spans = useMemo(
+    () =>
+      data.map((r, i) => {
+        if (i > 0 && data[i - 1].material_id === r.material_id) return 0;
+        let n = 1;
+        while (i + n < data.length && data[i + n].material_id === r.material_id) n++;
+        return n;
+      }),
+    [data],
+  );
+  const merge = (_: Rec, i?: number) => ({ rowSpan: spans[i ?? 0] ?? 1 });
   const stat = (st: string) => sugs.filter((s) => s.status === st).length;
   const isLatest = !!runs.length && runs[0].id === runId;
 
   const columns: TableColumnsType<Rec> = [
     {
       title: <Tooltip title="0 = 成品（独立需求），数字越大越接近原材料">层级</Tooltip>,
-      dataIndex: 'level', width: 60, align: 'center', render: (v) => `L${v}`,
+      dataIndex: 'level', width: 60, align: 'center', render: (v) => `L${v}`, onCell: merge,
     },
-    { title: '物料编码', dataIndex: 'material_code', fixed: 'left', render: (v) => <span className="mono">{v}</span> },
     {
-      title: '物料名称 / 规格', key: 'name', width: 220,
+      title: '物料编码', dataIndex: 'material_code', fixed: 'left', onCell: merge,
+      render: (v, _, i) => (
+        <div>
+          <span className="mono">{v}</span>
+          {spans[i] > 1 && <Typography.Text type="secondary" style={{ display: 'block', fontSize: 12 }}>{spans[i]} 周有缺口</Typography.Text>}
+        </div>
+      ),
+    },
+    {
+      title: '物料名称 / 规格', key: 'name', width: 220, onCell: merge,
       render: (_, r) => (
         <div>
           <div>{r.material_name}</div>
@@ -111,14 +137,22 @@ export default function Mrp() {
         </div>
       ),
     },
-    { title: '建议', dataIndex: 'action', render: (v) => <StatusTag dict="mrp_action" value={v} /> },
+    { title: '建议', dataIndex: 'action', onCell: merge, render: (v) => <StatusTag dict="mrp_action" value={v} /> },
+    {
+      title: <Tooltip title="ISO 周（周一开始）；早于本周的逾期需求计入本周">周次</Tooltip>, dataIndex: 'week',
+      render: (v) => (v ? <Tag>{v.replace('-W', ' 第')}周</Tag> : '-'),
+    },
+    {
+      title: <Tooltip title="该周最早的需求日（订单交期 / 上层物料开工日）">需求日期</Tooltip>, dataIndex: 'required_date',
+      render: (v, r) => <DueDate value={v} overdue={r.status === 'OPEN' && isPast(v)} hint="需求日期已过（逾期需求）" />,
+    },
+    {
+      title: <Tooltip title="需求日期 − 提前期（生产周期 / 采购提前期），不早于今天">建议开工/下单日</Tooltip>, dataIndex: 'due_date',
+      render: (v, r) => <DueDate value={v} overdue={r.status === 'OPEN' && isPast(v)} hint="建议日期已过，请尽快处理" />,
+    },
     {
       title: '建议数量', dataIndex: 'suggested_qty', align: 'right',
       render: (v, r) => <b>{fmtQty(v)} <Typography.Text type="secondary" style={{ fontWeight: 400, fontSize: 12 }}>{r.uom}</Typography.Text></b>,
-    },
-    {
-      title: '需求日期', dataIndex: 'due_date',
-      render: (v, r) => <DueDate value={v} overdue={r.status === 'OPEN' && isPast(v)} hint="需求日期已过，请尽快处理" />,
     },
     {
       title: '供应商 / 客户', key: 'partner', width: 200, ellipsis: true,
@@ -136,12 +170,15 @@ export default function Mrp() {
         </Space>
       ),
     },
-    { title: '毛需求', dataIndex: 'gross_qty', align: 'right', render: num },
-    { title: '库存', dataIndex: 'on_hand_qty', align: 'right', render: num },
-    { title: <Tooltip title="采购在途 + 在制工单未完工">在途+在制</Tooltip>, dataIndex: 'on_order_qty', align: 'right', render: num },
+    { title: <Tooltip title="本周毛需求">毛需求</Tooltip>, dataIndex: 'gross_qty', align: 'right', render: num },
+    { title: <Tooltip title="本周开始时的预计库存（现有库存 + 之前各周计划入库与建议 − 之前各周需求）">期初预计库存</Tooltip>, dataIndex: 'on_hand_qty', align: 'right', render: num },
+    { title: <Tooltip title="本周到货的采购在途 + 本周完工的在制工单">本周在途/在制</Tooltip>, dataIndex: 'on_order_qty', align: 'right', render: num },
     { title: '安全库存', dataIndex: 'safety_stock', align: 'right', render: num },
-    { title: '净需求', dataIndex: 'net_qty', align: 'right', render: num },
-    { title: '备注', dataIndex: 'remark', ellipsis: true, width: 160, render: (v) => v || '-' },
+    { title: <Tooltip title="毛需求 + 安全库存 − 期初预计库存 − 本周在途/在制">净需求</Tooltip>, dataIndex: 'net_qty', align: 'right', render: num },
+    {
+      title: '备注', dataIndex: 'note', width: 220,
+      render: (v) => (v ? <Typography.Text type={String(v).includes('交期紧张') ? 'danger' : 'secondary'} style={{ fontSize: 12 }}>{v}</Typography.Text> : '-'),
+    },
   ];
   if (canConvert) {
     columns.push({
@@ -177,7 +214,7 @@ export default function Mrp() {
           type="info"
           showIcon
           message="MRP 运算逻辑"
-          description="独立需求 = 已确认销售订单的未发货数量；按已发布 BOM 逐层展开得到各级物料毛需求；净需求 = 毛需求 + 安全库存 − 库存 − 采购在途 − 在制工单。自制件建议“生产”，外购件建议“采购”（按默认供应商合并成采购订单），客供料提示“通知客户供料”。"
+          description="按周（ISO 周）分时段逐周净算：独立需求 = 已确认销售订单的未发货数量（按交期）；采购在途按预计到货日、在制工单按计划完工日计入当周；每周 净需求 = 毛需求 + 安全库存 − 期初预计库存 − 本周在途/在制，建议多出的部分结转到后续各周。自制件的下层组件需求日期 = 父项需求日期 − 生产周期，外购件建议下单日 = 需求日期 − 采购提前期。自制件建议“生产”，外购件建议“采购”（按默认供应商合并成采购订单，设置了采购单位的按整数采购单位下单），客供料提示“通知客户供料”。"
         />
         {!runs.length ? (
           <Card>

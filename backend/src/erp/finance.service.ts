@@ -28,6 +28,8 @@ export class FinanceService {
 
   addPayment(id: number, b: PaymentDto, user: CurrentUser) {
     return this.db.tx(async (tx) => {
+      // 先锁定单据行：并发登记收付款时串行累加已收/付金额，避免超额核销
+      await tx.$queryRaw`SELECT id FROM fin_doc WHERE id = ${id} FOR UPDATE`;
       const d = await tx.financeDoc.findUnique({ where: { id } });
       if (!d) throw new NotFound('单据');
       const amount = money(b.amount);

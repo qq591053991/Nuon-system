@@ -1,7 +1,7 @@
-import { Alert, Button, Card, Col, Empty, List, Result, Row, Space, Statistic, Tag, Typography } from 'antd';
+import { Alert, Button, Card, Col, Empty, List, Result, Row, Space, Statistic, Tag, Tooltip, Typography } from 'antd';
 import { ArrowRightOutlined, NodeIndexOutlined, PlusOutlined, ScanOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { get, type Rec } from '../api/http';
 import { useAuth } from '../auth';
@@ -14,12 +14,34 @@ const SERIES = '#2a78d6';
 const AXIS = { axisLine: { lineStyle: { color: '#d9d9d9' } }, axisLabel: { color: '#595959' }, axisTick: { show: false } };
 const SPLIT = { splitLine: { lineStyle: { color: '#f0f0f0' } } };
 
-function Kpi({ title, value, suffix, hint, onClick, warn }: { title: string; value: any; suffix?: string; hint?: string; onClick?: () => void; warn?: boolean }) {
+function Kpi({ title, value, suffix, hint, onClick, warn }: { title: string; value: any; suffix?: string; hint?: ReactNode; onClick?: () => void; warn?: boolean }) {
   return (
     <Card size="small" hoverable={!!onClick} onClick={onClick} className="kpi-card" style={{ height: '100%' }}>
       <Statistic title={title} value={value ?? '-'} suffix={suffix} valueStyle={{ fontSize: 24, color: warn ? '#cf1322' : undefined }} />
-      {hint && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{hint}</Typography.Text>}
+      {hint && <Typography.Paragraph type="secondary" style={{ fontSize: 12, margin: 0 }}>{hint}</Typography.Paragraph>}
     </Card>
+  );
+}
+
+/** 金额 + 币别（常用币别带符号，其余显示代码） */
+const money = (v: number | null | undefined, c: string) =>
+  ['CNY', 'USD', 'EUR'].includes(c) ? fmtMoney(v, c) : `${c} ${Number(v ?? 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+/** 在手订单金额：本位币合计 + 按币别明细（缺汇率的币别未计入合计） */
+function OpenSoHint({ k }: { k: Rec }) {
+  const base: string = k.base_currency || 'CNY';
+  const rows: Rec[] = k.open_so_by_currency || [];
+  const missing: string[] = k.missing_rates || [];
+  const detail = rows.map((r) => money(r.amount, r.currency)).join(' + ');
+  const foreign = rows.some((r) => r.currency !== base);
+  return (
+    <Tooltip title={foreign ? `按币别：${detail}；外币按今日汇率折算为 ${base}` : undefined}>
+      <div>
+        <div>金额 {money(k.open_so_amount, base)}{foreign ? `（折合${base}）` : ''}</div>
+        {foreign && <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{detail}</div>}
+        {missing.length > 0 && <div style={{ color: '#d48806' }}>缺 {missing.join('、')} 汇率，未计入合计</div>}
+      </div>
+    </Tooltip>
   );
 }
 
@@ -114,7 +136,7 @@ function DashboardMain() {
       </Card>
 
       <Row gutter={[12, 12]}>
-        <Col xs={12} md={8} xl={4}><Kpi title="在手销售订单" value={k.open_so} hint={`金额 ${fmtMoney(k.open_so_amount)}`} onClick={() => nav('/sales/orders')} /></Col>
+        <Col xs={12} md={8} xl={4}><Kpi title="在手销售订单" value={k.open_so} hint={d ? <OpenSoHint k={k} /> : undefined} onClick={() => nav('/sales/orders')} /></Col>
         <Col xs={12} md={8} xl={4}><Kpi title="逾期订单" value={k.overdue_so} warn={k.overdue_so > 0} hint="交期已过未发完" onClick={() => nav('/sales/orders')} /></Col>
         <Col xs={12} md={8} xl={4}><Kpi title="在制工单" value={k.wip_wo} hint={`在制数量 ${k.wip_qty ?? '-'}`} onClick={() => nav('/mes/work-orders')} /></Col>
         <Col xs={12} md={8} xl={4}><Kpi title="今日产出（台）" value={k.today_output} hint="完成全部工序" /></Col>

@@ -117,18 +117,24 @@ function ComplaintModal({ open, record, onClose, onDone }: { open: boolean; reco
 
 // ---------------- 关闭（调查结论 + 电子签名） ----------------
 function CloseModal({ c, onClose, onDone }: { c: Rec | null; onClose: () => void; onDone: (r: Rec) => void }) {
-  const [form] = Form.useForm();
+  const [inv, setInv] = useState('');
+  const [touched, setTouched] = useState(false);
   const [sign, signHolder] = useESign();
   const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    setInv(c?.investigation ?? '');
+    setTouched(false);
+  }, [c]);
+  const missing = !inv.trim();
   return (
     <Modal open={!!c} title={`关闭客户投诉 ${c?.no ?? ''}`} width={640} okText="签名并关闭" confirmLoading={saving} onCancel={onClose} destroyOnHidden maskClosable={false}
-      afterOpenChange={(o) => o && form.setFieldsValue({ investigation: c?.investigation ?? '' })}
       onOk={async () => {
-        const v = await form.validateFields();
+        setTouched(true);
+        if (missing) return;
         try {
           const signature = await sign({ meaning: '客诉关闭', description: `${c!.no}：确认调查已完成、处理措施已落实${c!.is_adverse_event ? '，不良事件上报评估已完成' : ''}。` });
           setSaving(true);
-          const r = await post(`/complaints/${c!.id}/close`, { investigation: v.investigation, signature });
+          const r = await post(`/complaints/${c!.id}/close`, { investigation: inv.trim(), signature });
           message.success(`${c!.no} 已关闭`);
           onDone(r);
           onClose();
@@ -141,9 +147,10 @@ function CloseModal({ c, onClose, onDone }: { c: Rec | null; onClose: () => void
       {signHolder}
       {c?.is_adverse_event && <Alert type="error" showIcon style={{ marginBottom: 12 }} message="不良事件：请在调查结论中写明是否已协助注册人上报（上报编号/日期）或不需上报的理由。" />}
       {c && !c.ncr_id && !c.capa_id && <Alert type="warning" showIcon style={{ marginBottom: 12 }} message="该投诉未关联 NCR 或 CAPA，请确认无需纠正措施。" />}
-      <Form form={form} layout="vertical">
-        <Form.Item name="investigation" label="调查结论" rules={[{ required: true, whitespace: true, message: '关闭前必须填写调查结论' }]}>
-          <Input.TextArea rows={6} placeholder="原因分析（追溯结果、复现/检测情况）、处理措施（返修/更换/退货/CAPA）、是否需上报及依据、对其他批次的影响评估" />
+      <Form layout="vertical">
+        <Form.Item label="调查结论" required validateStatus={touched && missing ? 'error' : undefined} help={touched && missing ? '关闭前必须填写调查结论' : undefined}>
+          <Input.TextArea rows={6} value={inv} onChange={(e) => setInv(e.target.value)}
+            placeholder="原因分析（追溯结果、复现/检测情况）、处理措施（返修/更换/退货/CAPA）、是否需上报及依据、对其他批次的影响评估" />
         </Form.Item>
       </Form>
     </Modal>

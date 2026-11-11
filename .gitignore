@@ -9,3 +9,6 @@ backend/.env
 .DS_Store
 .idea/
 .vscode/
+# 运行数据（备份含生产数据，严禁提交）
+/backups/
+backend/data/

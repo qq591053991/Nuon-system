@@ -56,11 +56,13 @@ export const routes: RouteDef[] = [
   { path: '/master/equipment', element: named(M, 'EquipmentPage') },
   { path: '/master/warehouses', element: named(M, 'Warehouses') },
   { path: '/master/locations', element: named(M, 'Locations') },
+  { path: '/master/exchange-rates', element: lazy(() => import('./pages/master/ExchangeRates')) },
   // 系统
   { path: '/system/users', element: lazy(() => import('./pages/system/Users')) },
   { path: '/system/audit', element: lazy(() => import('./pages/system/AuditLogs')) },
   { path: '/system/esign', element: lazy(() => import('./pages/system/ESignatures')) },
   { path: '/system/import', element: lazy(() => import('./pages/system/DataImport')) },
+  { path: '/system/qualifications', element: lazy(() => import('./pages/system/Qualifications')) },
 ];
 
 export const menu: MenuDef[] = [
@@ -116,6 +118,7 @@ export const menu: MenuDef[] = [
       { key: '/master/work-centers', label: '工作中心' },
       { key: '/master/warehouses', label: '仓库' },
       { key: '/master/locations', label: '库位' },
+      { key: '/master/exchange-rates', label: '汇率' },
     ],
   },
   {
@@ -124,6 +127,7 @@ export const menu: MenuDef[] = [
       { key: '/system/audit', label: '审计追踪' },
       { key: '/system/esign', label: '电子签名记录' },
       { key: '/system/import', label: '数据导入（金蝶迁移）' },
+      { key: '/system/qualifications', label: '人员上岗资质' },
     ],
   },
 ];

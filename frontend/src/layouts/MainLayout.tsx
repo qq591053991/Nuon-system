@@ -146,7 +146,8 @@ function ChangePassword({ open, forced, policy, onClose, onDone, onLogout }: {
       onCancel={forced ? onLogout : onClose}
       destroyOnHidden
       onOk={async () => {
-        const v = await form.validateFields();
+        const v = await form.validateFields().catch(() => null);
+        if (!v) return;
         setSaving(true);
         try {
           await post('/auth/change-password', { old_password: v.old_password, new_password: v.new_password });

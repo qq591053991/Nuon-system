@@ -1,6 +1,6 @@
 import { Alert, Button, Card, Descriptions, Empty, Result, Space, Spin, Table, Tag, Tooltip, Typography, message } from 'antd';
 import {
-  ArrowLeftOutlined, CheckCircleFilled, CloseCircleFilled, PrinterOutlined, SafetyCertificateOutlined, StopOutlined,
+  ArrowLeftOutlined, CheckCircleFilled, CloseCircleFilled, PrinterOutlined, SafetyCertificateOutlined, SplitCellsOutlined, StopOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
@@ -11,6 +11,7 @@ import { isCancel, useESign } from '../../components/ESign';
 import StatusTag from '../../components/StatusTag';
 import { dictLabel } from '../../utils/dict';
 import { fmtDate, fmtDateTime, fmtQty } from '../../utils/format';
+import { ReleaseBatchModal, ReleaseTable } from '../mes/ReleaseBatch';
 import { ParamsText, ValuesText } from '../mes/spec';
 
 const CN = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十', '十一', '十二'];
@@ -56,6 +57,7 @@ export default function DhrView() {
   const [d, setD] = useState<Rec | null>(null);
   const [failed, setFailed] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [batchOpen, setBatchOpen] = useState(false);
 
   const load = useCallback(() => {
     get(`/work-orders/${id}/dhr`).then(setD).catch(() => setFailed(true));
@@ -72,18 +74,23 @@ export default function DhrView() {
   const checks: Rec[] = d.checks || [];
   const bad = checks.filter((c) => !c.ok);
   const canDecide = can('qa') && wo.dhr_status === 'OPEN' && wo.status === 'COMPLETED';
+  const rs: Rec = d.release_summary || {};
+  const unit = wo.serial_control ? ' 台' : ` ${wo.uom ?? ''}`;
+  /** 可分批放行：已入库、尚未放行（也未拒绝）的产品 */
+  const canBatch = can('qa') && wo.dhr_status === 'OPEN' && ['IN_PROGRESS', 'COMPLETED'].includes(wo.status) && (rs.releasable_qty || 0) > 0;
+  const remaining = Math.max(0, (wo.received_qty || 0) - (wo.released_qty || 0) - (rs.rejected_qty || 0));
   let sec = 0;
 
   const approve = async () => {
     try {
       const signature = await sign({
         meaning: '产品放行（DHR审核批准）',
-        description: `批准工单 ${wo.no}（批号 ${wo.lot_no}）放行：该批成品库存由“待放行”转为“合格”，可以发货。`,
+        description: `批准工单 ${wo.no}（批号 ${wo.lot_no}）整单放行：剩余未放行的 ${remaining}${unit} 成品由“待放行”转为“合格”，可以发货；工单关闭。`,
         defaultReason: '记录完整，批准放行',
       });
       setBusy(true);
       await post(`/work-orders/${id}/dhr/release`, { approve: true, reason: signature.reason, signature });
-      message.success('已放行：该批成品已转为合格库存，可以发货');
+      message.success('已放行全部剩余：该批成品已转为合格库存，可以发货');
       load();
     } catch (e) {
       if (!isCancel(e)) throw e;
@@ -96,7 +103,7 @@ export default function DhrView() {
     try {
       const signature = await sign({
         meaning: '产品放行（DHR审核拒绝）',
-        description: '拒绝放行后，该批成品库存将被冻结（HOLD），不能发货。请填写拒绝原因。',
+        description: '拒绝放行后，该批剩余未放行的成品库存将被冻结（HOLD），不能发货（已放行的批次不受影响）。请填写拒绝原因。',
         reasonRequired: true,
       });
       setBusy(true);
@@ -114,28 +121,39 @@ export default function DhrView() {
     <div className="dhr-doc">
       <style>{DHR_CSS}</style>
       {signHolder}
+      <ReleaseBatchModal wo={wo} open={batchOpen} onClose={() => setBatchOpen(false)} onDone={load} />
       <div className="no-print" style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, marginBottom: 16 }}>
         <Space wrap>
           <Button icon={<ArrowLeftOutlined />} onClick={() => nav(-1)}>返回</Button>
           <Button onClick={() => nav(`/mes/work-orders/${wo.id}`)}>打开工单</Button>
           <Button icon={<PrinterOutlined />} onClick={() => window.print()}>打印 / 导出 PDF</Button>
         </Space>
-        {canDecide && (
+        {(canDecide || canBatch) && (
           <Space wrap>
-            <Button danger icon={<StopOutlined />} loading={busy} onClick={reject}>拒绝放行</Button>
-            <Tooltip title={bad.length ? `以下检查未通过，不能放行：${bad.map((c) => c.item).join('；')}` : ''}>
-              <Button type="primary" icon={<SafetyCertificateOutlined />} loading={busy} disabled={bad.length > 0} onClick={approve}>批准放行（电子签名）</Button>
-            </Tooltip>
+            {canBatch && (
+              <Button icon={<SplitCellsOutlined />} type={canDecide ? 'default' : 'primary'} onClick={() => setBatchOpen(true)}>
+                分批放行（可放行 {rs.releasable_qty}{unit}）
+              </Button>
+            )}
+            {canDecide && <Button danger icon={<StopOutlined />} loading={busy} onClick={reject}>拒绝放行</Button>}
+            {canDecide && (
+              <Tooltip title={bad.length ? `以下检查未通过，不能放行：${bad.map((c) => c.item).join('；')}` : ''}>
+                <Button type="primary" icon={<SafetyCertificateOutlined />} loading={busy} disabled={bad.length > 0} onClick={approve}>放行全部剩余（电子签名）</Button>
+              </Tooltip>
+            )}
           </Space>
         )}
       </div>
 
       {can('qa') && wo.dhr_status === 'OPEN' && wo.status !== 'COMPLETED' && (
-        <Alert className="no-print" style={{ marginBottom: 16 }} type="info" showIcon message="该批尚未完工（完工 + 报废 = 计划数），完工并全部入库后方可审核放行。" />
+        <Alert className="no-print" style={{ marginBottom: 16 }} type="info" showIcon
+          message={`该批尚未完工（完工 + 报废 = 计划数），完工并全部入库后方可整单审核放行；${canBatch ? `已入库的 ${rs.releasable_qty}${unit} 可先【分批放行】。` : '已完工入库的部分可分批放行。'}`} />
       )}
       {canDecide && (
         <Alert className="no-print" style={{ marginBottom: 16 }} type={bad.length ? 'warning' : 'info'} showIcon
-          message={bad.length ? `放行检查有 ${bad.length} 项未通过，处理完成后才能批准放行。` : '放行检查全部通过。请逐项审核记录后电子签名放行；放行后成品转为合格库存，可以发货。'} />
+          message={bad.length
+            ? `整单放行检查有 ${bad.length} 项未通过，处理完成后才能放行全部剩余${canBatch ? '（满足条件的产品可先分批放行）' : ''}。`
+            : `放行检查全部通过。请逐项审核记录后电子签名放行；【放行全部剩余】将放行剩余 ${remaining}${unit} 并关闭工单，也可【分批放行】。`} />
       )}
 
       <Card>
@@ -173,7 +191,7 @@ export default function DhrView() {
             { key: 'st', label: '工单状态', children: <StatusTag dict="wo_status" value={wo.status} /> },
             { key: 'pq', label: '计划数量', children: fmtQty(wo.planned_qty) },
             { key: 'cq', label: '完工 / 报废', children: <span><b>{fmtQty(wo.completed_qty)}</b> / <span style={{ color: wo.scrap_qty > 0 ? '#cf1322' : undefined }}>{fmtQty(wo.scrap_qty)}</span></span> },
-            { key: 'rq', label: '已入库', children: fmtQty(wo.received_qty) },
+            { key: 'rq', label: '已入库 / 已放行', children: <span>{fmtQty(wo.received_qty)} / <b style={{ color: '#389e0d' }}>{fmtQty(wo.released_qty)}</b>{rs.rejected_qty > 0 && <span style={{ color: '#cf1322' }}>（拒绝 {fmtQty(rs.rejected_qty)}）</span>}</span> },
             { key: 'as', label: '实际开工', children: fmtDateTime(wo.actual_start) },
             { key: 'ae', label: '实际完工', children: fmtDateTime(wo.actual_end) },
             { key: 'ver', label: 'BOM / 工艺版本', children: `${wo.bom_version || '-'} / ${wo.routing_version || '-'}` },
@@ -210,6 +228,7 @@ export default function DhrView() {
                 render: (v, r) => (v ? <Space size={4}><Link to={`/quality/inspections?q=${encodeURIComponent(v)}`}>{v}</Link><StatusTag dict="insp_status" value={r.iqc_status} /></Space> : <Typography.Text type="secondary">无检验记录</Typography.Text>),
               },
               { title: '客供料', dataIndex: 'customer_supplied', render: (v) => (v ? <Tag color="purple">客供料</Tag> : '-') },
+              { title: '来源', dataIndex: 'source', render: (v) => (v === 'REWORK' ? <Tag color="orange">返工补料</Tag> : '领料') },
             ]} />
         </Section>
 
@@ -236,6 +255,10 @@ export default function DhrView() {
               { title: '序列号', dataIndex: 'sn', render: (v) => <Link className="mono" to={`/trace?sn=${encodeURIComponent(v)}`}>{v}</Link> },
               { title: 'UDI（GS1）', dataIndex: 'udi', render: (v) => <span className="mono">{v || '-'}</span> },
               { title: '状态', dataIndex: 'status', render: (v) => <StatusTag dict="sn_status" value={v} /> },
+              {
+                title: '放行批', dataIndex: 'release_no',
+                render: (v, r) => (v ? <Space size={4}><span className="mono">{v}</span><StatusTag dict="release_status" value={r.release_status} /></Space> : <Typography.Text type="secondary">未放行</Typography.Text>),
+              },
             ]} />
           </Section>
         )}
@@ -251,6 +274,25 @@ export default function DhrView() {
               { title: '操作员', dataIndex: 'operator_name' },
               { title: '设备', dataIndex: 'equipment_code', render: (v) => v || '-' },
             ]} />
+        </Section>
+
+        <Section index={sec++} title={`关键件与返工换件（${d.key_parts?.length || 0}）`}>
+          <Table<Rec> rowKey="id" size="small" pagination={false} dataSource={d.key_parts} scroll={{ x: 'max-content' }}
+            locale={{ emptyText: '无关键件绑定或返工换件记录' }} columns={[
+              { title: '时间', dataIndex: 'ts', render: (v) => dayjs(v).format('MM-DD HH:mm:ss') },
+              { title: '序列号', dataIndex: 'sn', render: (v) => (v ? <Link className="mono" to={`/trace?sn=${encodeURIComponent(v)}`}>{v}</Link> : '-') },
+              { title: '动作', dataIndex: 'action', render: (v) => <StatusTag dict="key_part_action" value={v} /> },
+              { title: '零件', dataIndex: 'material_code', render: (v, r) => `${v} ${r.material_name}` },
+              {
+                title: '批号', dataIndex: 'lot_no',
+                render: (v, r) => (v ? <Link className="mono" to={`/trace?material_code=${encodeURIComponent(r.material_code)}&lot_no=${encodeURIComponent(v)}`}>{v}</Link> : '-'),
+              },
+              { title: '部件序列号', dataIndex: 'part_sn', render: (v) => v || '-' },
+              { title: 'NCR', dataIndex: 'ncr_no', render: (v) => (v ? <Link to={`/quality/ncrs?q=${encodeURIComponent(v)}`}>{v}</Link> : '-') },
+              { title: '操作员', dataIndex: 'operator_name', render: (v) => v || '-' },
+              { title: '说明', dataIndex: 'remark', render: (v) => v || '-' },
+            ]} />
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>返工换件：拆下的零件与装上的新零件批次均记录在单台追溯中，装上的零件从合格库存补领（返工补料）。</Typography.Text>
         </Section>
 
         <Section index={sec++} title="设备与计量器具">
@@ -278,12 +320,18 @@ export default function DhrView() {
           ) : <Typography.Text type="secondary">本批无不合格品记录。</Typography.Text>}
         </Section>
 
+        <Section index={sec++} title={`产品放行记录（${d.releases?.length || 0}）`}
+          extra={<Typography.Text type="secondary">已入库 {fmtQty(wo.received_qty)} / 已放行 {fmtQty(wo.released_qty)}{rs.rejected_qty > 0 ? ` / 拒绝 ${fmtQty(rs.rejected_qty)}` : ''}</Typography.Text>}>
+          {d.releases?.length ? <ReleaseTable rows={d.releases} /> : <Typography.Text type="secondary">尚未放行。</Typography.Text>}
+        </Section>
+
         <Section index={sec++} title="电子签名">
           {d.signatures?.length ? (
             <Table<Rec> rowKey="_k" size="small" pagination={false} dataSource={d.signatures.map((r: Rec, i: number) => ({ ...r, _k: i }))} columns={[
               { title: '签名时间', dataIndex: 'ts', render: (v) => fmtDateTime(v) },
               { title: '签名人', dataIndex: 'full_name' },
               { title: '签名含义', dataIndex: 'meaning', render: (v) => <b>{v}</b> },
+              { title: '单据', dataIndex: 'doc_no', render: (v) => (v ? <span className="mono">{v}</span> : '-') },
               { title: '意见/理由', dataIndex: 'reason', render: (v) => v || '-' },
             ]} />
           ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未审核放行" />}

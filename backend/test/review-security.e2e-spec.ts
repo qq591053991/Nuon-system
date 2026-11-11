@@ -155,7 +155,7 @@ describe('评审改进：安全与合规', () => {
       t.db.base.$executeRawUnsafe('ALTER TABLE "sys_audit_log" ENABLE TRIGGER trg_audit_log_guard'),
     ]);
     v = await t.app.get(AuditSealService).verify();
-    expect(v.problems.map((p) => p.seal_no)).toEqual([4, row.seal_no]);
+    expect(v.problems.map((p: any) => p.seal_no)).toEqual([4, row.seal_no]);
     expect(v.problems[0].problem).toContain('不连续');
   });
 

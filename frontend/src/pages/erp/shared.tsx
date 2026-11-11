@@ -1,5 +1,5 @@
 /** ERP 页面内部共用的小组件与工具（仅 pages/erp 使用） */
-import { Button, DatePicker, Form, Input, InputNumber, Modal, Progress, Table, Tooltip, Typography, message, type TableColumnsType } from 'antd';
+import { Button, DatePicker, Form, Input, InputNumber, Modal, Progress, Select, Table, Tooltip, Typography, message, type TableColumnsType } from 'antd';
 import { DeleteOutlined, PlusOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { useState } from 'react';
@@ -143,14 +143,67 @@ interface LinesEditorProps {
   materialLabel?: string;
   /** 新增行默认日期（表头日期） */
   defaultDate?: string | null;
-  /** 选中物料时带出默认单价 */
+  /** 选中物料时带出默认单价（库存单位单价） */
   defaultPrice?: (m: Rec) => number | undefined;
+  /** 采购订单：物料设置了采购单位时，允许按采购单位录入数量与单价 */
+  purchaseUnit?: boolean;
 }
 
-export const lineAmount = (r: Rec) => Math.round((Number(r.qty) || 0) * (Number(r.unit_price) || 0) * 100) / 100;
+const r4 = (v: number) => Math.round(v * 1e4) / 1e4;
+const r6 = (v: number) => Math.round(v * 1e6) / 1e6;
 
-export function OrderLinesEditor({ value, onChange, dateField, dateLabel, currency, materialParams, materialLabel = '物料', defaultDate, defaultPrice }: LinesEditorProps) {
-  const patch = (key: string, p: Rec) => onChange(value.map((r) => (r._key === key ? { ...r, ...p } : r)));
+/**
+ * 采购单位（行字段约定）：
+ *   uom = 库存单位；purchase_uom_def / purchase_factor = 物料的采购单位与换算率（1 采购单位 = factor 库存单位）；
+ *   purchase_uom 非空 = 本行按采购单位录入（purchase_qty / purchase_price），qty / unit_price 随之换算为库存单位。
+ */
+export const hasPurchaseUnit = (r: Rec) => !!r.purchase_uom_def && r.purchase_uom_def !== r.uom && Number(r.purchase_factor) > 0;
+
+/** 按采购单位录入时同步库存单位数量与单价 */
+function syncPurchase(r: LineRow): LineRow {
+  if (!r.purchase_uom) return r;
+  const f = Number(r.purchase_factor);
+  if (!(f > 0)) return r;
+  return {
+    ...r,
+    qty: r.purchase_qty === null || r.purchase_qty === undefined ? r.purchase_qty : r4(Number(r.purchase_qty) * f),
+    unit_price: r.purchase_price === null || r.purchase_price === undefined ? r.purchase_price : r6(Number(r.purchase_price) / f),
+  };
+}
+
+/** 切换录入单位（采购单位 ⇄ 库存单位），数量与单价按换算率互换 */
+function switchUnit(r: LineRow, toPurchase: boolean): LineRow {
+  const f = Number(r.purchase_factor);
+  if (toPurchase && f > 0) {
+    return syncPurchase({
+      ...r,
+      purchase_uom: r.purchase_uom_def,
+      purchase_qty: r.qty ? r4(Number(r.qty) / f) : r.qty,
+      purchase_price: r.unit_price !== null && r.unit_price !== undefined ? r6(Number(r.unit_price) * f) : r.unit_price,
+    });
+  }
+  return { ...r, purchase_uom: null, purchase_qty: null, purchase_price: null };
+}
+
+/**
+ * 金额四舍五入到分，与后端十进制计算一致：先取 12 位有效数字消除浮点误差（3 × 1.005 = 3.0149999…→ 3.015），
+ * 再用科学计数法移位取整（避免 3.015 × 100 = 301.49999…）
+ */
+export const toCents = (v: number): number => {
+  const n = Number(v.toPrecision(12));
+  const r = Number(`${Math.round(Number(`${n}e2`))}e-2`);
+  return Number.isFinite(r) ? r : Math.round(v * 100) / 100;
+};
+
+/** 行金额：按采购单位录入时 = 采购数量 × 采购单价，否则 = 数量 × 单价 */
+export const lineAmount = (r: Rec) =>
+  r.purchase_uom
+    ? toCents((Number(r.purchase_qty) || 0) * (Number(r.purchase_price) || 0))
+    : toCents((Number(r.qty) || 0) * (Number(r.unit_price) || 0));
+
+export function OrderLinesEditor({ value, onChange, dateField, dateLabel, currency, materialParams, materialLabel = '物料', defaultDate, defaultPrice, purchaseUnit }: LinesEditorProps) {
+  const patch = (key: string, p: Rec) => onChange(value.map((r) => (r._key === key ? syncPurchase({ ...r, ...p }) : r)));
+  const replace = (key: string, fn: (r: LineRow) => LineRow) => onChange(value.map((r) => (r._key === key ? fn(r) : r)));
   const total = value.reduce((s, r) => s + lineAmount(r), 0);
   const columns: TableColumnsType<LineRow> = [
     { title: '#', key: 'idx', width: 44, render: (_, __, i) => i + 1 },
@@ -162,26 +215,69 @@ export function OrderLinesEditor({ value, onChange, dateField, dateLabel, curren
           params={materialParams}
           value={r.material_id}
           onPick={(m) =>
-            patch(r._key, {
-              material_id: m?.id,
-              material_code: m?.code,
-              material_name: m?.name,
-              material_spec: m?.spec,
-              uom: m?.uom,
-              ...(m && !r.unit_price && defaultPrice?.(m) ? { unit_price: defaultPrice(m) } : {}),
+            replace(r._key, (old) => {
+              let row: LineRow = {
+                ...old,
+                material_id: m?.id,
+                material_code: m?.code,
+                material_name: m?.name,
+                material_spec: m?.spec,
+                uom: m?.uom,
+                purchase_uom_def: m?.purchase_uom ?? null,
+                purchase_factor: m?.purchase_factor ?? null,
+                purchase_uom: null,
+                purchase_qty: null,
+                purchase_price: null,
+                ...(m && !old.unit_price && defaultPrice?.(m) ? { unit_price: defaultPrice(m) } : {}),
+              };
+              // 物料有采购单位：默认按采购单位录入
+              if (purchaseUnit && m && hasPurchaseUnit(row)) row = switchUnit(row, true);
+              return row;
             })
           }
         />
       ),
     },
-    { title: '单位', dataIndex: 'uom', width: 60, render: (v) => v || '-' },
     {
-      title: '数量', key: 'qty', width: 120,
-      render: (_, r) => <InputNumber min={0} style={{ width: 110 }} value={r.qty} onChange={(v) => patch(r._key, { qty: v })} status={r.material_id && !(r.qty > 0) ? 'error' : undefined} />,
+      title: '单位', key: 'uom', width: purchaseUnit ? 100 : 60,
+      render: (_, r) =>
+        purchaseUnit && hasPurchaseUnit(r) ? (
+          <Tooltip title={`1 ${r.purchase_uom_def} = ${fmtQty(r.purchase_factor)} ${r.uom}`}>
+            <Select
+              size="small"
+              style={{ width: 90 }}
+              value={r.purchase_uom ? 'P' : 'S'}
+              onChange={(v) => replace(r._key, (old) => switchUnit(old, v === 'P'))}
+              options={[{ value: 'P', label: r.purchase_uom_def }, { value: 'S', label: r.uom }]}
+            />
+          </Tooltip>
+        ) : (
+          r.uom || '-'
+        ),
     },
     {
-      title: '单价', key: 'unit_price', width: 130,
-      render: (_, r) => <InputNumber min={0} style={{ width: 120 }} value={r.unit_price} onChange={(v) => patch(r._key, { unit_price: v })} />,
+      title: '数量', key: 'qty', width: 130,
+      render: (_, r) =>
+        r.purchase_uom ? (
+          <div>
+            <InputNumber min={0} style={{ width: 120 }} value={r.purchase_qty} onChange={(v) => patch(r._key, { purchase_qty: v })} status={r.material_id && !(r.purchase_qty > 0) ? 'error' : undefined} />
+            <Typography.Text type="secondary" style={{ display: 'block', fontSize: 12 }}>= {fmtQty(r.qty)} {r.uom}</Typography.Text>
+          </div>
+        ) : (
+          <InputNumber min={0} style={{ width: 120 }} value={r.qty} onChange={(v) => patch(r._key, { qty: v })} status={r.material_id && !(r.qty > 0) ? 'error' : undefined} />
+        ),
+    },
+    {
+      title: '单价', key: 'unit_price', width: 140,
+      render: (_, r) =>
+        r.purchase_uom ? (
+          <div>
+            <InputNumber min={0} style={{ width: 130 }} value={r.purchase_price} onChange={(v) => patch(r._key, { purchase_price: v })} />
+            <Typography.Text type="secondary" style={{ display: 'block', fontSize: 12 }}>每{r.purchase_uom}，= {fmtQty(r.unit_price, 6)}/{r.uom}</Typography.Text>
+          </div>
+        ) : (
+          <InputNumber min={0} style={{ width: 130 }} value={r.unit_price} onChange={(v) => patch(r._key, { unit_price: v })} />
+        ),
     },
     { title: '金额', key: 'amount', width: 130, align: 'right', render: (_, r) => fmtMoney(lineAmount(r), currency) },
     {
@@ -233,7 +329,7 @@ export function checkLines(rows: LineRow[], what = '物料'): string | null {
   return null;
 }
 
-/** 明细行 → 提交体 */
+/** 明细行 → 提交体（按采购单位录入的行附带 purchase_qty / purchase_uom / purchase_price，后端据此换算库存单位） */
 export function linesBody(rows: LineRow[], dateField: 'delivery_date' | 'expected_date') {
   return rows
     .filter((r) => r.material_id)
@@ -241,6 +337,9 @@ export function linesBody(rows: LineRow[], dateField: 'delivery_date' | 'expecte
       material_id: r.material_id,
       qty: Number(r.qty),
       unit_price: Number(r.unit_price) || 0,
+      ...(r.purchase_uom
+        ? { purchase_qty: Number(r.purchase_qty), purchase_uom: r.purchase_uom, purchase_price: Number(r.purchase_price) || 0 }
+        : {}),
       [dateField]: r[dateField] || null,
       remark: r.remark || null,
     }));

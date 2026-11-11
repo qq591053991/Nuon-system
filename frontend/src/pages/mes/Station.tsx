@@ -1,16 +1,23 @@
 import {
-  Alert, App, Button, Card, Col, Descriptions, Empty, Input, InputNumber, Row, Select, Space, Spin, Steps, Tag, Timeline, Typography, type InputRef,
+  Alert, App, Button, Card, Col, Descriptions, Empty, Form, Input, InputNumber, Modal, Row, Select, Space, Spin, Steps, Tag, Timeline, Typography, type InputRef,
 } from 'antd';
-import { CheckOutlined, CloseOutlined, LockOutlined, ScanOutlined, ToolOutlined, WarningOutlined } from '@ant-design/icons';
+import {
+  CheckOutlined, CloseOutlined, IdcardOutlined, LockOutlined, PoweroffOutlined, ScanOutlined, SettingOutlined, ToolOutlined, WarningOutlined,
+} from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { Link } from 'react-router-dom';
-import { get, post, type Rec } from '../../api/http';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import { get, type Rec } from '../../api/http';
 import { useAuth } from '../../auth';
 import { EquipmentSelect } from '../../components/RemoteSelect';
 import StatusTag from '../../components/StatusTag';
 import { dictLabel } from '../../utils/dict';
+import ReworkPanel, { KeyPartActionTag } from './ReworkPanel';
 import { ValuesText, errDetail, inSpec, num, specText, type SpecParam } from './spec';
+import StationLock from './StationLock';
+import {
+  httpStatus, loadIdleMinutes, loadSession, saveIdleMinutes, saveSession, stationGet, stationPost, type StationSession,
+} from './stationApi';
 
 const LS_OP = 'nuon_station_op';
 const LS_EQ = 'nuon_station_eq';
@@ -32,7 +39,12 @@ const STATION_CSS = `
 .station .station-param { border-left: 6px solid #d9d9d9; padding: 8px 12px; border-radius: 6px; background: #fafafa; }
 .station .station-param.ok { border-left-color: #52c41a; background: #f6ffed; }
 .station .station-param.ng { border-left-color: #ff4d4f; background: #fff1f0; }
+.station .station-operator { display: flex; align-items: center; gap: 12px; padding: 6px 14px; border-radius: 10px; background: #f4f0ff; border: 1px solid #d3c7ff; }
+.station .station-operator .name { font-size: 26px; font-weight: 800; line-height: 1.2; color: #2b1d6e; }
 `;
+
+/** 空闲多久后在页头提示即将锁定（秒） */
+const IDLE_WARN_SECONDS = 30;
 
 const lsGet = (k: string) => {
   try {
@@ -73,8 +85,20 @@ interface Banner {
 }
 
 export default function Station() {
-  const { user, can } = useAuth();
-  const { modal } = App.useApp();
+  const { user } = useAuth();
+  const { modal, message } = App.useApp();
+  const nav = useNavigate();
+  // ---- 当前操作员（刷工牌登录；与办公端登录账号相互独立） ----
+  const [idleMinutes, setIdleMinutes] = useState<number>(loadIdleMinutes);
+  const [session, setSession] = useState<StationSession | null>(() => loadSession(loadIdleMinutes()));
+  const [lockReason, setLockReason] = useState<string | null>(null);
+  const [idleLeft, setIdleLeft] = useState<number | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const lastActive = useRef<number>(session?.last ?? Date.now());
+  const token = session?.token ?? '';
+  const operator = session?.user;
+  /** 当前操作员是否有报工权限（工牌登录接口只允许 mes 权限用户，此处再做一次界面判断） */
+  const can = (...perms: string[]) => !!operator && perms.some((p) => operator.permissions?.includes(p));
   const [lockCode, setLockCode] = useState<string | undefined>(() => lsGet(LS_OP) || undefined);
   const [codes, setCodes] = useState<Record<string, string>>(loadCodes);
   const [defaultEq, setDefaultEq] = useState<number | undefined>(() => Number(lsGet(LS_EQ)) || undefined);
@@ -95,6 +119,67 @@ export default function Station() {
   const remarkRef = useRef<InputRef>(null);
   /** 回车依次跳转的输入框：0 = 关键件，1.. = 测试项 */
   const inputs = useRef<({ focus: () => void } | null)[]>([]);
+
+  /** 锁定终端：清除操作员令牌与屏幕上的产品信息（交班 / 空闲超时 / 令牌失效） */
+  const lock = useCallback((reason: string | null) => {
+    saveSession(null);
+    setSession(null);
+    setLockReason(reason);
+    setScan(null);
+    setSnText('');
+    setBanner(null);
+    setValues({});
+    setKeyLot('');
+    setRemark('');
+    setIdleLeft(null);
+  }, []);
+
+  const unlock = (s: StationSession) => {
+    saveSession(s);
+    lastActive.current = Date.now();
+    setSession(s);
+    setLockReason(null);
+    setStats({ pass: 0, fail: 0 });
+    message.success(`${s.user.full_name}，开始作业：后续报工记录将归属到您名下`);
+  };
+
+  /** 工位请求出错：令牌失效 → 锁定重新刷卡 */
+  const authFailed = (e: unknown) => {
+    if (httpStatus(e) === 401) {
+      lock('登录已失效，请重新刷工牌');
+      return true;
+    }
+    return false;
+  };
+
+  // 空闲自动锁定：任何点击 / 按键 / 触摸都算操作
+  useEffect(() => {
+    if (!session) return;
+    const onActive = () => {
+      lastActive.current = Date.now();
+    };
+    const evs = ['pointerdown', 'keydown', 'touchstart', 'wheel'] as const;
+    evs.forEach((ev) => window.addEventListener(ev, onActive, { passive: true }));
+    let persisted = 0;
+    const timer = setInterval(() => {
+      const idle = Date.now() - lastActive.current;
+      const limit = idleMinutes * 60_000;
+      if (idle >= limit) {
+        lock(`超过 ${idleMinutes} 分钟无操作，终端已自动锁定`);
+        return;
+      }
+      setIdleLeft(idle >= limit - IDLE_WARN_SECONDS * 1000 ? Math.ceil((limit - idle) / 1000) : null);
+      // 记录最近操作时间（刷新页面后据此判断是否需要重新刷卡）
+      if (lastActive.current !== persisted) {
+        persisted = lastActive.current;
+        saveSession({ ...session, last: lastActive.current });
+      }
+    }, 1000);
+    return () => {
+      evs.forEach((ev) => window.removeEventListener(ev, onActive));
+      clearInterval(timer);
+    };
+  }, [session, idleMinutes, lock]);
 
   // 恢复默认设备的详情（用于校准有效期提示）
   useEffect(() => {
@@ -141,7 +226,7 @@ export default function Station() {
     setSnText(sn);
     setLoading(true);
     try {
-      const d = await get(`/mes/scan/${encodeURIComponent(sn)}`, undefined, true);
+      const d = await stationGet(token, `/mes/scan/${encodeURIComponent(sn)}`);
       // 记住出现过的工序代码，供“工位锁定”选择
       const learned = { ...codes };
       (d.operations || []).forEach((o: Rec) => (learned[o.code] = o.name));
@@ -158,10 +243,21 @@ export default function Station() {
       setScan(d);
     } catch (e) {
       setScan(null);
+      if (authFailed(e)) return;
       setBanner({ kind: 'error', title: '扫码失败', body: errDetail(e) });
       focusScan();
     } finally {
       setLoading(false);
+    }
+  };
+
+  /** 返工换件登记后刷新当前产品信息（不清除横幅） */
+  const rescan = async () => {
+    if (!scan) return;
+    try {
+      setScan(await stationGet(token, `/mes/scan/${encodeURIComponent(scan.sn)}`));
+    } catch (e) {
+      authFailed(e);
     }
   };
 
@@ -180,7 +276,7 @@ export default function Station() {
     const opText = `${next.seq} ${next.name}`;
     setSubmitting(true);
     try {
-      const r = await post('/mes/report', {
+      const r = await stationPost(token, '/mes/report', {
         sn: scan.sn,
         seq: submitSeq,
         result: result === 'FAIL' ? 'FAIL' : undefined,
@@ -188,7 +284,7 @@ export default function Station() {
         equipment_id: equipmentId,
         remark: remark.trim() || undefined,
         key_parts: kp && keyLot.trim() ? [{ lot_no: keyLot.trim() }] : [],
-      }, true);
+      });
       const vals = r.values?.length ? <div style={{ marginTop: 8 }}><ValuesText values={r.values} /></div> : null;
       if (r.result === 'PASS') {
         setStats((s) => ({ ...s, pass: s.pass + 1 }));
@@ -225,6 +321,7 @@ export default function Station() {
       setSnText('');
       focusScan();
     } catch (e) {
+      if (authFailed(e)) return;
       setBanner({ kind: 'error', title: '⚠ 提交被拦截', body: <div style={{ fontSize: 18 }}>{errDetail(e)}</div> });
     } finally {
       setSubmitting(false);
@@ -311,19 +408,50 @@ export default function Station() {
     }
   }
 
+  /** 生产履历 = 过站记录 + 返工换件（拆下/装上），按时间倒序 */
+  const history: Rec[] = scan
+    ? [
+      ...(scan.history || []).map((h: Rec) => ({ ...h, _kind: 'record' })),
+      ...(scan.key_parts || []).filter((k: Rec) => k.action !== 'BIND').map((k: Rec) => ({ ...k, _kind: 'part' })),
+    ].sort((a, b) => dayjs(b.ts).valueOf() - dayjs(a.ts).valueOf())
+    : [];
+
+  if (!session) {
+    return (
+      <div className="station">
+        <StationLock reason={lockReason} terminalUser={user ? `${user.full_name}（${user.username}）` : null} onUnlock={unlock} onExit={() => nav('/')} />
+      </div>
+    );
+  }
+
   return (
     <div className="station">
       <style>{STATION_CSS}</style>
       <Card size="small" style={{ marginBottom: 16 }}>
         <Row gutter={[16, 12]} align="middle">
           <Col flex="none">
-            <Space direction="vertical" size={0}>
-              <Typography.Title level={4} style={{ margin: 0 }}><ScanOutlined /> 工位终端</Typography.Title>
-              <Typography.Text type="secondary">操作员：{user?.full_name}</Typography.Text>
-            </Space>
+            <Typography.Title level={4} style={{ margin: 0 }}><ScanOutlined /> 工位终端</Typography.Title>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>终端账号：{user?.full_name ?? '-'}</Typography.Text>
           </Col>
-          <Col flex="260px">
-            <div style={{ fontSize: 12, color: '#8c8c9e' }}><LockOutlined /> 工位锁定（防跳站）</div>
+          <Col flex="none">
+            <div className="station-operator">
+              <IdcardOutlined style={{ fontSize: 30, color: '#5b3cc4' }} />
+              <div>
+                <div style={{ fontSize: 12, color: '#8c8c9e' }}>当前操作员（报工记录归属）</div>
+                <div className="name">{operator?.full_name}</div>
+                <div style={{ fontSize: 12, color: '#8c8c9e' }}>
+                  {operator?.username}{operator?.department ? ` · ${operator.department}` : ''} · {dayjs(session.since).format('HH:mm')} 起
+                </div>
+              </div>
+              <Space direction="vertical" size={4}>
+                <Button danger type="primary" icon={<PoweroffOutlined />} onClick={() => lock(`${operator?.full_name} 已交班，终端已锁定`)}>交班 / 锁定</Button>
+                <Button size="small" icon={<SettingOutlined />} onClick={() => setSettingsOpen(true)}>终端设置</Button>
+              </Space>
+            </div>
+            {idleLeft !== null && <Typography.Text type="warning">无操作，{idleLeft} 秒后自动锁定</Typography.Text>}
+          </Col>
+          <Col flex="240px">
+            <div style={{ fontSize: 12, color: '#8c8c9e' }}><LockOutlined /> 本工位工序（防跳站）</div>
             <Select size="large" allowClear placeholder="不锁定：按下一道工序" style={{ width: '100%' }} value={lockCode} options={lockOptions}
               onChange={(v) => {
                 setLockCode(v);
@@ -331,7 +459,7 @@ export default function Station() {
                 focusScan();
               }} />
           </Col>
-          <Col flex="320px">
+          <Col flex="280px">
             <div style={{ fontSize: 12, color: '#8c8c9e' }}><ToolOutlined /> 本工位默认设备/仪器</div>
             <EquipmentSelect size="large" params={{ status: 'NORMAL' }} placeholder="选择或扫描设备" style={{ width: '100%' }} value={defaultEq}
               onPick={pickEq}
@@ -408,6 +536,10 @@ export default function Station() {
                 {scanAlerts}
               </Space>
             </Card>
+          )}
+
+          {scan?.rework && ['RELEASED', 'IN_PROGRESS'].includes(scan.wo?.status) && (
+            <ReworkPanel key={scan.sn} scan={scan} token={token} onDone={rescan} readOnly={!can('mes')} />
           )}
 
           {scan && next && (
@@ -503,7 +635,7 @@ export default function Station() {
                     </Button>
                   </Col>
                 </Row>
-                {!can('mes') && <Alert type="warning" showIcon message="当前账号没有生产报工权限" />}
+                {!can('mes') && <Alert type="warning" showIcon message="当前操作员没有生产报工权限" />}
                 {params.length > 0 && <Typography.Text type="secondary">提示：在最后一个测量值输入框按回车 = 合格提交；超出规格的值系统会自动判不合格并开具 NCR。</Typography.Text>}
               </Space>
             </Card>
@@ -513,43 +645,88 @@ export default function Station() {
         <Col xs={24} xl={9}>
           {scan ? (
             <Card title={`生产履历 - ${scan.sn}`} size="small">
-              {scan.history?.length ? (
+              {history.length ? (
                 <Timeline
                   style={{ marginTop: 8 }}
-                  items={[...scan.history].reverse().map((h: Rec, i: number) => ({
-                    key: i,
-                    color: h.result === 'PASS' ? 'green' : 'red',
-                    children: (
-                      <div>
-                        <Space size={4} wrap>
-                          <b>{h.seq} {h.op_name}</b>
-                          <StatusTag dict="result" value={h.result} />
-                          {h.is_rework && <Tag color="orange">返工</Tag>}
-                        </Space>
-                        <div style={{ fontSize: 12, color: '#8c8c9e' }}>
-                          {dayjs(h.ts).format('MM-DD HH:mm:ss')} · {h.operator_name}{h.equipment_code ? ` · ${h.equipment_code}` : ''}
+                  items={history.map((h: Rec, i: number) => (h._kind === 'part'
+                    ? {
+                      key: `p${i}`,
+                      color: h.action === 'REMOVE' ? 'orange' : 'purple',
+                      children: (
+                        <div>
+                          <Space size={4} wrap>
+                            <KeyPartActionTag action={h.action} text={h.action_text} />
+                            <b>{h.material_code} {h.material_name}</b>
+                          </Space>
+                          <div style={{ fontSize: 12 }}>
+                            批号 <span className="mono">{h.lot_no || '-'}</span>{h.part_sn ? ` · 部件 ${h.part_sn}` : ''}{h.ncr_no ? ` · ${h.ncr_no}` : ''}
+                          </div>
+                          <div style={{ fontSize: 12, color: '#8c8c9e' }}>
+                            {dayjs(h.ts).format('MM-DD HH:mm:ss')} · {h.operator_name || '-'}{h.remark ? ` · ${h.remark}` : ''}
+                          </div>
                         </div>
-                        {h.values?.length > 0 && <div style={{ fontSize: 12 }}><ValuesText values={h.values} block /></div>}
-                      </div>
-                    ),
-                  }))}
+                      ),
+                    }
+                    : {
+                      key: `r${i}`,
+                      color: h.result === 'PASS' ? 'green' : 'red',
+                      children: (
+                        <div>
+                          <Space size={4} wrap>
+                            <b>{h.seq} {h.op_name}</b>
+                            <StatusTag dict="result" value={h.result} />
+                            {h.is_rework && <Tag color="orange">返工</Tag>}
+                          </Space>
+                          <div style={{ fontSize: 12, color: '#8c8c9e' }}>
+                            {dayjs(h.ts).format('MM-DD HH:mm:ss')} · {h.operator_name}{h.equipment_code ? ` · ${h.equipment_code}` : ''}
+                          </div>
+                          {h.values?.length > 0 && <div style={{ fontSize: 12 }}><ValuesText values={h.values} block /></div>}
+                        </div>
+                      ),
+                    }))}
                 />
               ) : <Empty description="尚未开始生产" />}
             </Card>
           ) : (
             <Card title="操作说明" size="small">
               <ol style={{ paddingLeft: 20, lineHeight: 2, fontSize: 15, margin: 0 }}>
-                <li>（可选）锁定本工位工序并选择默认仪器，下次打开自动记住；</li>
+                <li>上岗刷工牌并输入 PIN，报工记录归属到当前操作员；离开时点【交班 / 锁定】，无操作 {idleMinutes} 分钟自动锁定；</li>
+                <li>（可选）设置本工位工序并选择默认仪器，下次打开自动记住；</li>
                 <li>扫描产品序列号（或 UDI 条码），系统显示下一道工序与测试规格；</li>
                 <li>依次录入测量值，绿色 = 合格、红色 = 超差，回车跳到下一项；</li>
                 <li>点【合格提交】或判不合格，系统自动判定并记录到 DHR；</li>
-                <li>不合格自动开具 NCR，产品被隔离，需 QA 处置后才能继续。</li>
+                <li>不合格自动开具 NCR，产品被隔离，需 QA 处置后才能继续；返工时如更换零件，先在【返工换件】中登记再重新测试。</li>
               </ol>
-              <Alert style={{ marginTop: 12 }} type="info" showIcon message="防呆：系统禁止跳站/重复过站，禁止使用校准过期的仪器，关键件批号必须是本工单已领用的批次。" />
+              <Alert style={{ marginTop: 12 }} type="info" showIcon message="防呆：系统禁止跳站/重复过站，禁止使用校准过期的仪器，关键件批号必须是本工单已领用的批次；操作员须持有该工序的上岗资质。" />
             </Card>
           )}
         </Col>
       </Row>
+      <StationSettings open={settingsOpen} minutes={idleMinutes} onClose={() => setSettingsOpen(false)}
+        onSave={(m) => {
+          saveIdleMinutes(m);
+          setIdleMinutes(m);
+          lastActive.current = Date.now();
+          setSettingsOpen(false);
+          message.success(`已设置：无操作 ${m} 分钟自动锁定`);
+        }} />
     </div>
+  );
+}
+
+/** 终端设置（保存在本机浏览器）：空闲自动锁定时间 */
+function StationSettings({ open, minutes, onClose, onSave }: { open: boolean; minutes: number; onClose: () => void; onSave: (m: number) => void }) {
+  const [form] = Form.useForm();
+  return (
+    <Modal open={open} title="工位终端设置" okText="保存" onCancel={onClose} destroyOnHidden
+      afterOpenChange={(o) => o && form.setFieldsValue({ minutes })}
+      onOk={async () => onSave((await form.validateFields()).minutes)}>
+      <Alert type="info" showIcon style={{ marginBottom: 16 }} message="共用工位终端无人操作时自动锁定，需重新刷工牌才能继续，防止他人以当前操作员身份报工（GMP / 21 CFR Part 11 记录可归属）。设置仅保存在本终端。" />
+      <Form form={form} layout="vertical">
+        <Form.Item name="minutes" label="空闲自动锁定（分钟）" rules={[{ required: true, message: '请填写分钟数' }]}>
+          <InputNumber min={1} max={240} precision={0} style={{ width: 200 }} suffix="分钟" />
+        </Form.Item>
+      </Form>
+    </Modal>
   );
 }

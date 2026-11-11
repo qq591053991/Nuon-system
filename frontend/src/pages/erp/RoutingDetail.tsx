@@ -219,8 +219,10 @@ function RoutingBody({ routing, versions, reload }: { routing: Rec; versions: Re
   const reject = async () => {
     const signature = await signed({
       meaning: '工艺路线驳回',
-      description: '驳回后退回草稿，由工程师修改后重新提交。请在下方填写驳回原因。',
+      description: '驳回后退回草稿，由工程师修改后重新提交。',
       reasonRequired: true,
+      reasonLabel: '驳回原因',
+      reasonPlaceholder: '如：测试规格缺少验证依据，请补充验证报告后重新提交',
     });
     if (!signature) return;
     setBusy('reject');

@@ -37,7 +37,8 @@
 
 完整的业务规则见 [docs/architecture.md](docs/architecture.md)，合规条款对照见 [docs/compliance.md](docs/compliance.md)，
 从金蝶迁移方案见 [docs/kingdee-migration.md](docs/kingdee-migration.md)，金蝶账号登录见 [docs/kingdee-sso.md](docs/kingdee-sso.md)，
-设计评审与上线前待办见 [docs/design-review.md](docs/design-review.md)。
+设计评审与上线前待办见 [docs/design-review.md](docs/design-review.md)，
+运维（HTTPS、备份与恢复演练、记录保存、数据库账号加固、时间同步、升级）见 [docs/operations.md](docs/operations.md)。
 
 ## 核心业务流程
 
@@ -100,16 +101,16 @@ npm run dev        # http://localhost:5173 （/api 自动代理到 8000）
 
 | 账号 | 角色 | 建议体验 |
 |---|---|---|
-| admin | 系统管理员 | 全部功能、用户权限、审计追踪 |
-| manager | 厂长 | 工作台驾驶舱 |
+| admin | 系统管理员 | 用户与权限、工牌/PIN、账号解锁、审计追踪与完整性校验（可查看业务数据，但不能做业务操作） |
+| manager | 厂长 | 工作台驾驶舱、各业务操作（**不能做质量签名**：产品放行、NCR 处置、让步接收、CAPA 关闭、BOM/工艺批准） |
 | sales | 销售 | 销售订单、发货申请 |
 | pmc | PMC 计划 | MRP、生产工单下达 |
 | buyer | 采购 | 采购订单（试试向“新锐光电”下单会被拦截） |
 | wh | 仓管 | 收货、领料过账、完工入库、发货 |
-| op1 / op2 | 产线操作员 | **工位终端扫码报工** |
+| op1 / op2 | 产线操作员 | **工位终端扫码报工**（工牌登录：`E1001` / PIN `1234`，`E1002` / PIN `5678`） |
 | qc | 质检员 | IQC 来料检验 |
-| qa | QA | NCR 处置、CAPA、**DHR 审核放行** |
-| engineer | 工艺工程师 | BOM / 工艺路线 / 测试规格 |
+| qa | QA | NCR 处置、CAPA、**DHR 审核放行**、BOM / 工艺路线批准 |
+| engineer | 工艺工程师 | BOM / 工艺路线 / 测试规格编制与提交（QA 批准后生效） |
 | finance | 财务 | 应收应付、收付款 |
 
 ### 5 分钟体验路线
