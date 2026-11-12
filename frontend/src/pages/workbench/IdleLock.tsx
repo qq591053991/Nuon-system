@@ -153,9 +153,17 @@ function LockScreen({ onUnlocked, onSwitch }: { onUnlocked: () => void; onSwitch
   const badgeRef = useRef<InputRef>(null);
   const pinRef = useRef<InputRef>(null);
 
+  // 锁屏时焦点必须在解锁框里（底下的页面可能在加载后抢焦点）：前 3 秒反复确认；之后任何按键都把焦点拉回来
   useEffect(() => {
-    const t = setTimeout(() => (mode === 'password' ? pwdRef : badgeRef).current?.focus(), 120);
-    return () => clearTimeout(t);
+    const inLock = () => !!document.activeElement?.closest('.idle-lock');
+    const focus = () => { if (!inLock()) (mode === 'password' ? pwdRef : badgeRef).current?.focus(); };
+    const timers = [120, 400, 900, 1600, 3000].map((ms) => setTimeout(focus, ms));
+    const onKey = () => focus();
+    window.addEventListener('keydown', onKey, true);
+    return () => {
+      timers.forEach(clearTimeout);
+      window.removeEventListener('keydown', onKey, true);
+    };
   }, [mode]);
 
   const submit = async () => {

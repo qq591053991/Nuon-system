@@ -340,7 +340,7 @@ function ComplaintDrawer({ c, onClose, onChanged, onEdit, onCloseIt }: {
         { key: 'cl', label: '结案人/时间', children: c.closed_by ? `${c.closed_by} ${fmtDateTime(c.closed_at)}` : '-' },
       ]} />
       {!closed && can('qa') && (
-        <Space wrap style={{ marginTop: 16 }}>
+        <Space wrap style={{ marginTop: 16 }} className="no-print">
           {!c.ncr_id && (
             <Button icon={<AuditOutlined />} loading={busy === 'ncr'}
               onClick={() => confirm('由投诉开具 NCR？', `将开具来源为“客诉”的不合格品报告${c.is_adverse_event ? '（不良事件默认严重程度：致命）' : ''}，由 QA 评审处置。`,
