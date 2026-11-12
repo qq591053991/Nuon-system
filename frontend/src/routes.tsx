@@ -10,6 +10,27 @@ const named = (loader: () => Promise<any>, name: string): Page => lazy(() => loa
 const M = () => import('./pages/master/MasterPages');
 
 export interface RouteDef { path: string; element: Page }
+
+/**
+ * 页面级读权限（与后端 READ_PERMS / 各 GET 接口的 @Perms 一致）：没有权限的人直接输入网址时显示“无权访问”，
+ * 而不是打开页面后接口报 403。键为路径前缀，按最长前缀匹配；未列出的页面不限制（由接口自行控制）。
+ */
+export const ROUTE_PERMS: [string, string[], string][] = [
+  ['/finance', ['finance'], '财务'],
+  ['/system/audit', ['audit', 'admin'], '审计查阅'],
+  ['/system/esign', ['audit', 'admin'], '审计查阅'],
+  ['/system/users', ['admin'], '系统管理'],
+  ['/sales/orders', ['sales', 'plan', 'wms', 'finance', 'qa'], '销售订单查阅'],
+  ['/purchase/orders', ['purchase', 'plan', 'wms', 'qc', 'qa', 'finance'], '采购订单查阅'],
+  ['/purchase/chase', ['purchase', 'plan', 'wms', 'qc', 'qa', 'finance'], '采购订单查阅'],
+  ['/purchase/materials', ['purchase', 'master', 'plan'], '采购/主数据'],
+];
+
+/** 当前路径需要的权限（无限制时返回 null） */
+export function routePerm(pathname: string): { perms: string[]; label: string } | null {
+  const hit = ROUTE_PERMS.filter(([p]) => pathname === p || pathname.startsWith(p + '/')).sort((a, b) => b[0].length - a[0].length)[0];
+  return hit ? { perms: hit[1], label: hit[2] } : null;
+}
 /**
  * 菜单（G1 负责结构与权限）：perm = 需要任一权限点才显示；分组上的 perm 作为子项默认值；子项全部隐藏时分组也隐藏。
  * 口径与后端读权限矩阵一致（见 backend/src/auth/roles.ts READ_PERMS）：财务只给 finance，审计只给 audit/admin，

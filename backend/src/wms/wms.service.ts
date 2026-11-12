@@ -25,6 +25,7 @@ import { Injectable } from '@nestjs/common';
 import type { Prisma, MaterialIssue, MaterialIssueLine, PurchaseOrder, Receipt, ReceiptLine, SerialNumber, Shipment, ShipmentLine, Stock, StockCount, StockCountLine, WorkOrder } from '@prisma/client';
 import type { CurrentUser } from '../common/context';
 import { addDays, dateOnly, fmtDate, today } from '../common/dates';
+import { RateBook, bookingOf } from '../erp/currency';
 import { BizError, NotFound } from '../common/errors';
 import { EPS, g, num, round, round2 } from '../common/num';
 import { lineAmount, MoneySum, poReceiptAmount } from '../common/money';
@@ -169,7 +170,8 @@ export class WmsService {
           data: {
             no: await this.numbering.nextNo(tx, 'AP'), doc_type: 'AP', supplier_id: po.supplier_id, ref_type: 'RECEIPT', ref_no: rc.no,
             doc_date: today(), currency: po.currency, due_date: addDays(today(), sup ? sup.payment_terms_days : 30),
-            amount: ap.value, status: 'OPEN', remark: `采购订单 ${po.no} 入库`, created_by: user.username,
+            amount: ap.value, ...bookingOf(await RateBook.load(tx), ap.value, po.currency, today()), // 记账汇率与本位币金额
+            status: 'OPEN', remark: `采购订单 ${po.no} 入库`, created_by: user.username,
           },
         });
       }
@@ -429,7 +431,8 @@ export class WmsService {
           data: {
             no: await this.numbering.nextNo(tx, 'AR'), doc_type: 'AR', customer_id: so.customer_id, ref_type: 'SHIPMENT', ref_no: sh.no,
             doc_date: today(), currency: so.currency, due_date: addDays(today(), cust ? cust.payment_terms_days : 30),
-            amount: ar.value, status: 'OPEN', remark: `销售订单 ${so.no} 发货`, created_by: user.username,
+            amount: ar.value, ...bookingOf(await RateBook.load(tx), ar.value, so.currency, today()), // 记账汇率与本位币金额
+            status: 'OPEN', remark: `销售订单 ${so.no} 发货`, created_by: user.username,
           },
         });
       }

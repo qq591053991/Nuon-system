@@ -128,10 +128,10 @@ export async function seedBase(db: PrismaService, opts: SeedBaseOptions = {}): P
     }
     const eq: Record<string, any> = {};
     const equip = (code: string, d: Record<string, any>) => upsertByCode<any>(tx.equipment, code, d);
-    eq.SPEC1 = await equip('EQ-SPEC-01', { name: '光谱辐照度计 #1', model: 'SPR-3000', equipment_type: 'TEST', work_center_id: wcs['WC-TEST'].id, calibration_required: true, calibration_cycle_days: 365, last_calibration_date: addDays(t, -100), next_calibration_date: addDays(t, 265) });
-    eq.SPEC2 = await equip('EQ-SPEC-02', { name: '光谱辐照度计 #2（备用）', model: 'SPR-3000', equipment_type: 'TEST', work_center_id: wcs['WC-TEST'].id, calibration_required: true, calibration_cycle_days: 365, last_calibration_date: addDays(t, -370), next_calibration_date: addDays(t, -5) });
-    eq.HIPOT = await equip('EQ-SAFE-01', { name: '医用安规综合测试仪', model: 'MS-6000', equipment_type: 'TEST', work_center_id: wcs['WC-SAFE'].id, calibration_required: true, calibration_cycle_days: 365, last_calibration_date: addDays(t, -345), next_calibration_date: addDays(t, 20) });
-    eq.AGING = await equip('EQ-AGING-01', { name: '智能老化架 #1', model: 'AR-48', equipment_type: 'AGING', work_center_id: wcs['WC-AGING'].id });
+    eq.SPEC1 = await equip('EQ-SPEC-01', { name: '光谱辐照度计 #1', model: 'SPR-3000', equipment_type: 'TEST', op_types: 'TEST_OPTICAL', work_center_id: wcs['WC-TEST'].id, calibration_required: true, calibration_cycle_days: 365, last_calibration_date: addDays(t, -100), next_calibration_date: addDays(t, 265) });
+    eq.SPEC2 = await equip('EQ-SPEC-02', { name: '光谱辐照度计 #2（备用）', model: 'SPR-3000', equipment_type: 'TEST', op_types: 'TEST_OPTICAL', work_center_id: wcs['WC-TEST'].id, calibration_required: true, calibration_cycle_days: 365, last_calibration_date: addDays(t, -370), next_calibration_date: addDays(t, -5) });
+    eq.HIPOT = await equip('EQ-SAFE-01', { name: '医用安规综合测试仪', model: 'MS-6000', equipment_type: 'TEST', op_types: 'TEST_SAFETY', work_center_id: wcs['WC-SAFE'].id, calibration_required: true, calibration_cycle_days: 365, last_calibration_date: addDays(t, -345), next_calibration_date: addDays(t, 20) });
+    eq.AGING = await equip('EQ-AGING-01', { name: '智能老化架 #1', model: 'AR-48', equipment_type: 'AGING', op_types: 'AGING', work_center_id: wcs['WC-AGING'].id });
     await equip('EQ-SMT-01', { name: '高速贴片机', model: 'SM-481', equipment_type: 'PRODUCTION', work_center_id: wcs['WC-SMT'].id });
 
     const whDefs: [string, string, string, [string, string, string][]][] = [
@@ -145,6 +145,9 @@ export async function seedBase(db: PrismaService, opts: SeedBaseOptions = {}): P
       const wh: any = await upsertByCode(tx.warehouse, code, { name, warehouse_type: wtype });
       for (const [lc, ln, lt] of locs) await upsertByCode(tx.location, lc, { name: ln, warehouse_id: wh.id, location_type: lt });
     }
+    // 湿敏（MSL 3）LED 默认放防潮柜：收货/上架时自动带出
+    const dry = await tx.location.findFirst({ where: { code: 'DRY-01' } });
+    if (dry) await tx.material.updateMany({ where: { id: { in: [m.LED660.id, m.LED850.id, m.LED460.id] }, default_location_id: null }, data: { default_location_id: dry.id } });
 
     const bom = async (parent: any, version: string, lines: [any, number, number, string | null][]) => {
       if (await tx.bom.findFirst({ where: { material_id: parent.id, version } })) return;

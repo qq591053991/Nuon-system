@@ -33,5 +33,6 @@ export const daysBetween = (a: Date, b: Date): number => Math.round((a.getTime()
 export const DATE_FIELDS = new Set([
   'order_date', 'delivery_date', 'expected_date', 'effective_date', 'qualification_expiry', 'quality_agreement_expiry',
   'last_calibration_date', 'next_calibration_date', 'calibration_date', 'next_due_date', 'mfg_date', 'expiry_date',
-  'receipt_date', 'ship_date', 'doc_date', 'due_date', 'pay_date', 'planned_start', 'planned_end',
+  'receipt_date', 'ship_date', 'doc_date', 'due_date', 'pay_date', 'planned_start', 'planned_end', 'promised_date',
+  'event_date', 'report_deadline', 'reported_at', 'replied_at', 'certified_at', 'expires_at', 'received_date', 'required_date', 'return_date',
 ]);

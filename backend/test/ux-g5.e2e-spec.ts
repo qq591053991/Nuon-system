@@ -177,11 +177,12 @@ describe('好用性修复 G5：工位终端 / 工程', () => {
     let r = await report(api, ref, sns[0], 20);
     expect(r.body.result).toBe('PASS');
     r = await report(api, ref, sns[0], 30, { equipment_id: ref.eq['EQ-SPEC-01'] });
-    expect(r.body.detail).toBe('设备 EQ-SPEC-01 光谱辐照度计 #1 是检测仪器，不能用于【老化测试】（老化），请选择适用于本工序的设备');
+    // 种子数据已为设备设置“适用工序”（EQ-SPEC-01 → 光学性能测试），按台账判定
+    expect(r.body.detail).toBe('设备 EQ-SPEC-01 光谱辐照度计 #1 适用于【光学性能测试】工序，不能用于【老化测试】（老化），请选择适用于本工序的设备');
     const eqs = await op1.ok('get', '/api/mes/station/equipment', { op_type: 'AGING', op_name: '老化测试' });
     const byCode = Object.fromEntries(eqs.map((e: any) => [e.code, e.issue]));
     expect(byCode['EQ-AGING-01']).toBeNull();
-    expect(byCode['EQ-SPEC-01']).toBe('是检测仪器，不能用于【老化测试】（老化）');
+    expect(byCode['EQ-SPEC-01']).toBe('适用于【光学性能测试】工序，不能用于【老化测试】（老化）');
     expect(byCode['EQ-SPEC-02']).toMatch(/^校准已过期/);
     await api.as('engineer').ok('put', `/api/equipment/${ref.eq['EQ-SPEC-01']}`, { op_types: 'TEST_OPTICAL,AGING' });
     expect((await report(api, ref, sns[0], 30, { equipment_id: ref.eq['EQ-SPEC-01'] })).body.result).toBe('PASS');
