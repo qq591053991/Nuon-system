@@ -47,10 +47,12 @@ export function PrintHeader({ title, no, extra }: { title: string; no?: string; 
 /** 打印件末尾签字栏 */
 export function PrintSignatures({ roles = ['编制', '审核', '批准'] }: { roles?: string[] }) {
   return (
-    <div className="print-only" style={{ display: 'flex', gap: 24, marginTop: 24, fontSize: 12 }}>
-      {roles.map((r) => (
-        <div key={r} style={{ flex: 1, borderTop: '1px solid #000', paddingTop: 4 }}>{r}：　　　　　　日期：</div>
-      ))}
+    <div className="print-only">
+      <div style={{ display: 'flex', gap: 24, marginTop: 24, fontSize: 12 }}>
+        {roles.map((r) => (
+          <div key={r} style={{ flex: 1, borderTop: '1px solid #000', paddingTop: 4 }}>{r}：　　　　　　日期：</div>
+        ))}
+      </div>
     </div>
   );
 }

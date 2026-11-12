@@ -4,7 +4,8 @@
  */
 import { Alert, Button, Card, Empty, Space, Tag } from 'antd';
 import { DeleteOutlined, InboxOutlined } from '@ant-design/icons';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import type { InputRef } from 'antd';
 import { get, post, type Rec } from '../../../api/http';
 import ScanInput, { type ScanInputHandle } from '../../../components/ScanInput';
@@ -21,6 +22,14 @@ export default function PdaFgReceipt() {
   const { fb, show, clear } = useFeedback();
   const scanRef = useRef<ScanInputHandle>(null);
   const locRef = useRef<InputRef>(null);
+  const [sp] = useSearchParams();
+
+  // 从工单详情跳转过来（?wo=<工单id>）时直接带出工单
+  useEffect(() => {
+    const id = sp.get('wo');
+    if (id) get(`/work-orders/${id}`).then((w) => loadWo(w)).catch((e) => show('err', errText(e)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const loadWo = async (w: Rec, firstSn?: string) => {
     if (!['IN_PROGRESS', 'COMPLETED'].includes(w.status)) return show('err', `工单 ${w.no} 状态不允许完工入库（需生产中或已完工）`);

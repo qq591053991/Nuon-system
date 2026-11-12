@@ -194,7 +194,9 @@ function StockSummary({ onDrill }: { onDrill: (code: string) => void }) {
   const narrow = useNarrow();
   const [rows, setRows] = useState<Rec[]>([]);
   const [loading, setLoading] = useState(false);
-  const [filter, setFilter] = useState<Rec>({ below_safety: false });
+  const [sp] = useSearchParams();
+  // 工作台“低于安全库存”待办跳转带 ?below_safety=1
+  const [filter, setFilter] = useState<Rec>({ below_safety: ['1', 'true'].includes(sp.get('below_safety') || '') });
 
   const load = useCallback(() => {
     setLoading(true);

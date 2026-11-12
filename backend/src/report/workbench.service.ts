@@ -278,7 +278,7 @@ export class WorkbenchService {
     await add(['warehouse'], 'ship', '待过账的发货单', c.shipDraft, PATHS.shipDraft);
     await add(['warehouse'], 'shippable', '已放行可发货的销售订单', async () => (await c.shippable()).length, PATHS.shipNew);
     await add(['warehouse'], 'fg', '待完工入库的工单', c.woToReceive, PATHS.woToReceive);
-    await add(['warehouse', 'qa'], 'supplier_return', '待出库的退供应商单', c.supplierReturns, PATHS.supplierReturn);
+    await add(['warehouse', 'qa', 'purchaser'], 'supplier_return', '待出库的退供应商单', c.supplierReturns, PATHS.supplierReturn);
     await add(['warehouse', 'qa'], 'rma', '待处置的客户退货（RMA）', c.customerReturns, PATHS.rma);
     await add(['warehouse'], 'count_open', '进行中的盘点单', c.countOpen, PATHS.countOpen);
     await add(['warehouse'], 'expiring', '30 天内到期/已过期的批次', c.expiringLots, PATHS.expiring, 'warning');

@@ -11,6 +11,15 @@ export const config = {
   corsOrigins: (process.env.CORS_ORIGINS || '*').split(',').filter(Boolean),
   bcryptRounds: Number(process.env.BCRYPT_ROUNDS || 12),
   gs1CompanyPrefix: process.env.GS1_COMPANY_PREFIX || '697000000',
+  /** 本公司信息（打印形式发票、采购订单、发货单抬头用） */
+  company: {
+    name: process.env.COMPANY_NAME || '',
+    name_en: process.env.COMPANY_NAME_EN || '',
+    address: process.env.COMPANY_ADDRESS || '',
+    phone: process.env.COMPANY_PHONE || '',
+    tax_no: process.env.COMPANY_TAX_NO || '',
+    bank: process.env.COMPANY_BANK || '',
+  },
   /** 登录安全：连续失败 N 次锁定 M 分钟 */
   loginMaxFailures: Number(process.env.LOGIN_MAX_FAILURES || 5),
   loginLockMinutes: Number(process.env.LOGIN_LOCK_MINUTES || 15),

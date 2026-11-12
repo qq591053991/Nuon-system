@@ -515,7 +515,8 @@ export class FinanceService {
     const docs = await this.db.client.financeDoc.findMany({
       where: { doc_type: { in: ['AR', 'AP'] }, doc_date: { lte: asOf }, status: asOf.getTime() >= t.getTime() ? { in: OPEN } : { not: 'VOID' } },
       orderBy: [{ due_date: { sort: 'asc', nulls: 'last' } }, { id: 'asc' }],
-      include: { customer: true, supplier: true, payments: { where: { status: 'VALID', pay_date: { lte: asOf } }, select: { amount: true } } },
+      // 截止日余额 = 当前余额 + 截止日之后登记的有效收付款（兼容没有收付款明细、直接导入已收金额的期初单据）
+      include: { customer: true, supplier: true, payments: { where: { status: 'VALID', pay_date: { gt: asOf } }, select: { amount: true } } },
     });
     const book = await RateBook.load(this.db.client);
     const keys = [...labels, 'total'];
@@ -525,9 +526,9 @@ export class FinanceService {
     for (const d of docs as DocWithPartner[]) {
       const group = groups[d.doc_type];
       if (!group) continue;
-      const paid = new MoneySum();
-      (d as any).payments.forEach((p: { amount: any }) => paid.add(p.amount));
-      const balance = subMoney(d.amount, paid.value);
+      const later = new MoneySum();
+      (d as any).payments.forEach((p: { amount: any }) => later.add(p.amount));
+      const balance = money(dec(d.amount).minus(d.paid_amount).plus(later.value));
       if (balance <= 0) continue;
       const overdue = d.due_date ? daysBetween(asOf, d.due_date) : 0;
       let bi = 0;

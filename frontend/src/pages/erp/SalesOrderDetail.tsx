@@ -20,11 +20,10 @@ import {
   CURRENCY_OPTIONS, DueDate, KittingTable, OrderLinesEditor, QtyProgress, checkLines, isPast, kittingSummary, linesBody, sumBy, toDayjs, uid,
   type LineLock, type LineRow,
 } from './shared';
+import { useCompany } from '../../utils/company';
 
 const ACTIVE = ['CONFIRMED', 'IN_PRODUCTION', 'PARTIAL_SHIPPED'];
 const STEP_OF: Record<string, number> = { DRAFT: 0, CONFIRMED: 1, IN_PRODUCTION: 2, PARTIAL_SHIPPED: 3, SHIPPED: 4, CLOSED: 4 };
-/** 打印形式发票时的卖方名称（部署时用 VITE_COMPANY_NAME 配置；未配置则不打印卖方抬头） */
-const COMPANY = (import.meta as any).env?.VITE_COMPANY_NAME as string | undefined;
 
 const NEXT_HINT: Record<string, string> = {
   DRAFT: '草稿可随时修改；确认后进入生产计划（MRP 只统计已确认订单）。',
@@ -666,6 +665,7 @@ function SoHistory({ soId, refreshKey }: { soId: number; refreshKey: number }) {
 
 // ---------------- 形式发票（打印） ----------------
 function ProformaInvoice({ so, customer }: { so: Rec; customer: Rec | null }) {
+  const company = useCompany();
   const cell = { border: '1px solid #000', padding: '3px 6px', fontSize: 11 } as const;
   return (
     <div className="print-only">
@@ -681,7 +681,15 @@ function ProformaInvoice({ so, customer }: { so: Rec; customer: Rec | null }) {
               {customer?.tax_no ? <><br />税号 Tax No.：{customer.tax_no}</> : null}
             </td>
             <td style={{ ...cell, verticalAlign: 'top' }}>
-              {COMPANY ? <><b>卖方 Seller</b><br />{COMPANY}<br /></> : null}
+              {company?.name ? (
+                <>
+                  <b>卖方 Seller</b><br />
+                  {company.name}{company.name_en ? ` / ${company.name_en}` : ''}<br />
+                  {company.address ? <>{company.address}<br /></> : null}
+                  {company.phone ? <>电话 Tel：{company.phone}<br /></> : null}
+                  {company.bank ? <>开户行及账号 Bank：{company.bank}<br /></> : null}
+                </>
+              ) : null}
               客户订单号 Customer PO：{so.customer_po || '-'}<br />
               币别 Currency：{so.currency}<br />
               交期 Delivery：{fmtDate(so.delivery_date)}<br />

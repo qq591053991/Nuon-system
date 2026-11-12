@@ -84,7 +84,8 @@ cd backend
 cp .env.example .env                  # 修改 DATABASE_URL 等
 npm install
 npx prisma migrate deploy             # 建表/升级数据库结构
-npm run seed -- --reset --demo        # 初始化 + 演示数据
+npm run seed -- --reset --demo        # 演示环境：12 个岗位演示账号 + 主数据 + 演示业务数据
+# 正式环境：npm run seed               # 只创建 admin（首次登录须改密；初始密码见 INITIAL_ADMIN_PASSWORD 或控制台输出）
 npm run start:dev                     # API 文档：http://localhost:8000/api/docs
 ```
 

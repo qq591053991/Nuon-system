@@ -11,7 +11,7 @@
 |---|---|---|---|
 | 1 | 服务器 | ≥ 4 核 / 8 GB / SSD；数据盘与系统盘分开；磁盘使用率告警阈值 80% | ☐ |
 | 2 | `.env` 已配置 | `DB_PASSWORD` 强密码（≥ 16 位随机）；`SECRET_KEY` ≥ 32 位随机（`openssl rand -hex 32`）；**`SEED_DEMO=0`**（正式环境不生成演示数据） | ☐ |
-| 3 | 演示账号 | 上线前停用或修改全部演示账号密码（admin、qa 等），按实际人员建账号并分配角色 | ☐ |
+| 3 | 初始账号 | `SEED_DEMO=0` 时只创建 `admin`（初始密码取 `INITIAL_ADMIN_PASSWORD`，未设置则随机生成并打印在后端首次启动日志 `docker compose logs backend` 中），首次登录强制改密；登录后在“用户与角色 → 批量导入用户”用 Excel 一次建好全部员工账号（系统生成初始密码清单，员工首次登录须改密）。若曾用演示数据，用户页会提示“仍有 N 个账号使用公开演示密码”，须全部停用或重置 | ☐ |
 | 4 | HTTPS | 按 §2 配置证书，HTTP 自动跳转 HTTPS；`CORS_ORIGINS` 设为实际域名（不要用 `*`） | ☐ |
 | 5 | 时间同步 | 按 §7 配置 NTP，`timedatectl` 显示 `System clock synchronized: yes`，时区 Asia/Shanghai | ☐ |
 | 6 | 数据库账号 | 按 §6 创建受限应用账号；应用不使用表属主/超级用户连接 | ☐ |
@@ -20,7 +20,8 @@
 | 9 | 附件存储 | `attachments` 卷已纳入备份；单个附件 ≤ 20 MB（Nginx `client_max_body_size` ≥ 20m） | ☐ |
 | 10 | 防火墙 | 只开放 443（及 80 跳转）；PostgreSQL 5432 不对外暴露（compose 默认未映射） | ☐ |
 | 11 | 监控 | 按 §8 配置健康检查、磁盘、备份失败告警 | ☐ |
-| 12 | 版本记录 | 记录部署的 Git 提交号、数据库迁移版本（`_prisma_migrations` 最新一条） | ☐ |
+| 12 | 公司信息 | `.env` 中 `COMPANY_NAME` 等已填写（形式发票、采购单打印抬头）；`DEMO_MODE=0` | ☐ |
+| 13 | 版本记录 | 记录部署的 Git 提交号、数据库迁移版本（`_prisma_migrations` 最新一条） | ☐ |
 
 部署命令：
 

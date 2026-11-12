@@ -19,6 +19,8 @@ interface Props {
   disabled?: boolean;
   style?: CSSProperties;
   prefix?: ReactNode;
+  /** onScan 完成后是否回焦到扫码框（默认 true；若 onScan 期间焦点已被移到其他输入框，则不抢回） */
+  refocus?: boolean;
 }
 
 const isEditable = (el: Element | null) =>
@@ -31,7 +33,7 @@ const isEditable = (el: Element | null) =>
  * - captureGlobal：焦点不在任何输入框时，快速连续的按键（扫码枪）会被转入本框。
  */
 const ScanInput = forwardRef<ScanInputHandle, Props>(function ScanInput(
-  { onScan, placeholder = '扫描或输入条码后回车', autoFocus = true, captureGlobal = false, size = 'large', disabled, style, prefix },
+  { onScan, placeholder = '扫描或输入条码后回车', autoFocus = true, captureGlobal = false, size = 'large', disabled, style, prefix, refocus = true },
   ref,
 ) {
   const [value, setValue] = useState('');
@@ -50,7 +52,12 @@ const ScanInput = forwardRef<ScanInputHandle, Props>(function ScanInput(
     } finally {
       setBusy(false);
       setValue('');
-      setTimeout(() => inputRef.current?.focus(), 0);
+      setTimeout(() => {
+        const el = inputRef.current?.input;
+        const active = document.activeElement;
+        // 业务代码已把焦点移到别的输入框（如扫码后跳到第一个测量框）时不抢回
+        if (refocus && (!isEditable(active) || active === el)) inputRef.current?.focus();
+      }, 0);
     }
   };
 

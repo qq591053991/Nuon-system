@@ -177,45 +177,4 @@ export class TraceService {
       summary: { work_orders: workOrders.length, serials: serials.length, shipped: serials.filter((s) => s.shipment_no).length, customers: customers.size },
     };
   }
-
-  /** 全局搜索：单号、序列号、批号、物料编码/名称一框搞定。 */
-  async globalSearch(tx: Tx, qRaw: string | null | undefined, limit = 8) {
-    const q = (qRaw || '').trim();
-    if (!q) return [];
-    const lk = like(q);
-    const take = limit;
-    const orderBy = { id: 'asc' as const };
-    const out: Record<string, any>[] = [];
-    for (const m of await tx.material.findMany({ where: { OR: [{ code: lk }, { name: lk }] }, take, orderBy })) {
-      out.push({ type: 'material', type_text: '物料', id: m.id, title: `${m.code} ${m.name}`, sub: m.spec });
-    }
-    for (const s of await tx.serialNumber.findMany({ where: { sn: lk }, take, orderBy, include: { material: true } })) {
-      out.push({ type: 'serial', type_text: '序列号', id: s.id, title: s.sn, sub: `${s.material?.name ?? ''} · ${s.status}` });
-    }
-    for (const w of await tx.workOrder.findMany({ where: { OR: [{ no: lk }, { lot_no: lk }] }, take, orderBy, include: { material: true } })) {
-      out.push({ type: 'work_order', type_text: '生产工单', id: w.id, title: w.no, sub: `${w.material?.name ?? ''} 批号 ${w.lot_no || '-'}` });
-    }
-    for (const o of await tx.salesOrder.findMany({ where: { OR: [{ no: lk }, { customer_po: lk }] }, take, orderBy, include: { customer: true } })) {
-      out.push({ type: 'sales_order', type_text: '销售订单', id: o.id, title: o.no, sub: o.customer?.name ?? null });
-    }
-    for (const o of await tx.purchaseOrder.findMany({ where: { no: lk }, take, orderBy, include: { supplier: true } })) {
-      out.push({ type: 'purchase_order', type_text: '采购订单', id: o.id, title: o.no, sub: o.supplier?.name ?? null });
-    }
-    for (const n of await tx.ncr.findMany({ where: { no: lk }, take, orderBy })) {
-      out.push({ type: 'ncr', type_text: '不合格品', id: n.id, title: n.no, sub: (n.description || '').slice(0, 40) });
-    }
-    for (const i of await tx.inspection.findMany({ where: { no: lk }, take, orderBy, include: { material: true } })) {
-      out.push({ type: 'inspection', type_text: '检验单', id: i.id, title: i.no, sub: i.material?.name ?? null });
-    }
-    for (const sh of await tx.shipment.findMany({ where: { no: lk }, take, orderBy, include: { customer: true } })) {
-      out.push({ type: 'shipment', type_text: '发货单', id: sh.id, title: sh.no, sub: sh.customer?.name ?? null });
-    }
-    const lots = await tx.$queryRaw<{ lot_no: string; code: string; name: string }[]>`
-      SELECT DISTINCT s.lot_no, m.code, m.name FROM wms_stock s JOIN md_material m ON m.id = s.material_id
-      WHERE s.lot_no ILIKE ${`%${q}%`} ORDER BY s.lot_no, m.code LIMIT ${take}`;
-    for (const r of lots) {
-      out.push({ type: 'lot', type_text: '批次', id: null, title: r.lot_no, sub: `${r.code} ${r.name}`, material_code: r.code });
-    }
-    return out;
-  }
 }

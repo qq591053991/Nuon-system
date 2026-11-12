@@ -77,6 +77,8 @@ export class AuthController {
       demo_password: demo ? DEMO_PASSWORD : null,
       kingdee_enabled: config.kingdee.enabled,
       kingdee_name: '金蝶云星空',
+      /** 本公司信息（单据打印抬头） */
+      company: config.company,
       idle_minutes: config.idleTimeoutMinutes,
       password_policy: {
         min_length: config.passwordMinLength,

@@ -278,6 +278,9 @@ function FgReceiptModal({ wo, open, onClose, onDone }: { wo: Rec; open: boolean;
         <Form.Item name="location_id" label="入库库位（默认成品仓）" rules={[{ required: true, message: '请选择库位' }]}>
           <LocationSelect />
         </Form.Item>
+        {wo.serial_control && (
+          <Alert type="success" showIcon style={{ marginBottom: 12 }} message={<>需要逐台扫码核对？<Link to={`/wms/pda/fg?wo=${wo.id}`}>打开扫码完工入库</Link>（PDA 可用）</>} />
+        )}
         <Form.Item name="qty" label="入库数量" extra={wo.serial_control ? '留空 = 全部已完成全部工序的序列号入库' : '留空 = 全部可入库数量'}>
           <InputNumber min={1} max={avail} precision={wo.serial_control ? 0 : 4} style={{ width: 200 }} placeholder={`全部 ${num(avail)}`} />
         </Form.Item>
@@ -549,6 +552,9 @@ export default function WorkOrderDetail() {
         <Tooltip title={needIssue ? (draftIssue ? '已有待过账的领料单，系统只会为剩余需求分配批次' : '') : '物料已按 BOM 领齐'}>
           <Button type={primary === 'issue' ? 'primary' : 'default'} icon={<ExportOutlined />} loading={busy} disabled={!needIssue} onClick={createIssue}>生成领料单</Button>
         </Tooltip>
+      )}
+      {active && draftIssue && can('wms', 'plan') && (
+        <Button onClick={() => nav(`/wms/issues?wo_id=${wo.id}&status=DRAFT`)}>待过账领料单</Button>
       )}
       {active && wo.serial_control && can('mes') && (
         <Button type={primary === 'report' ? 'primary' : 'default'} icon={<ScanOutlined />} onClick={() => nav('/mes/station')}>去工位扫码报工</Button>
