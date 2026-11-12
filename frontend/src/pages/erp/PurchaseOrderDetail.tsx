@@ -579,7 +579,7 @@ function ChangeModal({ po, open, onClose, onDone }: { po: Rec; open: boolean; on
     try {
       const d = await post(`/purchase-orders/${po.id}/change`, b);
       Modal.success({
-        title: '采购订单已变更',
+        title: d.change.reapproval ? '采购订单已变更，已提交厂长重新审批' : '采购订单已变更',
         content: (
           <div>
             <div>原因：{d.change.reason}</div>

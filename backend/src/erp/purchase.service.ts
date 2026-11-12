@@ -457,7 +457,24 @@ export class PurchaseService {
       const got = lines.some((l) => (l.received_qty || 0) > 0);
       const done = lines.every((l) => (l.received_qty || 0) + EPS >= l.qty);
       poData.status = done ? 'RECEIVED' : got ? 'PARTIAL_RECEIVED' : 'APPROVED';
-      if (poData.status !== po.status) diffs.push(`状态 ${po.status} → ${poData.status}`);
+      // 变更使金额达到/超过大额标准且金额增加：须厂长重新审批（防止先自批小额单再改大，或厂长批准后被加价）
+      const before = await this.bigness(tx, po);
+      const after = await this.bigness(tx, { total_amount: total.value, currency: po.currency });
+      const raised = dec(total.value).greaterThan(dec(po.total_amount));
+      let reapproval = false;
+      if (after.big && raised && !userPermissions(user).has('po_big_approve')) {
+        if (got) {
+          throw new BizError(
+            `变更后${this.bigText(after, po.currency)}，且订单已部分到货，不能退回重新审批：请由厂长执行本次变更（变更前金额 ${money(before.base_amount ?? 0).toLocaleString('zh-CN')}）`,
+          );
+        }
+        reapproval = true;
+        poData.status = 'SUBMITTED';
+        poData.approved_by = null;
+        poData.approved_at = null;
+        diffs.push(`变更后${this.bigText(after, po.currency)}，已提交厂长重新审批（批准前不能收货）`);
+      }
+      if (poData.status !== po.status && !reapproval) diffs.push(`状态 ${po.status} → ${poData.status}`);
       await tx.purchaseOrder.update({ where: { id }, data: poData });
       await tx.auditLog.create({
         data: {
@@ -466,7 +483,7 @@ export class PurchaseService {
         },
       });
       const row = await tx.purchaseOrder.findUnique({ where: { id }, include: inc('PurchaseOrder', CH) });
-      return { ...fixPo(ser('PurchaseOrder', row, CH)), change: { reason, items: diffs } };
+      return { ...fixPo(ser('PurchaseOrder', row, CH)), change: { reason, items: diffs, reapproval } };
     });
   }
 

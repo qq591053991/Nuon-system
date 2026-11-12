@@ -67,6 +67,10 @@ export class AuthGuard implements CanActivate {
     if (mustChangePassword(row, payload.amr) && !this.reflector.getAllAndOverride<boolean>(EXPIRED_PWD_KEY, targets)) {
       throw new HttpException({ detail: mustChangeMessage(row) }, 403);
     }
+    // 管理员设置/重置的工位 PIN（管理员知道）：工牌会话在本人重设 PIN 前只能查看本人信息与改 PIN，不能报工
+    if (payload.amr === 'badge' && (row as any).must_change_pin && !this.reflector.getAllAndOverride<boolean>(EXPIRED_PWD_KEY, targets)) {
+      throw new HttpException({ detail: '您的工位 PIN 由管理员设置，须先设置本人的新 PIN 后才能作业' }, 403);
+    }
     if (!user.roles && !this.reflector.getAllAndOverride<boolean>(NO_ROLE_KEY, targets)) {
       throw new HttpException({ detail: '您的账号尚未分配角色，请联系系统管理员开通权限' }, 403);
     }
