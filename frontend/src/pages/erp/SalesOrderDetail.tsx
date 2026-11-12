@@ -739,6 +739,7 @@ function SoView({ so, reload, onChange }: { so: Rec; reload: () => Promise<unkno
   const [kitLoading, setKitLoading] = useState(false);
   const [customer, setCustomer] = useState<Rec | null>(null);
   const [histKey, setHistKey] = useState(0);
+  const [sp] = useSearchParams();
   const st: string = so.status;
   const active = ACTIVE.includes(st);
   const wos: Rec[] = so.work_orders || [];
@@ -763,6 +764,13 @@ function SoView({ so, reload, onChange }: { so: Rec; reload: () => Promise<unkno
   useEffect(() => {
     loadKit();
   }, [loadKit, so]);
+  // 工作台“交付风险”点缺料跳转：?tab=kitting 直接定位到齐套分析
+  const jumped = useRef(false);
+  useEffect(() => {
+    if (sp.get('tab') !== 'kitting' || !kit || jumped.current) return;
+    jumped.current = true;
+    setTimeout(() => document.getElementById('so-kitting')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
+  }, [sp, kit]);
   useEffect(() => {
     get(`/customers/${so.customer_id}`, undefined, true).then(setCustomer).catch(() => undefined);
   }, [so.customer_id]);
@@ -869,6 +877,7 @@ function SoView({ so, reload, onChange }: { so: Rec; reload: () => Promise<unkno
 
   return (
     <>
+      <div className="no-print">
       <PageHeader
         title={<Space>销售订单 {so.no}<StatusTag dict="so_status" value={st} /></Space>}
         sub={`${so.customer_name ?? ''}${so.customer_po ? ` · 客户PO ${so.customer_po}` : ''}`}
@@ -903,6 +912,7 @@ function SoView({ so, reload, onChange }: { so: Rec; reload: () => Promise<unkno
           </>
         }
       />
+      </div>
       <div className="no-print">
         <Space direction="vertical" size={16} style={{ width: '100%' }}>
           <Card size="small"><SoSteps so={so} /></Card>
@@ -931,6 +941,7 @@ function SoView({ so, reload, onChange }: { so: Rec; reload: () => Promise<unkno
           </Card>
           {active && (
             <Card
+              id="so-kitting"
               size="small"
               title={
                 <Space>

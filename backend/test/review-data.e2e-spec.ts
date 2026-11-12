@@ -115,7 +115,7 @@ describe('P0-3 汇率与多币别', () => {
       currency: 'EUR', base_currency: 'CNY', amount: 7700, rate: 7.7, effective_date: d(-1), missing: false,
     });
     expect((await convertToBase(db.client, 1000, 'USD', addDays(today(), -30))).missing).toBe(true);
-    const cur = await api.ok('get', '/api/finance/currencies');
+    const cur = await api.as('finance').ok('get', '/api/finance/currencies'); // G4：财务数据 GET 需 finance 权限
     expect(cur.base_currency).toBe('CNY');
     expect(cur.rates).toEqual([{ currency: 'EUR', rate: 7.7, effective_date: d(-1) }, { currency: 'USD', rate: 7.1, effective_date: d(-5) }]);
   });
@@ -157,7 +157,7 @@ describe('P0-3 汇率与多币别', () => {
     await doc('AR-T3', { doc_type: 'AR', customer_id: c2.id, currency: 'CNY', amount: 500, paid_amount: 100.3, status: 'PARTIAL' });
     await doc('AR-T4', { doc_type: 'AR', customer_id: c2.id, currency: 'JPY', amount: 10000 });
     await doc('AP-T1', { doc_type: 'AP', supplier_id: s1.id, currency: 'CNY', amount: 0.3 });
-    const sum = await api.ok('get', '/api/finance/summary');
+    const sum = await api.as('finance').ok('get', '/api/finance/summary'); // G4：财务数据 GET 需 finance 权限
     expect(sum.base_currency).toBe('CNY');
     const row = (partner: string, currency: string) => sum.AR.find((r: any) => r.partner === partner && r.currency === currency);
     expect(sum.AR).toHaveLength(4);
@@ -193,7 +193,7 @@ describe('P0-8 金额十进制精确', () => {
     await api.as('wh').ok('post', `/api/purchase-orders/${p.id}/receive`, {
       lines: p.lines.map((l: any) => ({ po_line_id: l.id, qty: l.qty, location_id: ref.loc['RAW-A02'] })),
     });
-    const ap = (await api.ok('get', '/api/finance/docs', { doc_type: 'AP' })).items[0];
+    const ap = (await api.as('finance').ok('get', '/api/finance/docs', { doc_type: 'AP' })).items[0]; // G4：需 finance 权限
     expect(ap.amount).toBe(3.32);
     for (const amt of [0.1, 0.1, 0.1]) await api.as('finance').ok('post', `/api/finance/docs/${ap.id}/payments`, { amount: amt });
     let doc = await api.as('finance').ok('post', `/api/finance/docs/${ap.id}/payments`, { amount: 3.02 });
@@ -202,7 +202,7 @@ describe('P0-8 金额十进制精确', () => {
     const ap2 = await t.db.base.financeDoc.create({ data: { no: 'AP-T9', doc_type: 'AP', supplier_id: sup.id, doc_date: today(), amount: 0.3 } });
     doc = await api.as('finance').ok('post', `/api/finance/docs/${ap2.id}/payments`, { amount: 0.104 });
     expect([doc.paid_amount, doc.payments[0].amount, doc.status]).toEqual([0.1, 0.1, 'PARTIAL']);
-    expect((await api.as('finance').post(`/api/finance/docs/${ap2.id}/payments`, { amount: 0.21 })).body.detail).toBe('金额超过未结余额 0.20');
+    expect((await api.as('finance').post(`/api/finance/docs/${ap2.id}/payments`, { amount: 0.21 })).body.detail).toBe('金额超过未结余额 0.20（超出 0.01）。如供应商多付，请选择“超出部分转预付款”'); // G4：超额提示转预付
   });
 
   test('销售发货应收：多行 0.1 累加精确到分；同一订单行分批次发货先合并再计价（与订单行金额一致）', async () => {
@@ -224,7 +224,7 @@ describe('P0-8 金额十进制精确', () => {
     await api.as('wh').ok('post', `/api/shipments/${sh.id}/confirm`);
     sh = await api.as('wh').ok('post', '/api/shipments', { so_id: so.id, lines: so.lines.slice(0, 3).map((l: any) => ({ so_line_id: l.id, qty: 1 })) });
     await api.as('wh').ok('post', `/api/shipments/${sh.id}/confirm`);
-    const ar = (await api.ok('get', '/api/finance/docs', { doc_type: 'AR' })).items.map((x: any) => x.amount).sort();
+    const ar = (await api.as('finance').ok('get', '/api/finance/docs', { doc_type: 'AR' })).items.map((x: any) => x.amount).sort(); // G4：需 finance 权限
     expect(ar).toEqual([0.3, 3.01]); // 按批次分别取整会得 1.00 + 2.00 = 3.00；合并计价 3 × 1.002 = 3.006 → 3.01（= 订单行金额）；三行 0.1 → 0.3
     const docs = await db.base.financeDoc.findMany({ where: { doc_type: 'AR' } });
     expect(docs.map((x) => x.amount.toString()).sort()).toEqual(['0.3', '3.01']);
@@ -270,9 +270,9 @@ describe('P1-3 采购单位换算', () => {
     await api.as('buyer').ok('post', `/api/purchase-orders/${p.id}/approve`);
     await api.as('wh').ok('post', `/api/purchase-orders/${p.id}/receive`, { lines: [{ po_line_id: l1.id, qty: 3000, location_id: ref.loc['DRY-01'] }] });
     await api.as('wh').ok('post', `/api/purchase-orders/${p.id}/receive`, { lines: [{ po_line_id: l1.id, qty: 27000, location_id: ref.loc['DRY-01'] }] });
-    const aps = (await api.ok('get', '/api/finance/docs', { doc_type: 'AP' })).items.map((x: any) => x.amount).sort((a: number, b: number) => a - b);
+    const aps = (await api.as('finance').ok('get', '/api/finance/docs', { doc_type: 'AP' })).items.map((x: any) => x.amount).sort((a: number, b: number) => a - b);
     expect(aps).toEqual([100, 900]);
-    const po = await api.ok('get', `/api/purchase-orders/${p.id}`);
+    const po = await api.as('buyer').ok('get', `/api/purchase-orders/${p.id}`); // G4：采购单 GET 需读权限
     expect(po.lines[0].received_qty).toBe(30000);
   });
 
@@ -290,7 +290,7 @@ describe('P1-3 采购单位换算', () => {
       expect(s.suggested_qty - s.net_qty).toBeLessThan(4000);
     }
     const res = await api.as('pmc').ok('post', '/api/mrp/convert', { suggestion_ids: leds.map((s: any) => s.id) });
-    const p = await api.find('/api/purchase-orders', { q: res.purchase_orders[0] });
+    const p = await api.as('pmc').find('/api/purchase-orders', { q: res.purchase_orders[0] }); // G4：采购单 GET 需读权限
     expect(p.lines).toHaveLength(leds.length);
     const l = p.lines[0];
     expect([l.qty, l.purchase_uom, l.purchase_qty, l.purchase_price, l.unit_price]).toEqual([leds[0].suggested_qty, '卷', leds[0].suggested_qty / 4000, 1400, 0.35]);

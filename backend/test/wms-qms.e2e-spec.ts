@@ -37,8 +37,8 @@ describe('仓储与质量', () => {
     });
     expect(rc.lines[0].status).toBe('QUARANTINE');
     expect(rc.lines[0].inspection_id).toBeTruthy();
-    expect((await api.ok('get', `/api/purchase-orders/${o.id}`)).status).toBe('RECEIVED');
-    const ap = (await api.ok('get', '/api/finance/docs', { doc_type: 'AP' })).items[0];
+    expect((await api.as('buyer').ok('get', `/api/purchase-orders/${o.id}`)).status).toBe('RECEIVED'); // G4：采购单 GET 需读权限
+    const ap = (await api.as('finance').ok('get', '/api/finance/docs', { doc_type: 'AP' })).items[0]; // G4：需 finance 权限
     expect(ap.amount).toBe(420.0);
 
     const insp = await api.find('/api/inspections', { q: 'NEW-850' });
@@ -343,7 +343,7 @@ describe('仓储与质量', () => {
     expect((await stockOf(api, 'B-T-SH'))[0].qty).toBe(1);
     const so2 = await api.as('sales').ok('get', `/api/sales-orders/${so.id}`);
     expect([so2.status, so2.lines[0].shipped_qty]).toEqual(['PARTIAL_SHIPPED', 2]);
-    const ar = (await api.ok('get', '/api/finance/docs', { doc_type: 'AR' })).items[0];
+    const ar = (await api.as('finance').ok('get', '/api/finance/docs', { doc_type: 'AR' })).items[0]; // G4：需 finance 权限
     expect([ar.amount, ar.ref_no, ar.customer_id, ar.currency, ar.partner_name]).toEqual([176, sh.no, so.customer_id, 'USD', 'Lumina Health Inc.']);
     expect(ar.due_date).toBe(addDays(today(), 60).toISOString().slice(0, 10));
     expect((await api.as('wh').post(`/api/shipments/${sh.id}/confirm`)).body.detail).toBe('发货单已过账或已取消');

@@ -387,7 +387,7 @@ export class FinanceService {
         await tx.payment.create({
           data: {
             doc_id: a.doc.id, pay_date: payDate, amount: a.amount, exchange_rate: rate, base_amount: s.base_amount, fee_amount: f, fx_diff: s.fx_diff,
-            receipt_no: receiptNo, status: 'VALID', method: b.method ?? '银行转账', reference: b.reference ?? null, remark: b.remark ?? null, created_by: user.username,
+            receipt_no: receiptNo, status: 'VALID', method: b.method === undefined ? '银行转账' : b.method, reference: b.reference ?? null, remark: b.remark ?? null, created_by: user.username,
           },
         }),
       );

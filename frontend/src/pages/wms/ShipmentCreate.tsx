@@ -42,6 +42,7 @@ export default function ShipmentCreate({ open, initialSoId, onClose, onCreated }
   const scanRef = useRef<ScanInputHandle>(null);
   const seq = useRef(0);
   const [modal, holder] = Modal.useModal();
+  const soBox = useRef<HTMLDivElement>(null);
 
   const loadSo = async (id?: number) => {
     const my = ++seq.current;
@@ -208,11 +209,14 @@ export default function ShipmentCreate({ open, initialSoId, onClose, onCreated }
       confirmLoading={saving}
       destroyOnHidden
       maskClosable={false}
+      // 打开即聚焦“销售订单”（可直接扫订单号）
+      afterOpenChange={(o) => { if (o && !initialSoId) setTimeout(() => soBox.current?.querySelector('input')?.focus(), 60); }}
     >
       {holder}
       {!narrow && <Alert type="info" showIcon style={{ marginBottom: 16 }} message="只能发已 DHR 放行的合格成品，序列号逐台校验；支持扫描 UDI（带括号或 DataMatrix 原始串）。未扫码时系统按完工先后自动选取已放行的整机。" />}
       <Form form={form} layout="vertical">
         <Form.Item label="销售订单（可扫订单号 / 客户 PO）" required>
+          <div ref={soBox}>
           <RemoteSelect
             url="/sales-orders"
             noun="销售订单"
@@ -223,8 +227,8 @@ export default function ShipmentCreate({ open, initialSoId, onClose, onCreated }
             onChange={(v) => loadSo(v as number | undefined)}
             placeholder="扫描或输入订单号 / 客户名称（仅显示已确认未发完的订单）"
             size={narrow ? 'large' : 'middle'}
-            autoFocus={!initialSoId}
           />
+          </div>
         </Form.Item>
 
         <Spin spinning={loading}>

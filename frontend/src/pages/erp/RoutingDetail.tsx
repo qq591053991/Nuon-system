@@ -113,7 +113,7 @@ function ParamsEditor({ op, onChange, hl }: { op: OpRow; onChange: (params: Para
       ),
     },
     {
-      title: '编码', key: 'code', width: 132,
+      title: '编码', key: 'code', width: 124,
       render: (_, r) => {
         const d = dups.get(r._key);
         const bad = !r._del && (d || !String(r.code ?? '').trim());
@@ -125,25 +125,25 @@ function ParamsEditor({ op, onChange, hl }: { op: OpRow; onChange: (params: Para
         );
       },
     },
-    { title: '名称', key: 'name', width: 176, render: (_, r) => <Input disabled={r._del} status={!r._del && !String(r.name ?? '').trim() ? 'error' : undefined} placeholder="如 峰值波长" value={r.name ?? ''} onChange={(e) => patch(r._key, { name: e.target.value })} /> },
+    { title: '名称', key: 'name', width: 160, render: (_, r) => <Input disabled={r._del} status={!r._del && !String(r.name ?? '').trim() ? 'error' : undefined} placeholder="如 峰值波长" value={r.name ?? ''} onChange={(e) => patch(r._key, { name: e.target.value })} /> },
     {
       title: '类型', key: 'type', width: 120,
       render: (_, r) => <Select style={{ width: 110 }} disabled={r._del} options={PARAM_TYPES} value={r.param_type || 'NUMBER'} onChange={(v) => patch(r._key, { param_type: v })} />,
     },
     { title: '单位', key: 'unit', width: 80, render: (_, r) => <Input disabled={okng(r) || r._del} placeholder="nm" value={r.unit ?? ''} onChange={(e) => patch(r._key, { unit: e.target.value })} /> },
     {
-      title: '下限 ~ 上限', key: 'lu', width: 196,
+      title: '下限 ~ 上限', key: 'lu', width: 184,
       render: (_, r) => (
         <Space size={4}>
-          {numCell(r, 'lower', 84, { status: isNum(r.lower) && isNum(r.upper) && r.lower > r.upper ? 'error' : undefined })}~{numCell(r, 'upper', 84, { status: isNum(r.lower) && isNum(r.upper) && r.lower > r.upper ? 'error' : undefined })}
+          {numCell(r, 'lower', 80, { status: isNum(r.lower) && isNum(r.upper) && r.lower > r.upper ? 'error' : undefined })}~{numCell(r, 'upper', 80, { status: isNum(r.lower) && isNum(r.upper) && r.lower > r.upper ? 'error' : undefined })}
         </Space>
       ),
     },
     { title: '目标值', key: 'target', width: 92, render: (_, r) => numCell(r, 'target') },
     { title: <Tooltip title="工位录入时限制的小数位数，防止多打或拼接">小数位</Tooltip>, key: 'dec', width: 76, render: (_, r) => numCell(r, 'decimals', 64, { min: 0, max: 6, precision: 0 }) },
     {
-      title: <Tooltip title="超出合理范围视为录入错误（如漏打小数点），工位当场拦截、不前进，不会判不合格">合理范围</Tooltip>, key: 'valid', width: 176,
-      render: (_, r) => <Space size={4}>{numCell(r, 'min_valid', 74)}~{numCell(r, 'max_valid', 74)}</Space>,
+      title: <Tooltip title="超出合理范围视为录入错误（如漏打小数点），工位当场拦截、不前进，不会判不合格">合理范围</Tooltip>, key: 'valid', width: 164,
+      render: (_, r) => <Space size={4}>{numCell(r, 'min_valid', 70)}~{numCell(r, 'max_valid', 70)}</Space>,
     },
     {
       title: '', key: 'op', width: 84, fixed: 'right',
@@ -619,7 +619,7 @@ function RoutingBody({ routing, versions, reload }: { routing: Rec; versions: Re
       </Space>
       <Drawer
         open={!!drawerOp}
-        width="min(1240px, 96vw)"
+        width="min(1300px, 96vw)"
         title={drawerOp ? `工序 ${drawerOp.seq ?? ''} ${drawerOp.name ?? ''}（${drawerOp.code ?? '未填编码'}）` : ''}
         onClose={() => setDrawer(null)}
         destroyOnHidden

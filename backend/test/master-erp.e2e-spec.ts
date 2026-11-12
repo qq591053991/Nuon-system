@@ -177,7 +177,7 @@ describe('ERP：销售、采购、MRP、财务', () => {
     let r = await api.as('buyer').post(`/api/purchase-orders/${p.id}/approve`);
     expect(r.status).toBe(400);
     expect(r.body.detail).toContain('合格供方');
-    expect(r.body.detail).toBe('供应商【新锐光电有限公司】不在合格供方名录内（当前：PENDING），不能下单（GMP 采购控制）');
+    expect(r.body.detail).toBe('供应商【新锐光电有限公司】当前为“待评审”，不在合格供方名录内，采购订单不能审批（GMP 采购控制）。请联系质量部完成供应商评审，评为“合格供方”后再审批；急用可改选其他合格供应商。'); // G4：中文状态 + 找质量部
     // 客供料不能采购
     const sup = await api.find('/api/suppliers', { q: 'S005' });
     r = await api.as('buyer').post('/api/purchase-orders', { supplier_id: sup.id, lines: [{ material_id: ref.m['PKG-RL300-BOX'], qty: 10 }] });
@@ -214,7 +214,7 @@ describe('ERP：销售、采购、MRP、财务', () => {
     expect(res.purchase_orders).toHaveLength(1);
     expect(res.work_orders).toHaveLength(1);
     expect(res.skipped.length).toBeGreaterThan(0);
-    const p = await api.find('/api/purchase-orders', { q: res.purchase_orders[0] });
+    const p = await api.as('pmc').find('/api/purchase-orders', { q: res.purchase_orders[0] }); // G4：采购单 GET 需采购/计划等读权限
     expect([p.status, p.source]).toEqual(['DRAFT', 'MRP']);
     expect(p.lines[0].qty).toBe(led.suggested_qty);
     const again = await api.ok('get', `/api/mrp/runs/${run.id}`);
@@ -287,7 +287,7 @@ describe('ERP：销售、采购、MRP、财务', () => {
     const doc = await db.base.financeDoc.create({
       data: { no: 'AP-TEST-1', doc_type: 'AP', supplier_id: s1.id, ref_no: 'RK-1', doc_date: addDays(today(), -60), due_date: addDays(today(), -40), amount: 1000 },
     });
-    let sum = await api.ok('get', '/api/finance/summary');
+    let sum = await api.as('finance').ok('get', '/api/finance/summary'); // G4：财务数据 GET 需 finance 权限
     // 评审 P0-3：账龄按往来单位 + 币别分行，并给出本位币折算（total_base）
     expect(sum.AP).toEqual([{ partner: s1.name, currency: 'CNY', 未到期: 0, '1-30天': 0, '31-90天': 1000, '90天以上': 0, total: 1000, total_base: 1000 }]);
     expect(sum.AR).toEqual([]);
@@ -296,12 +296,12 @@ describe('ERP：销售、采购、MRP、财务', () => {
     expect([d.status, d.paid_amount, d.balance, d.partner_name]).toEqual(['PARTIAL', 300, 700, s1.name]);
     expect([d.payments[0].method, d.payments[0].pay_date]).toEqual(['银行转账', fmtDate(today())]);
     const r = await api.as('finance').post(`/api/finance/docs/${doc.id}/payments`, { amount: 800 });
-    expect(r.body.detail).toBe('金额超过未结余额 700.00');
+    expect(r.body.detail).toBe('金额超过未结余额 700.00（超出 100.00）。如供应商多付，请选择“超出部分转预付款”'); // G4：超额提示转预付
     d = await api.as('finance').ok('post', `/api/finance/docs/${doc.id}/payments`, { amount: 700, method: null, pay_date: '2026-11-01' });
     expect([d.status, d.payments.length, d.payments[1].method, d.payments[1].pay_date]).toEqual(['PAID', 2, null, '2026-11-01']);
-    sum = await api.ok('get', '/api/finance/summary');
+    sum = await api.as('finance').ok('get', '/api/finance/summary');
     expect(sum.AP).toEqual([]);
-    const list = await api.ok('get', '/api/finance/docs', { doc_type: 'AP', q: 'RK-1' });
+    const list = await api.as('finance').ok('get', '/api/finance/docs', { doc_type: 'AP', q: 'RK-1' });
     expect(list.items).toHaveLength(1);
     expect(list.items[0].payments).toHaveLength(2);
   });
@@ -318,7 +318,7 @@ describe('ERP：销售、采购、MRP、财务', () => {
     });
     expect(rc.lines[0].status).toBe('QUARANTINE');
     expect(rc.po_no).toBe(p.no);
-    const d = await api.ok('get', `/api/purchase-orders/${p.id}`);
+    const d = await api.as('buyer').ok('get', `/api/purchase-orders/${p.id}`); // G4：采购单 GET 需读权限
     expect(d.status).toBe('RECEIVED');
     expect(d.receipts).toHaveLength(1);
     expect((await api.as('buyer').post(`/api/purchase-orders/${p.id}/cancel`)).body.detail).toBe('已收货的订单不能取消，请使用“关闭”');

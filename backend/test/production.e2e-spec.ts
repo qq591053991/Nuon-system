@@ -98,6 +98,9 @@ describe('生产流程', () => {
     expect(r.status).toBe(400);
     expect(r.body.detail).toContain('签名');
     await api.as('qa').ok('post', `/api/ncrs/${ncr.id}/disposition`, { disposition: 'REWORK', remark: '更换IC', signature: SIG });
+    // QA 意见要求换件：须先登记返工换件才能重测（G5 C-F17）
+    expect((await report(api, sns[0], 20, ref)).body.detail).toContain('请先在【返工换件】中登记');
+    await api.as('op1').ok('post', '/api/mes/rework-parts', { sn: sns[0], removed: [{ material_id: ref.m['IC-DRV-CC'], remark: '击穿' }] });
     // 返工后重新测试通过，标记为返工记录
     expect((await report(api, sns[0], 20, ref)).body.result).toBe('PASS');
     const scan = await api.ok('get', `/api/mes/scan/${sns[0]}`);
@@ -165,7 +168,7 @@ describe('生产流程', () => {
     soDetail = await api.as('sales').ok('get', `/api/sales-orders/${so.id}`);
     expect(soDetail.status).toBe('PARTIAL_SHIPPED');
     expect(soDetail.lines[0].shipped_qty).toBe(2);
-    const ar = (await api.ok('get', '/api/finance/docs', { doc_type: 'AR' })).items;
+    const ar = (await api.as('finance').ok('get', '/api/finance/docs', { doc_type: 'AR' })).items; // G4：财务数据 GET 需 finance 权限
     expect(ar.length).toBeGreaterThan(0);
     expect(ar[0].amount).toBe(2 * 88.0);
 
