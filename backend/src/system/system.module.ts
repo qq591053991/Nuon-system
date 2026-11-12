@@ -2,11 +2,12 @@ import { Module } from '@nestjs/common';
 import { AuthController } from '../auth/auth.controller';
 import { config } from '../config';
 import { AuditSealService } from './audit-seal.service';
+import { ExportController } from './export.controller';
 import { SystemController } from './system.controller';
 import { TestSupportController } from './test-support.controller';
 
 @Module({
-  controllers: [AuthController, SystemController, ...(config.enableTestReset ? [TestSupportController] : [])],
+  controllers: [ExportController, AuthController, SystemController, ...(config.enableTestReset ? [TestSupportController] : [])],
   providers: [AuditSealService],
   exports: [AuditSealService],
 })

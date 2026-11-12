@@ -36,7 +36,17 @@ export function usePaged<T = Rec>(url: string, initial: Rec = {}, pageSize = 20)
     setPage(1);
   }, []);
 
+  /** 接到 antd Table 的 onChange：分页 + 列排序（列需设置 sorter: true，排序字段为 dataIndex） */
+  const onTableChange = useCallback((p: any, _f: any, sorter: any) => {
+    const s = Array.isArray(sorter) ? sorter[0] : sorter;
+    const field = s?.order ? (Array.isArray(s.field) ? s.field.join('.') : s.field ?? s.columnKey) : undefined;
+    _setQuery((old) => ({ ...old, sort: field, order: s?.order ? (s.order === 'ascend' ? 'asc' : 'desc') : undefined }));
+    if (p?.current) setPage(p.current);
+    if (p?.pageSize) setSize(p.pageSize);
+  }, []);
+
   return {
+    onTableChange,
     rows: data.items,
     total: data.total,
     loading,

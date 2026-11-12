@@ -28,8 +28,24 @@ body { margin: 0; background: var(--bg); font-family: -apple-system, BlinkMacSys
 .station-op { font-size: 28px; font-weight: 700; }
 .station-result-pass { background: #f6ffed; border: 2px solid #52c41a; }
 .station-result-fail { background: #fff1f0; border: 2px solid #ff4d4f; }
+.print-only { display: none; }
 @media print {
-  .ant-layout-sider, .app-header, .no-print { display: none !important; }
-  .app-content { padding: 0; }
-  body { background: #fff; }
+  .print-only { display: block !important; }
+  .ant-layout-sider, .app-header, .no-print, .ant-message, .ant-notification, .ant-drawer-mask, .ant-modal-mask,
+  .ant-float-btn, .ant-back-top, .ant-pagination, .ant-table-filter-trigger, .ant-table-column-sorter { display: none !important; }
+  .app-content { padding: 0 !important; }
+  body, .ant-layout, .ant-layout-content { background: #fff !important; }
+  .ant-card { box-shadow: none !important; border: none !important; }
+  .ant-card-body { padding: 4px 0 !important; }
+  .ant-table-wrapper, .ant-table, .ant-table-container, .ant-table-content, .ant-table-body { overflow: visible !important; width: 100% !important; }
+  .ant-table { font-size: 10px !important; }
+  .ant-table table { table-layout: auto !important; width: 100% !important; min-width: 0 !important; }
+  .ant-table-cell { white-space: normal !important; word-break: break-word; padding: 3px 4px !important; }
+  .ant-table-cell-fix-left, .ant-table-cell-fix-right { position: static !important; }
+  .ant-table-thead > tr > th { background: #f0f0f0 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  thead { display: table-header-group; }
+  tr, .ant-descriptions-row, .avoid-break { page-break-inside: avoid; break-inside: avoid; }
+  .page-break { break-before: page; }
+  a { color: #000 !important; text-decoration: none !important; }
 }
+

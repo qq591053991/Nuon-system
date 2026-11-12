@@ -14,25 +14,26 @@ datasource db {
 // ============================ 系统 ============================
 
 model User {
-  id                  Int       @id @default(autoincrement())
-  username            String    @unique @db.VarChar(64)
-  full_name           String    @db.VarChar(64)
-  password_hash       String    @db.VarChar(128)
-  roles               String    @default("") @db.VarChar(256) // 逗号分隔
-  department          String?   @db.VarChar(64)
-  email               String?   @db.VarChar(128)
-  is_active           Boolean   @default(true)
-  auth_source         String    @default("LOCAL") @db.VarChar(16) // LOCAL=本系统密码；KINGDEE=金蝶云星空账号密码校验（本系统不保存其密码）
-  external_id         String?   @db.VarChar(64) // 金蝶用户 ID
-  last_login_at       DateTime?
-  badge_no            String?   @unique @db.VarChar(64) // 工牌号（工位终端刷卡切换操作员）
-  pin_hash            String?   @db.VarChar(128) // 工位 PIN（bcrypt）
-  password_changed_at DateTime?
-  failed_login_count  Int       @default(0)
-  locked_until        DateTime?
-  created_at          DateTime  @default(now())
-  updated_at          DateTime  @default(now()) @updatedAt
-  created_by          String?   @db.VarChar(64)
+  id                   Int       @id @default(autoincrement())
+  username             String    @unique @db.VarChar(64)
+  full_name            String    @db.VarChar(64)
+  password_hash        String    @db.VarChar(128)
+  roles                String    @default("") @db.VarChar(256) // 逗号分隔
+  department           String?   @db.VarChar(64)
+  email                String?   @db.VarChar(128)
+  is_active            Boolean   @default(true)
+  auth_source          String    @default("LOCAL") @db.VarChar(16) // LOCAL=本系统密码；KINGDEE=金蝶云星空账号密码校验（本系统不保存其密码）
+  external_id          String?   @db.VarChar(64) // 金蝶用户 ID
+  last_login_at        DateTime?
+  badge_no             String?   @unique @db.VarChar(64) // 工牌号（工位终端刷卡切换操作员）
+  pin_hash             String?   @db.VarChar(128) // 工位 PIN（bcrypt）
+  password_changed_at  DateTime?
+  failed_login_count   Int       @default(0)
+  must_change_password Boolean   @default(false) // 管理员新建/重置的密码，本人首次登录须修改
+  locked_until         DateTime?
+  created_at           DateTime  @default(now())
+  updated_at           DateTime  @default(now()) @updatedAt
+  created_by           String?   @db.VarChar(64)
 
   qualifications Qualification[]
 
@@ -186,6 +187,7 @@ model Material {
   sn_prefix           String?  @db.VarChar(16)
   purchase_uom        String?  @db.VarChar(16) // 采购单位（如 卷/REEL）
   purchase_factor     Float    @default(1) // 1 采购单位 = N 库存单位
+  default_location_id Int? // 默认收货库位（如湿敏 LED → 防潮柜）
   is_active           Boolean  @default(true)
   remark              String?  @db.Text
   created_at          DateTime @default(now())
@@ -338,9 +340,14 @@ model RoutingParam {
   lower        Float?
   upper        Float?
   target       Float?
+  param_type   String  @default("NUMBER") @db.VarChar(8) // NUMBER=数值 / OKNG=合格判定
+  decimals     Int? // 小数位数（工位录入校验）
+  min_valid    Float? // 合理范围下限（超出视为录入错误，直接拦截）
+  max_valid    Float? // 合理范围上限
 
   operation RoutingOperation @relation(fields: [operation_id], references: [id], onDelete: Cascade)
 
+  @@unique([operation_id, code])
   @@index([operation_id])
   @@map("eng_routing_param")
 }
@@ -359,6 +366,7 @@ model Equipment {
   calibration_cycle_days Int?
   last_calibration_date  DateTime? @db.Date
   next_calibration_date  DateTime? @db.Date
+  op_types               String?   @db.VarChar(128) // 适用工序类型，逗号分隔（如 TEST_OPTICAL）；为空=不限
   remark                 String?   @db.Text
   created_at             DateTime  @default(now())
   updated_at             DateTime  @default(now()) @updatedAt
@@ -519,6 +527,7 @@ model PurchaseOrderLine {
   purchase_uom   String?   @db.VarChar(16) // 下单时的采购单位
   purchase_qty   Float? // 采购单位数量（qty = purchase_qty × 换算率，为库存单位）
   purchase_price Decimal?  @db.Decimal(18, 6) // 采购单位单价
+  promised_date  DateTime? @db.Date // 供应商回复交期
 
   order         PurchaseOrder @relation(fields: [order_id], references: [id], onDelete: Cascade)
   material      Material      @relation(fields: [material_id], references: [id])
@@ -563,6 +572,8 @@ model MrpSuggestion {
   remark           String?   @db.VarChar(256)
   required_date    DateTime? @db.Date // 需求日期（分时段 MRP）
   week             String?   @db.VarChar(10) // ISO 周次，如 2026-W46
+  demand_refs      String?   @db.Text // 需求来源（JSON：[{type:'SO'|'WO', id, no, line_id, qty, date}]）
+  exception        String?   @db.VarChar(16) // 例外：EXPEDITE=已有后续在途/在制，建议提前催交而非新增
 
   run      MrpRun    @relation(fields: [run_id], references: [id], onDelete: Cascade)
   material Material  @relation(fields: [material_id], references: [id])
@@ -575,23 +586,25 @@ model MrpSuggestion {
 
 /// 应收(AR) / 应付(AP)
 model FinanceDoc {
-  id          Int       @id @default(autoincrement())
-  no          String    @unique @db.VarChar(32)
-  doc_type    String    @db.VarChar(4)
-  customer_id Int?
-  supplier_id Int?
-  ref_type    String?   @db.VarChar(32)
-  ref_no      String?   @db.VarChar(32)
-  doc_date    DateTime  @db.Date
-  due_date    DateTime? @db.Date
-  currency    String    @default("CNY") @db.VarChar(8)
-  amount      Decimal   @default(0) @db.Decimal(18, 2)
-  paid_amount Decimal   @default(0) @db.Decimal(18, 2)
-  status      String    @default("OPEN") @db.VarChar(16) // OPEN/PARTIAL/PAID
-  remark      String?   @db.Text
-  created_at  DateTime  @default(now())
-  updated_at  DateTime  @default(now()) @updatedAt
-  created_by  String?   @db.VarChar(64)
+  id            Int       @id @default(autoincrement())
+  no            String    @unique @db.VarChar(32)
+  doc_type      String    @db.VarChar(4)
+  customer_id   Int?
+  supplier_id   Int?
+  ref_type      String?   @db.VarChar(32)
+  ref_no        String?   @db.VarChar(32)
+  doc_date      DateTime  @db.Date
+  due_date      DateTime? @db.Date
+  currency      String    @default("CNY") @db.VarChar(8)
+  amount        Decimal   @default(0) @db.Decimal(18, 2)
+  paid_amount   Decimal   @default(0) @db.Decimal(18, 2)
+  exchange_rate Decimal?  @db.Decimal(18, 6) // 记账汇率（1 原币 = ? 本位币）
+  base_amount   Decimal?  @db.Decimal(18, 2) // 本位币金额（按记账汇率）
+  status        String    @default("OPEN") @db.VarChar(16) // OPEN/PARTIAL/PAID
+  remark        String?   @db.Text
+  created_at    DateTime  @default(now())
+  updated_at    DateTime  @default(now()) @updatedAt
+  created_by    String?   @db.VarChar(64)
 
   customer Customer? @relation(fields: [customer_id], references: [id])
   supplier Supplier? @relation(fields: [supplier_id], references: [id])
@@ -601,16 +614,25 @@ model FinanceDoc {
 }
 
 model Payment {
-  id         Int      @id @default(autoincrement())
-  doc_id     Int
-  pay_date   DateTime @db.Date
-  amount     Decimal  @db.Decimal(18, 2)
-  method     String?  @db.VarChar(32)
-  reference  String?  @db.VarChar(64)
-  remark     String?  @db.VarChar(256)
-  created_at DateTime @default(now())
-  updated_at DateTime @default(now()) @updatedAt
-  created_by String?  @db.VarChar(64)
+  id            Int       @id @default(autoincrement())
+  doc_id        Int
+  pay_date      DateTime  @db.Date
+  amount        Decimal   @db.Decimal(18, 2)
+  exchange_rate Decimal?  @db.Decimal(18, 6) // 实收/实付汇率
+  base_amount   Decimal?  @db.Decimal(18, 2) // 本位币实收/实付
+  fee_amount    Decimal   @default(0) @db.Decimal(18, 2) // 银行手续费（原币）
+  fx_diff       Decimal   @default(0) @db.Decimal(18, 2) // 汇兑差异（本位币）
+  receipt_no    String?   @db.VarChar(32) // 合并收付款单号（一笔款核销多张单据）
+  status        String    @default("VALID") @db.VarChar(8) // VALID / VOID
+  void_reason   String?   @db.VarChar(256)
+  voided_by     String?   @db.VarChar(64)
+  voided_at     DateTime?
+  method        String?   @db.VarChar(32)
+  reference     String?   @db.VarChar(64)
+  remark        String?   @db.VarChar(256)
+  created_at    DateTime  @default(now())
+  updated_at    DateTime  @default(now()) @updatedAt
+  created_by    String?   @db.VarChar(64)
 
   doc FinanceDoc @relation(fields: [doc_id], references: [id], onDelete: Cascade)
 
@@ -732,17 +754,20 @@ model ReceiptLine {
 
 /// 生产领料单（FEFO 推荐批次，过账后批次与工单绑定）
 model MaterialIssue {
-  id           Int       @id @default(autoincrement())
-  no           String    @unique @db.VarChar(32)
-  wo_id        Int
-  issue_type   String    @default("ISSUE") @db.VarChar(16) // ISSUE=领料 / RETURN=退料
-  status       String    @default("DRAFT") @db.VarChar(16) // DRAFT/CONFIRMED/CANCELLED
-  confirmed_by String?   @db.VarChar(64)
-  confirmed_at DateTime?
-  remark       String?   @db.Text
-  created_at   DateTime  @default(now())
-  updated_at   DateTime  @default(now()) @updatedAt
-  created_by   String?   @db.VarChar(64)
+  id             Int       @id @default(autoincrement())
+  no             String    @unique @db.VarChar(32)
+  wo_id          Int
+  issue_type     String    @default("ISSUE") @db.VarChar(16) // ISSUE=领料 / RETURN=退料
+  status         String    @default("DRAFT") @db.VarChar(16) // DRAFT/CONFIRMED/CANCELLED
+  confirmed_by   String?   @db.VarChar(64)
+  confirmed_at   DateTime?
+  remark         String?   @db.Text
+  reversed_by    String?   @db.VarChar(64) // 冲销人（冲销生成反向库存流水）
+  reversed_at    DateTime?
+  reverse_reason String?   @db.VarChar(256)
+  created_at     DateTime  @default(now())
+  updated_at     DateTime  @default(now()) @updatedAt
+  created_by     String?   @db.VarChar(64)
 
   work_order WorkOrder           @relation(fields: [wo_id], references: [id])
   lines      MaterialIssueLine[]
@@ -759,6 +784,7 @@ model MaterialIssueLine {
   location_id       Int
   owner_customer_id Int?
   qty               Float
+  picked_qty        Float? // 实拣数量（拣料扫码确认；为空=未拣）
   expiry_date       DateTime? @db.Date
 
   issue    MaterialIssue @relation(fields: [issue_id], references: [id], onDelete: Cascade)
@@ -771,20 +797,23 @@ model MaterialIssueLine {
 }
 
 model Shipment {
-  id          Int       @id @default(autoincrement())
-  no          String    @unique @db.VarChar(32)
-  so_id       Int?
-  customer_id Int
-  status      String    @default("DRAFT") @db.VarChar(16) // DRAFT/SHIPPED/CANCELLED
-  ship_date   DateTime? @db.Date
-  carrier     String?   @db.VarChar(64)
-  tracking_no String?   @db.VarChar(64)
-  ship_to     String?   @db.VarChar(256)
-  shipped_by  String?   @db.VarChar(64)
-  remark      String?   @db.Text
-  created_at  DateTime  @default(now())
-  updated_at  DateTime  @default(now()) @updatedAt
-  created_by  String?   @db.VarChar(64)
+  id             Int       @id @default(autoincrement())
+  no             String    @unique @db.VarChar(32)
+  so_id          Int?
+  customer_id    Int
+  status         String    @default("DRAFT") @db.VarChar(16) // DRAFT/SHIPPED/CANCELLED
+  ship_date      DateTime? @db.Date
+  carrier        String?   @db.VarChar(64)
+  tracking_no    String?   @db.VarChar(64)
+  ship_to        String?   @db.VarChar(256)
+  shipped_by     String?   @db.VarChar(64)
+  reversed_by    String?   @db.VarChar(64) // 冲销人（冲销生成反向库存流水）
+  reversed_at    DateTime?
+  reverse_reason String?   @db.VarChar(256)
+  remark         String?   @db.Text
+  created_at     DateTime  @default(now())
+  updated_at     DateTime  @default(now()) @updatedAt
+  created_by     String?   @db.VarChar(64)
 
   sales_order SalesOrder?    @relation(fields: [so_id], references: [id])
   customer    Customer       @relation(fields: [customer_id], references: [id])
@@ -815,16 +844,21 @@ model ShipmentLine {
 }
 
 model StockCount {
-  id           Int       @id @default(autoincrement())
-  no           String    @unique @db.VarChar(32)
-  warehouse_id Int
-  status       String    @default("OPEN") @db.VarChar(16) // OPEN/POSTED/CANCELLED
-  posted_by    String?   @db.VarChar(64)
-  posted_at    DateTime?
-  remark       String?   @db.Text
-  created_at   DateTime  @default(now())
-  updated_at   DateTime  @default(now()) @updatedAt
-  created_by   String?   @db.VarChar(64)
+  id             Int       @id @default(autoincrement())
+  no             String    @unique @db.VarChar(32)
+  warehouse_id   Int
+  location_ids   String?   @db.VarChar(512) // 盘点范围（库位 ID，逗号分隔；为空=整仓）
+  blind          Boolean   @default(false) // 盲盘：录入时不显示账面数
+  status         String    @default("OPEN") @db.VarChar(16) // OPEN/POSTED/CANCELLED
+  posted_by      String?   @db.VarChar(64)
+  posted_at      DateTime?
+  reversed_by    String?   @db.VarChar(64) // 冲销人（冲销生成反向库存流水）
+  reversed_at    DateTime?
+  reverse_reason String?   @db.VarChar(256)
+  remark         String?   @db.Text
+  created_at     DateTime  @default(now())
+  updated_at     DateTime  @default(now()) @updatedAt
+  created_by     String?   @db.VarChar(64)
 
   warehouse Warehouse        @relation(fields: [warehouse_id], references: [id])
   lines     StockCountLine[]
@@ -1095,6 +1129,12 @@ model InspectionItem {
   name          String  @db.VarChar(64)
   standard      String? @db.VarChar(256)
   method        String? @db.VarChar(128) // 检验方法（生成检验单时从物料检验规范复制）
+  item_type     String  @default("QUAL") @db.VarChar(8) // QUAL=定性（人工判定）/ QUANT=定量（按上下限自动判定）
+  lower         Float?
+  upper         Float?
+  unit          String? @db.VarChar(16)
+  sample_values String? @db.Text // 定量项逐件实测值（JSON 数组）
+  checked       Boolean @default(false) // 定性项是否已人工确认
   spec_item_id  Int? // 来源检验规范条目
   value         String? @db.VarChar(128)
   result        String  @default("PASS") @db.VarChar(8)
@@ -1127,6 +1167,9 @@ model Ncr {
   disposition_remark String?   @db.Text
   disposition_by     String?   @db.VarChar(64)
   disposition_at     DateTime?
+  due_date           DateTime? @db.Date // 处置期限（按严重度自动设定）
+  closed_by          String?   @db.VarChar(64)
+  closed_at          DateTime?
   capa_id            Int?
   created_at         DateTime  @default(now())
   updated_at         DateTime  @default(now()) @updatedAt
@@ -1238,6 +1281,10 @@ model MaterialInspectionItem {
   name        String   @db.VarChar(64)
   standard    String?  @db.VarChar(256)
   method      String?  @db.VarChar(128)
+  item_type   String   @default("QUAL") @db.VarChar(8) // QUAL/QUANT
+  lower       Float?
+  upper       Float?
+  unit        String?  @db.VarChar(16)
   is_active   Boolean  @default(true)
   created_at  DateTime @default(now())
   updated_at  DateTime @default(now()) @updatedAt
@@ -1297,6 +1344,15 @@ model Complaint {
   lot_no           String?   @db.VarChar(64)
   description      String    @db.Text
   is_adverse_event Boolean   @default(false) // 是否涉及不良事件（需协助注册人上报）
+  reporter_contact String?   @db.VarChar(128) // 投诉人/联系方式
+  event_date       DateTime? @db.Date // 事件发生日期
+  country          String?   @db.VarChar(32)
+  reportable       Boolean? // 是否需上报监管（评估结论）
+  report_deadline  DateTime? @db.Date // 上报期限
+  report_no        String?   @db.VarChar(64) // 上报编号
+  reported_at      DateTime? @db.Date
+  customer_reply   String?   @db.Text // 给客户的回复
+  replied_at       DateTime? @db.Date
   status           String    @default("OPEN") @db.VarChar(16) // OPEN/INVESTIGATING/CLOSED
   investigation    String?   @db.Text
   ncr_id           Int?
@@ -1325,4 +1381,26 @@ model Attachment {
 
   @@index([entity, entity_id])
   @@map("sys_attachment")
+}
+
+/// 退供应商单（NCR 处置“退货”生成；仓管出库确认后才扣库存）
+model SupplierReturn {
+  id                Int       @id @default(autoincrement())
+  no                String    @unique @db.VarChar(32)
+  supplier_id       Int?
+  ncr_id            Int?
+  material_id       Int
+  lot_no            String    @default("") @db.VarChar(64)
+  qty               Float
+  owner_customer_id Int?
+  status            String    @default("PENDING") @db.VarChar(16) // PENDING=待出库 / SHIPPED=已出库 / CANCELLED
+  shipped_by        String?   @db.VarChar(64)
+  shipped_at        DateTime?
+  remark            String?   @db.Text
+  created_at        DateTime  @default(now())
+  updated_at        DateTime  @default(now()) @updatedAt
+  created_by        String?   @db.VarChar(64)
+
+  @@index([ncr_id])
+  @@map("wms_supplier_return")
 }
