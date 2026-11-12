@@ -62,15 +62,15 @@ export class WoAdjustService {
     if (wo.so_line_id) {
       const ln = await this.db.client.salesOrderLine.findUnique({ where: { id: wo.so_line_id }, include: { order: true } });
       const others = await this.db.client.workOrder.findMany({ where: { so_line_id: wo.so_line_id, id: { not: wo.id }, status: { not: 'CANCELLED' } } });
-      if (ln) so_line = { so_id: ln.order_id, so_no: ln.order.no, line_no: ln.line_no, qty: ln.qty, other_wo_qty: round(others.reduce((s, w) => s + w.planned_qty, 0)) };
+      if (ln) so_line = { so_id: ln.order_id, so_no: ln.order.no, line_no: ln.line_no, qty: ln.qty, other_wo_qty: round(others.reduce((s, w) => s + w.planned_qty - (w.scrap_qty || 0), 0)) };
     }
     const minQty = Math.max(p.started, wo.material.serial_control ? 1 : EPS);
     // 与订单不符：订单数量 ≠ 关联工单合计 → 建议本工单调到“订单数量 − 其他工单”（不少于已开工数量）
     let mismatch: { so_qty: number; wo_total: number; suggest_qty: number; cancel_suggested: boolean } | null = null;
     if (so_line && ['PLANNED', 'RELEASED', 'IN_PROGRESS'].includes(wo.status)) {
-      const total = round(so_line.other_wo_qty + wo.planned_qty);
+      const total = round(so_line.other_wo_qty + wo.planned_qty - (wo.scrap_qty || 0));
       if (Math.abs(total - so_line.qty) > EPS) {
-        const target = round(so_line.qty - so_line.other_wo_qty);
+        const target = round(so_line.qty - so_line.other_wo_qty + (wo.scrap_qty || 0));
         mismatch = { so_qty: so_line.qty, wo_total: total, suggest_qty: Math.max(target, minQty), cancel_suggested: target <= EPS && p.started <= EPS };
       }
     }

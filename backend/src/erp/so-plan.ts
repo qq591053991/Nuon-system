@@ -156,7 +156,7 @@ export interface WoMismatch {
   material_code: string;
   /** 订单行数量 */
   so_qty: number;
-  /** 关联本行的未取消工单计划数量合计 */
+  /** 关联本行的未取消工单（计划 − 报废）数量合计 */
   wo_qty: number;
   /** 关联本行的未取消工单（含已完工），adjustable_ids 为其中还能调整的（计划/已下达/生产中） */
   wo_ids: number[];
@@ -167,7 +167,7 @@ export interface WoMismatch {
 
 /**
  * 订单与工单不符（订单变更后计划员待处理）：进行中订单的行，已有关联工单，但
- * 订单数量 ≠ 关联未取消工单计划数量合计（订单加量 → 需补排；减量 → 需调减工单）。
+ * 订单数量 ≠ 关联未取消工单（计划 − 报废）数量合计（订单加量 → 需补排；减量 → 需调减工单）。
  */
 export async function woMismatches(db: Tx): Promise<WoMismatch[]> {
   const lines = await db.salesOrderLine.findMany({
@@ -177,7 +177,8 @@ export async function woMismatches(db: Tx): Promise<WoMismatch[]> {
   });
   const out: WoMismatch[] = [];
   for (const l of lines) {
-    const woQty = round(l.work_orders.reduce((s, w) => s + w.planned_qty, 0));
+    // 报废的不算产出：计划 − 报废（补做报废数量的工单不算“不符”）
+    const woQty = round(l.work_orders.reduce((s, w) => s + w.planned_qty - (w.scrap_qty || 0), 0));
     if (Math.abs(woQty - l.qty) <= EPS) continue;
     out.push({
       so_id: l.order_id, so_no: l.order.no, line_id: l.id, line_no: l.line_no, material_code: l.material.code, so_qty: l.qty, wo_qty: woQty,
