@@ -326,7 +326,7 @@ describe('财务', () => {
     ]);
     expect(pay[1]).toMatchObject({ aux_type: '供应商', partner_code: 'S001', currency: 'USD', amount_fc: 350, word: '记' });
     const apv = v.items.filter((x: any) => x.biz_no === ap.no);
-    expect(apv.map((x: any) => [x.account_code, x.debit, x.credit, x.rate])).toEqual([['1403', 2485, 0, 7.1], ['2202', 0, 2485, 7.1]]);
+    expect(apv.map((x: any) => [x.account_code, x.debit, x.credit, x.rate])).toEqual([['1403', 2199.12, 0, 7.1], ['2221.01.01', 285.88, 0, 7.1], ['2202', 0, 2485, 7.1]]); // R2：按供应商税率（默认 13%）拆分进项税
     // 当期作废的当期付款不出凭证
     await api.as('finance').ok('post', `/api/finance/payments/${paid.payments[0].id}/void`, { reason: '重复登记' });
     v = await api.as('finance').ok('get', '/api/finance/voucher', { period });

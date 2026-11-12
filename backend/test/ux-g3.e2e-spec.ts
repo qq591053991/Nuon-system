@@ -61,13 +61,13 @@ describe('A1 已确认订单：撤销确认 / 变更', () => {
     expect(p.errors).toEqual([]);
     expect(p.changes).toEqual(['第1行 FG-RL300 数量 20 → 15', `第1行 FG-RL300 交期 ${d(20)} → ${d(10)}`]);
     expect(p.affected.map((a: any) => a.wo_no)).toEqual([wo.no, wo.no]);
-    expect(p.affected[0].message).toContain('请在工单上【调整】减少 5');
+    expect(p.affected[0].message).toContain('计划员需调减 5');
     expect(p.affected[1].message).toContain(`新交期 ${d(10)} 早于工单 ${wo.no} 计划完工 ${d(20)}`);
     expect((await api.as('sales').ok('get', `/api/sales-orders/${s.id}`)).lines[0].qty).toBe(20);
 
     // 增量 → 提醒补排；不填原因不能保存；没有修改不能保存
     p = await api.as('sales').ok('post', `/api/sales-orders/${s.id}/change`, { ...body({ qty: 25 }), preview: true });
-    expect(p.warnings[0]).toContain('变更后请点【生成工单】补排 5');
+    expect(p.warnings[0]).toContain('计划员需补排 5');
     expect((await api.as('sales').post(`/api/sales-orders/${s.id}/change`, body({ qty: 25 }))).body.detail).toContain('请填写变更原因');
     expect((await api.as('sales').post(`/api/sales-orders/${s.id}/change`, { ...body({}), reason: 'x' })).body.detail).toBe('没有修改任何内容');
     expect((await api.as('wh').post(`/api/sales-orders/${s.id}/change`, { ...body({ qty: 25 }), reason: 'x' })).status).toBe(403);
