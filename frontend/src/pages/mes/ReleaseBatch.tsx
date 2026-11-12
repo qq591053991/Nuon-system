@@ -4,7 +4,7 @@
  *   批准 → 该部分成品 待放行→合格，可发货；拒绝 → 冻结（HOLD）。均需 QA 电子签名。
  * 供 DHR 页、放行中心、工单详情共用。
  */
-import { Alert, App, Button, Descriptions, Empty, Input, InputNumber, Modal, Space, Spin, Table, Tag, Typography } from 'antd';
+import { Alert, App, Button, Descriptions, Empty, Input, InputNumber, Modal, Space, Spin, Table, Tag, Tooltip, Typography } from 'antd';
 import { SafetyCertificateOutlined, StopOutlined } from '@ant-design/icons';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -95,7 +95,8 @@ export function ReleaseBatchModal({ wo, open, onClose, onDone, preselect }: Prop
     get(`/work-orders/${wo.id}/releasable`)
       .then((d) => {
         setSum(d);
-        const all: string[] = (d.serials || []).map((s: Rec) => s.sn);
+        // 默认只勾选放行检查全部通过的；不通过的可手动勾选后“拒绝本批（冻结）”，但不能批准放行
+        const all: string[] = (d.serials || []).filter((s: Rec) => s.check_ok !== false).map((s: Rec) => s.sn);
         setSelected(preselect ? all.filter((sn) => preselect.includes(sn)) : all);
         setQty(d.releasable_qty || null);
       })
@@ -104,6 +105,7 @@ export function ReleaseBatchModal({ wo, open, onClose, onDone, preselect }: Prop
 
   const serial = !!sum?.serial_control;
   const count = serial ? selected.length : qty || 0;
+  const failing: string[] = serial ? (sum?.serials || []).filter((s: Rec) => s.check_ok === false && selected.includes(s.sn)).map((s: Rec) => s.sn) : [];
 
   const decide = async (approve: boolean) => {
     if (!wo || !sum || count <= 0) return;
@@ -153,9 +155,11 @@ export function ReleaseBatchModal({ wo, open, onClose, onDone, preselect }: Prop
       footer={[
         <Button key="c" onClick={onClose}>取消</Button>,
         <Button key="r" danger icon={<StopOutlined />} loading={busy} disabled={count <= 0} onClick={() => decide(false)}>拒绝本批（冻结）</Button>,
-        <Button key="a" type="primary" icon={<SafetyCertificateOutlined />} loading={busy} disabled={count <= 0} onClick={() => decide(true)}>
-          批准放行本批（电子签名）
-        </Button>,
+        <Tooltip key="a" title={failing.length ? `所选产品中有 ${failing.length} 台放行检查未通过（${snText([...failing].sort())}），只能拒绝本批或取消勾选` : undefined}>
+          <Button type="primary" icon={<SafetyCertificateOutlined />} loading={busy} disabled={count <= 0 || failing.length > 0} onClick={() => decide(true)}>
+            批准放行本批（电子签名）
+          </Button>
+        </Tooltip>,
       ]}
     >
       {signHolder}
@@ -164,7 +168,7 @@ export function ReleaseBatchModal({ wo, open, onClose, onDone, preselect }: Prop
       ) : (
         <>
           <Alert type="info" showIcon style={{ marginBottom: 12 }}
-            message="分批放行：每批校验产品已完成全部工序、无未处置 NCR、物料已按 BOM 足额领用（按放行后累计数量）。批准后该批成品转为合格库存，可以发货。" />
+            message="分批放行：每台按放行结论逐项校验（工序合格、NCR、返工复测、用料 IQC、设备校准、人员资质），物料须按 BOM 足额领用（按放行后累计数量）。检查不通过的产品只能拒绝（冻结）或留到下一批；批准后该批成品转为合格库存，可以发货。" />
           <Descriptions size="small" bordered column={{ xs: 1, sm: 2, md: 4, lg: 4, xl: 4, xxl: 4 }} style={{ marginBottom: 12 }} items={[
             { key: 'c', label: '已完工', children: fmtQty(sum.completed_qty) },
             { key: 'r', label: '已入库', children: fmtQty(sum.received_qty) },
@@ -188,6 +192,12 @@ export function ReleaseBatchModal({ wo, open, onClose, onDone, preselect }: Prop
                     { title: '序列号', dataIndex: 'sn', render: (v) => <Link className="mono" to={`/trace?sn=${encodeURIComponent(v)}`}>{v}</Link> },
                     { title: '库位', dataIndex: 'location_code', render: (v) => v || '-' },
                     { title: '完工时间', dataIndex: 'completed_at', render: (v) => fmtDateTime(v) },
+                    {
+                      title: '放行检查', dataIndex: 'check_ok',
+                      render: (v, r) => v === false
+                        ? <Typography.Text type="danger">不通过：{(r.check_issues || []).join('；')}</Typography.Text>
+                        : <Typography.Text type="success">通过</Typography.Text>,
+                    },
                   ]}
                 />
               ) : <Empty description="没有可放行的产品（需已完工入库、完成全部工序且尚未放行）" />}

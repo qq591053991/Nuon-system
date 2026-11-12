@@ -80,6 +80,15 @@ function PoSteps({ po }: { po: Rec | null }) {
           { title: '完成', description: st === 'CLOSED' ? '已关闭' : st === 'RECEIVED' ? '全部到货' : undefined },
         ]}
       />
+      {po?.rejection && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginTop: 16 }}
+          message={<span>被厂长退回：<b>{po.rejection.reason || '（未填写原因）'}</b></span>}
+          description={`${po.rejection.by} 于 ${fmtDateTime(po.rejection.at)} 退回（电子签名）。请按原因修改后重新【提交审批】。`}
+        />
+      )}
       {NEXT_HINT[st] && <Alert type="info" showIcon message={NEXT_HINT[st]} style={{ marginTop: 16 }} />}
     </>
   );

@@ -13,6 +13,6 @@ import { ReleaseCheckService } from './release-check.service';
 @Module({
   controllers: [QmsController, InspectionSpecController, ComplaintController, SupplierReturnController, ReleaseCheckController],
   providers: [QualityService, ComplaintService, SupplierReturnService, ReleaseCheckService],
-  exports: [QualityService],
+  exports: [QualityService, ReleaseCheckService],
 })
 export class QmsModule {}

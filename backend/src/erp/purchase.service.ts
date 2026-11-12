@@ -151,6 +151,12 @@ export class PurchaseService {
     const d = fixPo(ser('PurchaseOrder', po, CH));
     d.receipts = serList('Receipt', await c.receipt.findMany({ where: { po_id: id }, orderBy: { id: 'asc' }, include: inc('Receipt', CH) }), CH);
     d.approval = await this.bigness(c, po);
+    // 被厂长退回（草稿 + 最近一次退回签名）：采购员在单据上直接看到退回人、时间与原因（无需审计权限）
+    d.rejection = null;
+    if (po.status === 'DRAFT') {
+      const s = await c.eSignature.findFirst({ where: { entity: 'erp_purchase_order', entity_id: id, meaning: '大额采购单退回' }, orderBy: { id: 'desc' } });
+      if (s) d.rejection = { by: s.full_name, at: s.ts, reason: s.reason };
+    }
     return d;
   }
 

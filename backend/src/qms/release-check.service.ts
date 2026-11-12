@@ -210,7 +210,11 @@ export class ReleaseCheckService {
         if (insp.status === 'PASSED') [level, text] = ['ok', `${insp.no} 合格`];
         else if (insp.status === 'CONCESSION') [level, text] = ['warn', `${insp.no} 让步接收`];
         else if (insp.status === 'PENDING') [level, text] = ['fail', `${insp.no} 待检验`];
-        else [level, text] = ['fail', `${insp.no} 不合格`];
+        else {
+          // IQC 判不合格后经 NCR 评审“让步接收”：检验单本身保持不合格（已签名的电子记录不改），按让步处理
+          const ncr = await tx.ncr.findFirst({ where: { inspection_id: insp.id, disposition: 'USE_AS_IS', status: { in: ['DISPOSITIONED', 'CLOSED'] } }, orderBy: { id: 'desc' } });
+          [level, text] = ncr ? ['warn', `${insp.no} 不合格，经 ${ncr.no} 让步接收`] : ['fail', `${insp.no} 不合格`];
+        }
       } else if (!r.iqc_required) [level, text] = ['ok', '免检物料'];
       else {
         const rl = await tx.receiptLine.findFirst({ where: { material_id: r.material_id, lot_no: r.lot_no }, include: { receipt: true }, orderBy: { id: 'asc' } });

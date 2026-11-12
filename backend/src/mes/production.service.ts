@@ -15,6 +15,7 @@ import { EsignService, type SignatureDto } from '../core/esign.service';
 import { InventoryService, STATUS_TEXT as STOCK_STATUS_TEXT, type Ref } from '../core/inventory.service';
 import { NumberingService } from '../core/numbering.service';
 import { buildUdi } from '../core/udi';
+import { RELEASE_CHECKS, ReleaseCheckService } from '../qms/release-check.service';
 import { keyPartRows } from './key-parts';
 
 export const DISCRETE_UOM = new Set(['PCS', 'PC', 'EA', 'SET', '个', '台', '只', '套', '片', '件', '张', '根', '块', '颗', '盒', '本']);
@@ -229,7 +230,30 @@ export class ProductionService {
     private readonly numbering: NumberingService,
     private readonly inv: InventoryService,
     private readonly esign: EsignService,
+    private readonly releaseCheck: ReleaseCheckService = new ReleaseCheckService(),
   ) {}
+
+  /**
+   * 放行前按 DHR 放行结论卡的同一套逐台检查复核（工序合格、NCR、返工复测、用料 IQC、设备校准、人员资质）：
+   * 有不通过项的产品不能批准放行（可以拒绝/冻结）。sns 为空 = 本工单全部待放行产品；批量产品按整张工单检查。
+   */
+  private async assertReleaseChecks(tx: Tx, woId: number, sns: string[] | null) {
+    const rc = await this.releaseCheck.check(tx, woId);
+    const label = Object.fromEntries(RELEASE_CHECKS.map((c) => [c.key, c.label])) as Record<string, string>;
+    const why = (checks: Record<string, { ok: boolean; text: string }>) =>
+      Object.entries(checks).filter(([, c]) => !c.ok).map(([k, c]) => `${label[k] ?? k}：${c.text}`).join('；');
+    if (rc.serial_control) {
+      const pick = sns ? new Set(sns) : null;
+      const bad = rc.units.filter((u) => (pick ? pick.has(u.sn) : u.eligible) && !u.ok);
+      if (bad.length) {
+        const list = bad.slice(0, 5).map((u) => `${u.sn}（${why(u.checks)}）`).join('；');
+        throw new BizError(`${bad.length} 台放行检查未通过，不能批准放行：${list}${bad.length > 5 ? ` 等 ${bad.length} 台` : ''}。请先处理后再放行，或把这些产品留到下一批 / 拒绝放行（冻结）`);
+      }
+    } else if (rc.wo_level) {
+      const w = why(rc.wo_level);
+      if (w) throw new BizError(`放行检查未通过，不能批准放行：${w}`);
+    }
+  }
 
   /** 读取工单；lock=true 时先锁定工单行（SELECT ... FOR UPDATE），防止并发报工/入库造成数量丢失更新或重复下达 */
   async getWo(tx: Tx, woId: number, lock = false) {
@@ -1035,7 +1059,15 @@ export class ProductionService {
     let openNcr = 0;
     if (serial) {
       const e = await this.eligibleSerials(tx, wo.id);
-      serials = e.eligible.map((s) => ({ sn: s.sn, udi: s.udi, completed_at: s.completed_at, location_code: s.location?.code ?? null }));
+      // 逐台放行结论（与 DHR 结论卡一致）：不通过的只能拒绝/冻结，不能批准放行
+      const label = Object.fromEntries(RELEASE_CHECKS.map((c) => [c.key, c.label])) as Record<string, string>;
+      const rc = e.eligible.length ? await this.releaseCheck.check(tx, wo.id) : null;
+      const unitOf = new Map((rc?.units ?? []).map((u) => [u.sn, u]));
+      serials = e.eligible.map((s) => {
+        const u = unitOf.get(s.sn);
+        const issues = u ? Object.entries(u.checks as Record<string, { ok: boolean; text: string }>).filter(([, c]) => !c.ok).map(([k, c]) => `${label[k] ?? k}：${c.text}`) : [];
+        return { sn: s.sn, udi: s.udi, completed_at: s.completed_at, location_code: s.location?.code ?? null, check_ok: !issues.length, check_issues: issues };
+      });
       blocked = e.blocked;
       releasable = open ? serials.length : 0;
     } else {
@@ -1169,6 +1201,7 @@ export class ProductionService {
       }
     }
     const after = round(released + qty);
+    if (a.approve) await this.assertReleaseChecks(tx, wo.id, wo.material.serial_control ? units.map((u) => u.sn) : null);
     if (a.approve) {
       const mats = await tx.workOrderMaterial.findMany({ where: { wo_id: wo.id }, orderBy: { id: 'asc' }, include: { material: true } });
       const short = mats.filter((m) => (m.issued_qty || 0) + EPS < (m.qty_per || 0) * after);
@@ -1202,6 +1235,7 @@ export class ProductionService {
     if (approve) {
       const bad = (await this.dhrChecks(tx, wo.id)).filter((c) => !c.ok).map((c) => c.item);
       if (bad.length) throw new BizError('DHR 审核未通过，不能放行：' + bad.join('；'));
+      await this.assertReleaseChecks(tx, wo.id, null);
     }
     await this.esign.sign(tx, user, sig, approve ? '产品放行（DHR审核批准）' : '产品放行（DHR审核拒绝）', 'mes_work_order', wo.id, wo.no);
     const released = wo.released_qty || 0;

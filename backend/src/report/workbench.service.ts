@@ -64,6 +64,7 @@ export const PATHS = {
   poReceive: '/purchase/orders?status=APPROVED,PARTIAL_RECEIVED',
   poChase: '/purchase/chase',
   mrp: '/plan/mrp',
+  mrpExpedite: '/plan/mrp?type=EXPEDITE',
   woShort: '/mes/work-orders?kitting=SHORT',
   woPlanned: '/mes/work-orders?status=PLANNED',
   woWip: '/mes/work-orders?status=RELEASED,IN_PROGRESS',
@@ -137,7 +138,16 @@ class Counters {
   });
   /** 缺料工单（与工单列表 kitting=SHORT 同口径：G3 齐套分析；不可用时按估算） */
   woShort = () => this.m('wo_short', async () => (await this.shortage()).size);
-  poDraft = () => this.m('po_d', () => this.tx.purchaseOrder.count({ where: { status: 'DRAFT' } }));
+  /** 被厂长退回、仍为草稿的大额采购单 id（最近一次退回签名之后未再提交） */
+  poReturnedIds = () => this.m('po_ret_ids', async () => {
+    const sigs = await this.tx.eSignature.findMany({ where: { entity: 'erp_purchase_order', meaning: '大额采购单退回' }, select: { entity_id: true } });
+    const ids = [...new Set(sigs.map((s) => s.entity_id))];
+    if (!ids.length) return [] as number[];
+    return (await this.tx.purchaseOrder.findMany({ where: { id: { in: ids }, status: 'DRAFT' }, select: { id: true } })).map((p) => p.id);
+  });
+  poReturned = () => this.m('po_ret', async () => (await this.poReturnedIds()).length);
+  /** 待审批的采购草稿（不含被厂长退回待修改的，那些单列“被厂长退回”） */
+  poDraft = () => this.m('po_d', async () => this.tx.purchaseOrder.count({ where: { status: 'DRAFT', id: { notIn: await this.poReturnedIds() } } }));
   poToReceive = () => this.m('po_r', () => this.tx.purchaseOrder.count({ where: { status: { in: ['APPROVED', 'PARTIAL_RECEIVED'] } } }));
   /** 逾期未到货的采购订单（按行：回复交期 > 行交期 > 单头交期） */
   poOverdue = () => this.m('po_od', async () => {
@@ -306,9 +316,10 @@ export class WorkbenchService {
     await add(['planner'], 'so_no_wo', '已确认待排产的销售订单', c.soConfirmed, PATHS.soConfirmed);
     await add(['planner'], 'wo_planned', '待下达的生产工单', c.woPlanned, PATHS.woPlanned);
     // 采购
+    await add(['purchaser'], 'po_returned', '被厂长退回的采购单（请按退回原因修改后重新提交）', c.poReturned, PATHS.poApprove, 'warning');
     await add(['purchaser'], 'po_draft', '待审批的采购订单', c.poDraft, PATHS.poApprove);
     await add(['purchaser', 'planner'], 'po_overdue', '逾期未到货的采购订单（催货）', c.poOverdue, PATHS.poChase, 'warning');
-    await add(['purchaser'], 'mrp_expedite', '需提前催交的在途采购（MRP 例外）', c.mrpExpedite, PATHS.poChase, 'warning');
+    await add(['purchaser'], 'mrp_expedite', '需提前催交的在途采购（MRP 例外）', c.mrpExpedite, PATHS.mrpExpedite, 'warning');
     await add(['purchaser'], 'mrp_purchase', 'MRP 待转采购的建议（需新下单）', c.mrpPurchaseNew, PATHS.mrp);
     await add(['purchaser'], 'supplier_qual', '资质 60 天内到期的供应商', c.supplierQualDue, PATHS.supplierQual);
     // 仓管
@@ -406,7 +417,7 @@ export class WorkbenchService {
           kpi({ key: 'po_draft', title: '待审批采购单', value: await c.poDraft(), path: PATHS.poApprove }),
           kpi({ key: 'po_overdue', title: '逾期未到货', value: await c.poOverdue(), hint: '按回复交期/交期', level: warnIf(await c.poOverdue(), 'error'), path: PATHS.poChase }),
           kpi({ key: 'po_receive', title: '在途采购单', value: await c.poToReceive(), path: PATHS.poReceive }),
-          kpi({ key: 'mrp_expedite', title: '需提前催交', value: await c.mrpExpedite(), hint: 'MRP 例外：在途晚于需求', level: warnIf(await c.mrpExpedite()), path: PATHS.poChase }),
+          kpi({ key: 'mrp_expedite', title: '需提前催交', value: await c.mrpExpedite(), hint: 'MRP 例外：在途晚于需求', level: warnIf(await c.mrpExpedite()), path: PATHS.mrpExpedite }),
           kpi({ key: 'mrp_purchase', title: 'MRP 采购建议', value: await c.mrpPurchaseNew(), hint: '需新下单', path: PATHS.mrp }),
           kpi({ key: 'below_safety', title: '低于安全库存', value: await c.belowSafety(), level: warnIf(await c.belowSafety()), path: PATHS.belowSafety }),
           kpi({ key: 'supplier_qual', title: '供应商资质到期', value: await c.supplierQualDue(), hint: '60 天内，点开看清单', path: PATHS.supplierQual }),

@@ -59,12 +59,15 @@ export function useESign(): [SignFn, JSX.Element] {
     <T,>(o: Opts<T>) =>
       new Promise<T>((resolve, reject) => {
         resolver.current = { resolve, reject };
-        // 每次签名都重新挂载一张空白表单（不保留上次输入的密码；默认理由见 initialValues）
+        // 每次签名都重新挂载一张空白表单（不保留上次输入的密码；默认理由见 initialValues）。
+        // 表单实例是共用的：上一张表单卸载时字段会被重置回“上一次”的默认理由，新表单挂载时 store 里的旧值会盖过
+        // 新的 initialValues —— 先把本次的值写进 store，否则 NCR 关闭签名会带上之前放行签名的理由。
+        form.setFieldsValue({ password: undefined, reason: o.defaultReason });
         setSeq((n) => n + 1);
         setError(null);
         setOpts(o);
       }),
-    [],
+    [form],
   );
 
   const close = () => {

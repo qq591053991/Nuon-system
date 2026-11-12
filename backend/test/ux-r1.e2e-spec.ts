@@ -166,7 +166,7 @@ describe('UX R1：平台 / 系统管理 / 账号', () => {
       data: { run_id: run.id, material_id: ref.m['LED-660-3030'], action: 'PURCHASE', suggested_qty: 100, due_date: today(), status: 'OPEN', exception: 'EXPEDITE' },
     });
     const buyer = await api.as('buyer').ok('get', '/api/todos');
-    expect(buyer.find((x: any) => x.key === 'mrp_expedite')).toMatchObject({ count: 1, path: '/purchase/chase' });
+    expect(buyer.find((x: any) => x.key === 'mrp_expedite')).toMatchObject({ count: 1, path: '/plan/mrp?type=EXPEDITE' }); // 第三轮 A-R3-4：直达 MRP 提前催交页签
     expect(buyer.find((x: any) => x.key === 'mrp_purchase')).toBeUndefined();
     // 大额采购单：SUBMITTED 进厂长拍板（工作台 big_pos 可直接批准/退回）
     const sup = await api.as('buyer').find('/api/suppliers', { page_size: 1 });

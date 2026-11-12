@@ -4,7 +4,7 @@ import {
 } from 'antd';
 import { NotificationOutlined, ReloadOutlined, SwapOutlined, ThunderboltOutlined, WarningOutlined } from '@ant-design/icons';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { get, post, type Rec } from '../../api/http';
 import { useAuth } from '../../auth';
 import ExportButton from '../../components/ExportButton';
@@ -86,7 +86,9 @@ export default function Mrp() {
   const [loading, setLoading] = useState(false);
   const [running, setRunning] = useState(false);
   const [converting, setConverting] = useState(false);
-  const [action, setAction] = useState('ALL');
+  // 待办可直达某个页签：/plan/mrp?type=EXPEDITE（提前催交）/ PURCHASE / PRODUCE / CUSTOMER_SUPPLY
+  const [sp] = useSearchParams();
+  const [action, setAction] = useState(() => (ACTIONS.some((a) => a.value === sp.get('type')) ? sp.get('type')! : 'ALL'));
   const [selected, setSelected] = useState<number[]>([]);
   const [result, setResult] = useState<Rec | null>(null);
 

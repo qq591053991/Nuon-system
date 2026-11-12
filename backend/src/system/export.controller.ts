@@ -9,6 +9,7 @@ import ExcelJS from 'exceljs';
 import type { Response } from 'express';
 import { AllowNoRole } from '../auth';
 import { BizError } from '../common/errors';
+import { wallClock } from '../common/dates';
 
 class ExportColumnDto {
   @IsString() @MaxLength(64) title: string;
@@ -58,7 +59,8 @@ export class ExportController {
           }
           if (c.type === 'date' || c.type === 'datetime') {
             const d = new Date(String(v));
-            return Number.isNaN(d.getTime()) ? String(v) : d;
+            // 按工厂时区的本地时间写入（与页面显示一致）；纯日期（UTC 零点）转换后日期不变
+            return Number.isNaN(d.getTime()) ? String(v) : wallClock(d);
           }
           return typeof v === 'object' ? JSON.stringify(v) : (v as any);
         }),

@@ -6,6 +6,19 @@ export function localDateStr(d: Date = new Date()): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: config.timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
 }
 
+/**
+ * 工厂本地“墙上时间”：返回一个 UTC 各字段等于本地时区年月日时分秒的 Date。
+ * 写 Excel 用（Excel 单元格没有时区，exceljs 按 UTC 写入，直接写会比页面早/晚一个时区差）。
+ */
+export function wallClock(d: Date): Date {
+  const p = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: config.timezone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+    }).formatToParts(d).map((x) => [x.type, x.value]),
+  );
+  return new Date(Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second, d.getUTCMilliseconds()));
+}
+
 /** 纯日期（@db.Date）统一用 UTC 零点的 Date 表示 */
 export function dateOnly(s: string | Date | null | undefined): Date | null {
   if (s === null || s === undefined || s === '') return null;
