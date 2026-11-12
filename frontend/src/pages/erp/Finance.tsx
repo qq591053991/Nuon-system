@@ -1,15 +1,16 @@
 import {
   Alert, AutoComplete, Button, Card, Checkbox, Col, DatePicker, Descriptions, Divider, Empty, Form, Input, InputNumber, Modal, Row, Segmented, Select, Space,
-  Statistic, Table, Tabs, Tag, Tooltip, Typography, message, type TableColumnsType,
+  Statistic, Table, Tabs, Tag, Tooltip, Typography, message, type TableColumnsType, Popover,
 } from 'antd';
 import { DollarOutlined, ExclamationCircleOutlined, MergeCellsOutlined, ReloadOutlined, RollbackOutlined, StopOutlined, SwapOutlined } from '@ant-design/icons';
 import dayjs, { type Dayjs } from 'dayjs';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { get, post, type Rec } from '../../api/http';
+import { get, post, put, type Rec } from '../../api/http';
 import { useAuth } from '../../auth';
 import ExportButton, { type ExportColumn } from '../../components/ExportButton';
 import PageHeader from '../../components/PageHeader';
+import ResponsiveTable, { type RColumn } from '../../components/ResponsiveTable';
 import { CustomerSelect, SupplierSelect } from '../../components/RemoteSelect';
 import StatusTag from '../../components/StatusTag';
 import { usePaged } from '../../components/usePaged';
@@ -39,8 +40,8 @@ const BUCKET_PRESETS = [
 ];
 
 const r2 = (v: number) => Math.round((v + Number.EPSILON) * 100) / 100;
-const amt = (v?: number | null) =>
-  v ? Number(v).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : <span style={{ color: '#bfbfbf' }}>-</span>;
+/** 金额文本（始终返回字符串：也用在提示文案的模板字符串里，不能返回元素，否则显示“[object Object]”） */
+const amt = (v?: number | null) => (v ? Number(v).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '-');
 /** 金额 + 币别（常用币别带符号，其余显示代码） */
 const cur = (v: number | null | undefined, c: string) =>
   ['CNY', 'USD', 'EUR'].includes(c) ? fmtMoney(v, c) : `${c} ${Number(v ?? 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -95,6 +96,29 @@ function FxText({ v, base }: { v: number; base: string }) {
 }
 
 // ======================= 登记收/付款（单张） =======================
+/** 收付款银行账户：记住本机最近用过的账户（下拉可选），也可直接输入 */
+const ACC_KEY = (k: Kind) => `nuon_fin_accounts_${k}`;
+function recentAccounts(kind: Kind): string[] {
+  try {
+    return JSON.parse(localStorage.getItem(ACC_KEY(kind)) || '[]');
+  } catch {
+    return [];
+  }
+}
+function rememberAccount(kind: Kind, acc?: string | null) {
+  const a = (acc || '').trim();
+  if (!a) return;
+  try {
+    localStorage.setItem(ACC_KEY(kind), JSON.stringify([a, ...recentAccounts(kind).filter((x) => x !== a)].slice(0, 8)));
+  } catch {
+    /* 本机存储不可用时忽略 */
+  }
+}
+function BankAccountInput({ kind, ...p }: { kind: Kind; value?: string; onChange?: (v: string) => void }) {
+  const opts = useMemo(() => recentAccounts(kind).map((v) => ({ value: v })), [kind]);
+  return <AutoComplete {...p} options={opts} placeholder="如 中国银行 6217 …1234" allowClear />;
+}
+
 function PaymentModal({ doc, advances, base, rateOf, onClose, onDone }: { doc: Rec | null; advances: Rec[]; base: string; rateOf: (c: string) => number | undefined; onClose: () => void; onDone: () => void }) {
   const [form] = Form.useForm();
   const [saving, setSaving] = useState(false);
@@ -126,6 +150,7 @@ function PaymentModal({ doc, advances, base, rateOf, onClose, onDone }: { doc: R
         await post(`/finance/docs/${doc!.id}/payments`, {
           ...v, pay_date: toDate(v.pay_date), exchange_rate: foreign ? v.exchange_rate : undefined, fee_amount: v.fee_amount || 0, as_advance: over > 0 && !!v.as_advance,
         });
+        rememberAccount(kind, v.bank_account);
         message.success(over > 0 ? `${t.payDone}，超出部分 ${amt(over)} 已转${t.adv}` : t.payDone);
         onDone();
       } finally {
@@ -205,7 +230,7 @@ function PaymentModal({ doc, advances, base, rateOf, onClose, onDone }: { doc: R
             form={form}
             layout="vertical"
             preserve={false}
-            initialValues={{ amount: doc.balance, fee_amount: 0, pay_date: dayjs(), method: '银行转账', exchange_rate: foreign ? rateOf(doc.currency) ?? doc.exchange_rate : undefined }}
+            initialValues={{ amount: doc.balance, fee_amount: 0, pay_date: dayjs(), method: '银行转账', bank_account: recentAccounts(kind)[0], exchange_rate: foreign ? rateOf(doc.currency) ?? doc.exchange_rate : undefined }}
           >
             <Row gutter={16}>
               <Col span={8}>
@@ -242,7 +267,10 @@ function PaymentModal({ doc, advances, base, rateOf, onClose, onDone }: { doc: R
               <Col span={8}>
                 <Form.Item name="reference" label="银行流水号/票据号"><Input /></Form.Item>
               </Col>
-              <Col span={foreign ? 24 : 8}>
+              <Col span={foreign ? 12 : 8}>
+                <Form.Item name="bank_account" label={kind === 'AR' ? '收款账户' : '付款账户'}><BankAccountInput kind={kind} /></Form.Item>
+              </Col>
+              <Col span={foreign ? 12 : 24}>
                 <Form.Item name="remark" label="备注"><Input /></Form.Item>
               </Col>
             </Row>
@@ -264,10 +292,18 @@ function PaymentModal({ doc, advances, base, rateOf, onClose, onDone }: { doc: R
               bordered
               column={2}
               items={[
-                { key: 'bank', label: `${t.bank}（原币）`, children: cur(pv.bankFc + (over > 0 && asAdvance ? over : 0), doc.currency) },
+                {
+                  key: 'bank', label: `${t.bank}（原币）`,
+                  children: (
+                    <span>
+                      {cur(r2(pv.bankFc + (over > 0 ? over : 0)), doc.currency)}
+                      {over > 0 && <Typography.Text type={asAdvance ? 'secondary' : 'danger'} style={{ fontSize: 12 }}>（含超出 {amt(over)}{asAdvance ? ` 转${t.adv}` : '，请勾选转' + t.adv}）</Typography.Text>}
+                    </span>
+                  ),
+                },
                 ...(foreign
                   ? [
-                      { key: 'bankb', label: `${t.bank}（${base}）`, children: amt(pv.bank + (over > 0 && asAdvance ? r2(over * (rate || bookRate)) : 0)) },
+                      { key: 'bankb', label: `${t.bank}（${base}）`, children: amt(r2(pv.bank + (over > 0 ? over * (rate || bookRate) : 0))) },
                       { key: 'booked', label: `冲销${t.name}（记账汇率 ${rateText(bookRate)}）`, children: `${base} ${amt(pv.booked)}` },
                       { key: 'fee', label: `手续费（${base}）`, children: amt(pv.feeBase) },
                       { key: 'fx', label: '汇兑差异', span: 2, children: <FxText v={pv.fx} base={base} /> },
@@ -329,8 +365,9 @@ function SettleModal({ kind, open, base, rateOf, onClose, onDone }: { kind: Kind
     try {
       const res = await post('/finance/receipts', {
         kind, partner_id: v.partner_id, currency, amount, fee_amount: v.fee_amount || 0, exchange_rate: currency === base ? undefined : v.exchange_rate,
-        pay_date: toDate(v.pay_date), method: v.method, reference: v.reference, remark: v.remark, as_advance: !!v.as_advance,
+        pay_date: toDate(v.pay_date), method: v.method, reference: v.reference, remark: v.remark, as_advance: !!v.as_advance, bank_account: v.bank_account || null,
       });
+      rememberAccount(kind, v.bank_account);
       Modal.success({
         title: `${t.settle}已登记：${res.receipt_no}`,
         width: 560,
@@ -359,7 +396,7 @@ function SettleModal({ kind, open, base, rateOf, onClose, onDone }: { kind: Kind
 
   return (
     <Modal open={open} title={`${t.settle}（一笔款核销多张${t.name}单，按到期日先后自动分配）`} width={900} style={{ top: 24 }} okText="确认登记" onCancel={onClose} onOk={submit} confirmLoading={saving} destroyOnHidden maskClosable={false}>
-      <Form form={form} layout="vertical" preserve={false} initialValues={{ pay_date: dayjs(), method: kind === 'AR' ? '电汇(T/T)' : '银行转账', fee_amount: 0, currency: base }}>
+      <Form form={form} layout="vertical" preserve={false} initialValues={{ pay_date: dayjs(), method: kind === 'AR' ? '电汇(T/T)' : '银行转账', fee_amount: 0, currency: base, bank_account: recentAccounts(kind)[0] }}>
         <Row gutter={16}>
           <Col span={10}>
             <Form.Item name="partner_id" label={t.partner} rules={[{ required: true, message: `请选择${t.partner}` }]}>
@@ -397,7 +434,10 @@ function SettleModal({ kind, open, base, rateOf, onClose, onDone }: { kind: Kind
           <Col span={6}>
             <Form.Item name="reference" label="银行流水号"><Input /></Form.Item>
           </Col>
-          <Col span={currency !== base ? 24 : 6}>
+          <Col span={currency !== base ? 12 : 6}>
+            <Form.Item name="bank_account" label={kind === 'AR' ? '收款账户' : '付款账户'}><BankAccountInput kind={kind} /></Form.Item>
+          </Col>
+          <Col span={currency !== base ? 12 : 24}>
             <Form.Item name="remark" label="备注"><Input /></Form.Item>
           </Col>
         </Row>
@@ -521,6 +561,51 @@ function docExportColumns(kind: Kind): ExportColumn[] {
   ];
 }
 
+/** 应收单发票号 / 开票日期（财务登记，金蝶凭证摘要带发票号） */
+function InvoiceCell({ doc, editable, onDone }: { doc: Rec; editable: boolean; onDone: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [no, setNo] = useState<string>(doc.invoice_no ?? '');
+  const [date, setDate] = useState<string | null>(doc.invoice_date ?? null);
+  const save = async () => {
+    await put(`/finance/docs/${doc.id}/invoice`, { invoice_no: no || null, invoice_date: date });
+    message.success(no ? `已登记发票 ${no}` : '已清除发票号');
+    setOpen(false);
+    onDone();
+  };
+  const text = doc.invoice_no ? (
+    <span>
+      <span className="mono">{doc.invoice_no}</span>
+      {doc.invoice_date && <Typography.Text type="secondary" style={{ fontSize: 12 }}> {fmtDate(doc.invoice_date).slice(5)}</Typography.Text>}
+    </span>
+  ) : (
+    <Typography.Text type="secondary">未开票</Typography.Text>
+  );
+  if (!editable || doc.status === 'VOID') return text;
+  return (
+    <Popover
+      open={open}
+      onOpenChange={(o) => {
+        setOpen(o);
+        if (o) {
+          setNo(doc.invoice_no ?? '');
+          setDate(doc.invoice_date ?? dayjs().format('YYYY-MM-DD'));
+        }
+      }}
+      trigger="click"
+      title="登记发票"
+      content={
+        <Space direction="vertical">
+          <Input autoFocus placeholder="发票号码" value={no} onChange={(e) => setNo(e.target.value)} onPressEnter={save} />
+          <DatePicker value={date ? dayjs(date) : null} onChange={(d) => setDate(d ? d.format('YYYY-MM-DD') : null)} placeholder="开票日期" style={{ width: '100%' }} />
+          <Button type="primary" size="small" onClick={save}>保存</Button>
+        </Space>
+      }
+    >
+      <Typography.Link>{doc.invoice_no ? text : '登记发票'}</Typography.Link>
+    </Popover>
+  );
+}
+
 function FinDocs({ kind, totals, base, rateOf, onChanged }: { kind: Kind; totals: Rec; base: string; rateOf: (c: string) => number | undefined; onChanged: () => void }) {
   const { can } = useAuth();
   const t = TEXT[kind];
@@ -558,31 +643,38 @@ function FinDocs({ kind, totals, base, rateOf, onChanged }: { kind: Kind; totals
     onChanged();
   };
 
-  const columns: TableColumnsType<Rec> = [
-    { title: '单号', dataIndex: 'no', fixed: 'left', sorter: true, render: (v) => <span className="mono">{v}</span> },
+  // 1366 宽度下财务最关心的“金额 / 未结余额 / 状态 / 到期日”排在前面；记账汇率、本位币等放后面。手机上变卡片。
+  const columns: RColumn<Rec>[] = [
+    { title: '单号', dataIndex: 'no', fixed: 'left', sorter: true, width: 130, mobile: 'title', render: (v) => <span className="mono">{v}</span> },
     {
-      title: t.partner, dataIndex: 'partner_name', ellipsis: true, width: 200,
+      title: t.partner, dataIndex: 'partner_name', ellipsis: true, width: 180, mobile: 'subtitle',
       render: (v, r) => <Tooltip title={`${r.partner_code ?? ''} ${v ?? ''}`}><span>{v}</span></Tooltip>,
     },
-    { title: '来源单据', key: 'ref', render: (_, r) => <RefLink doc={r} /> },
-    { title: '单据日期', dataIndex: 'doc_date', sorter: true, render: fmtDate },
-    { title: '到期日', dataIndex: 'due_date', sorter: true, render: (v, r) => <DueDate value={v} overdue={r.status !== 'PAID' && isPast(v)} hint="已逾期未结清" /> },
-    { title: '币别', dataIndex: 'currency', sorter: true, render: (v) => <Tag>{v}</Tag> },
-    { title: '金额', dataIndex: 'amount', align: 'right', sorter: true, render: (v, r) => cur(v, r.currency) },
+    { title: '金额', dataIndex: 'amount', align: 'right', sorter: true, width: 120, render: (v, r) => cur(v, r.currency) },
+    { title: '未结余额', dataIndex: 'balance', align: 'right', width: 120, render: (v, r) => <b>{cur(v, r.currency)}</b> },
+    { title: '状态', dataIndex: 'status', sorter: true, width: 90, render: (v) => <StatusTag dict="fin_status" value={v} /> },
+    { title: '到期日', dataIndex: 'due_date', sorter: true, width: 105, render: (v, r) => <DueDate value={v} overdue={r.status !== 'PAID' && isPast(v)} hint="已逾期未结清" /> },
+    ...(kind === 'AR'
+      ? [{
+          title: '发票号', dataIndex: 'invoice_no', width: 140, mobile: 'hidden' as const,
+          render: (v: string | null, r: Rec) => <InvoiceCell doc={r} editable={can('finance')} onDone={reload} />,
+        }]
+      : []),
+    ...(kind === 'AP' ? [{ title: '来料检验', key: 'iqc', width: 110, render: (_: unknown, r: Rec) => <IqcTag iqc={r.iqc} /> }] : []),
+    { title: '来源单据', key: 'ref', mobile: 'hidden', render: (_, r) => <RefLink doc={r} /> },
+    { title: '单据日期', dataIndex: 'doc_date', sorter: true, mobile: 'hidden', render: fmtDate },
+    { title: '币别', dataIndex: 'currency', sorter: true, mobile: 'hidden', render: (v) => <Tag>{v}</Tag> },
     {
-      title: '记账汇率', dataIndex: 'exchange_rate', align: 'right',
+      title: '记账汇率', dataIndex: 'exchange_rate', align: 'right', mobile: 'hidden',
       render: (v, r) => (r.currency === base ? '-' : v === null ? <Typography.Text type="warning">缺汇率</Typography.Text> : rateText(v)),
     },
-    { title: `本位币（${base}）`, dataIndex: 'base_amount', align: 'right', sorter: true, render: (v) => amt(v) },
-    { title: t.paid, dataIndex: 'paid_amount', align: 'right', sorter: true, render: (v, r) => cur(v, r.currency) },
-    { title: '未结余额', dataIndex: 'balance', align: 'right', render: (v, r) => <b>{cur(v, r.currency)}</b> },
-    { title: '状态', dataIndex: 'status', sorter: true, render: (v) => <StatusTag dict="fin_status" value={v} /> },
-    ...(kind === 'AP' ? [{ title: '来料检验', key: 'iqc', render: (_: unknown, r: Rec) => <IqcTag iqc={r.iqc} /> }] : []),
-    { title: '摘要', dataIndex: 'remark', ellipsis: true, width: 200, render: (v) => v || '-' },
+    { title: `本位币（${base}）`, dataIndex: 'base_amount', align: 'right', sorter: true, mobile: 'hidden', render: (v) => amt(v) },
+    { title: t.paid, dataIndex: 'paid_amount', align: 'right', sorter: true, mobile: 'hidden', render: (v, r) => cur(v, r.currency) },
+    { title: '摘要', dataIndex: 'remark', ellipsis: true, width: 200, mobile: 'hidden', render: (v) => v || '-' },
   ];
   if (can('finance')) {
     columns.push({
-      title: '操作', key: '_op', fixed: 'right', width: 110,
+      title: '操作', key: '_op', fixed: 'right', width: 90,
       render: (_, r) => (r.status !== 'PAID' && r.doc_type === kind ? <Button size="small" type="link" icon={<DollarOutlined />} onClick={() => setPaying(r)}>{t.pay}</Button> : null),
     });
   }
@@ -601,6 +693,7 @@ function FinDocs({ kind, totals, base, rateOf, onChanged }: { kind: Kind; totals
       : []),
     { title: '结算方式', dataIndex: 'method', render: (v) => v || '-' },
     { title: '流水号/票据号', dataIndex: 'reference', render: (v) => v || '-' },
+    { title: '账户', dataIndex: 'bank_account', render: (v) => v || '-' },
     { title: '状态', dataIndex: 'status', render: (_, p) => payStatus(p) },
     { title: '登记人', dataIndex: 'created_by', render: (v, p) => `${v ?? '-'} · ${fmtDateTime(p.created_at)}` },
     ...(can('finance')
@@ -662,7 +755,7 @@ function FinDocs({ kind, totals, base, rateOf, onChanged }: { kind: Kind; totals
         <ExportButton url="/finance/docs" params={{ ...query, sort: undefined, order: undefined }} filename={`${t.name}明细_${dayjs().format('YYYYMMDD')}`} columns={docExportColumns(kind)} />
         {can('finance') && <Button icon={<MergeCellsOutlined />} onClick={() => setSettling(true)}>{t.settle}</Button>}
       </Space>
-      <Table
+      <ResponsiveTable
         rowKey="id"
         size="middle"
         columns={columns}
@@ -672,6 +765,7 @@ function FinDocs({ kind, totals, base, rateOf, onChanged }: { kind: Kind; totals
         onChange={onTableChange}
         scroll={{ x: 'max-content' }}
         expandable={{
+          columnWidth: 28,
           rowExpandable: (r) => !!r.payments?.length,
           expandedRowRender: (r) => <Table rowKey="id" size="small" columns={payCols(r.currency)} dataSource={r.payments} pagination={false} scroll={{ x: 'max-content' }} />,
         }}

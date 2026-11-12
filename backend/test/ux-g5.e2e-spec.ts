@@ -217,11 +217,10 @@ describe('好用性修复 G5：工位终端 / 工程', () => {
   test('C-F07 终端授权 / C-F13 本人刷卡恢复 / C-F17 QA 要求换件时必须先登记', async () => {
     const { api } = t;
     const ref = await api.ids();
-    // 终端账号密码授权（退出工位 / 终端设置）
-    expect((await api.as('pmc').ok('post', '/api/mes/station/authorize', { password: SIG.password })).full_name).toBe('周计划');
-    const bad = await api.as('pmc').post('/api/mes/station/authorize', { password: 'wrong' });
+    // 班组长授权（退出工位 / 终端设置）：第二轮改为刷班组长工牌 + PIN，详见 ux-r4
+    expect((await api.as('pmc').ok('post', '/api/mes/station/authorize', { badge_no: 'E3001', pin: '1357' })).user.full_name).toBe('赵班长');
+    const bad = await api.as('pmc').post('/api/mes/station/authorize', { badge_no: 'E3001', pin: '0000' });
     expect(bad.status).toBe(400);
-    expect(bad.body.detail).toContain('密码错误');
     // 本人刷卡恢复：工牌须属于令牌对应的操作员
     expect(await api.as('op1').ok('post', '/api/mes/station/resume', { badge_no: 'E1001' })).toEqual({ ok: true });
     expect((await api.as('op1').post('/api/mes/station/resume', { badge_no: 'E1002' })).body.detail).toBe('不是锁定前的操作员，请输入 PIN 登录');
@@ -233,7 +232,7 @@ describe('好用性修复 G5：工位终端 / 工程', () => {
     const fail = (await report(api, ref, sns[0], 20, { values: { ...GOOD[20], IRR: 30 } })).body;
     expect(fail.result).toBe('FAIL');
     const ncr = await api.find('/api/ncrs', { q: fail.ncr_no });
-    await api.as('qa').ok('post', `/api/ncrs/${ncr.id}/disposition`, { disposition: 'REWORK', remark: '更换LED灯板', signature: SIG });
+    await api.as('qa').ok('post', `/api/ncrs/${ncr.id}/disposition`, { disposition: 'REWORK', remark: '更换LED灯板', require_part_change: true, signature: SIG });
     const scan = await api.as('op1').ok('get', `/api/mes/scan/${sns[0]}`, { op: 'OPT' });
     expect(scan.rework).toMatchObject({ require_parts: true, registered: 0 });
     expect(scan.rework.candidates.map((c: any) => c.code)).toContain('SA-RL300-LB');
@@ -273,7 +272,7 @@ describe('好用性修复 G5：工位终端 / 工程', () => {
       ['changed', 'param:AGE/AGE_H', 'lower', true],
       ['removed', 'param:AGE/IRR_DROP', null, true],
     ]);
-    expect(live.summary).toBe('光学性能测试：新增测试项 UNI 均匀度（≥80 %）；老化测试：老化时长 下限 4 → 300；老化测试：删除测试项 IRR_DROP 老化后辐照度衰减（原规格 ≤5 %）');
+    expect(live.summary).toBe('【光学性能测试】新增测试项 UNI 均匀度（≥80 %）。【老化测试】老化时长 下限 4→300；删除测试项 IRR_DROP 老化后辐照度衰减（原规格 ≤5 %）'); // 第二轮：摘要按工序归并
     await api.as('engineer').ok('put', `/api/routings/${nr.id}`, { material_id: ref.m['FG-RL300'], version: 'A2', operations: ops });
     expect((await api.ok('get', `/api/routings/${nr.id}/diff`)).summary).toBe(live.summary);
     // 保存草稿不要求变更原因；提交时才要求

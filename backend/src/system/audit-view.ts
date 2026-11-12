@@ -33,7 +33,7 @@ export const ENTITY_NAMES: Record<string, string> = {
   wms_stock: '库存', wms_stock_move: '库存流水', wms_receipt: '入库单', wms_receipt_line: '入库明细', wms_issue: '领料单',
   wms_issue_line: '领料明细', wms_shipment: '发货单', wms_shipment_line: '发货明细', wms_stock_count: '盘点单', wms_stock_count_line: '盘点明细',
   wms_customer_return: '客户退货', wms_customer_return_line: '客户退货明细', wms_supplier_return: '退供应商单',
-  sys_user: '用户', sys_login: '登录', sys_attachment: '附件', sys_setting: '系统设置',
+  sys_user: '用户', sys_login: '登录', sys_attachment: '附件', sys_setting: '系统设置', sys_audit_verify: '审计完整性校验',
 };
 export const entityName = (e: string | null | undefined) => (e ? ENTITY_NAMES[e] ?? e : '-');
 
@@ -379,7 +379,8 @@ export async function enrichAudit(db: PrismaService, rows: Rec[], opts: { lineDi
       return mid ? refLabel('Material', mid) : null;
     }
     if (model === 'RoutingOperation') return [it.code, it.name].filter(Boolean).join(' ') || null;
-    if (model === 'RoutingParam') return [it.code, it.name].filter(Boolean).join(' ') || null;
+    // 工序参数的行键已是编码（如 HIPOT），标题只显示名称，避免“HIPOTHIPOT”
+    if (model === 'RoutingParam') return it.name ?? null;
     return it.name ?? null;
   };
   for (const p of pending) {
@@ -406,7 +407,9 @@ export async function enrichAudit(db: PrismaService, rows: Rec[], opts: { lineDi
       doc_no = u ? labelOf('User', u) : r.username;
       doc_url = u ? urlOf('User', u) : null;
     } else if (r.entity === 'sys_setting') {
-      doc_no = '上线迁移模式';
+      doc_no = String(r.changes || '').includes('"company.') ? '公司信息' : '上线迁移模式';
+    } else if (r.entity === 'sys_audit_verify') {
+      doc_no = '完整性校验';
     } else if (model) {
       const p = parentOf(model, r);
       if (p) {
@@ -466,6 +469,16 @@ export async function docTargets(db: PrismaService, text: string): Promise<{ ent
     if (!out.has(t)) out.set(t, new Set());
     list.forEach((x) => out.get(t)!.add(x));
   };
+  // “编码 版本”（列表上显示的 BOM/工艺单号，如“FG-RL300 A2”）：按产品编码 + 版本精确找 BOM 与工艺路线
+  const ver = q.match(/^(\S+)\s+(\S+)$/);
+  if (ver) {
+    const mats = await ids('Material', { code: { equals: ver[1], mode: 'insensitive' } });
+    if (mats.length) {
+      const v = { equals: ver[2], mode: 'insensitive' as const };
+      put('Bom', await ids('Bom', { material_id: { in: mats }, version: v }));
+      put('Routing', await ids('Routing', { material_id: { in: mats }, version: v }));
+    }
+  }
   const byNo = ['SalesOrder', 'PurchaseOrder', 'WorkOrder', 'Inspection', 'Ncr', 'Capa', 'Receipt', 'MaterialIssue', 'Shipment', 'StockCount', 'FinanceDoc', 'MrpRun', 'ProductRelease', 'CustomerReturn', 'Complaint', 'SupplierReturn'];
   await Promise.all(byNo.map(async (m) => put(m, await ids(m, { no: like }))));
   const byCode = ['Material', 'Customer', 'Supplier', 'Equipment', 'Location', 'Warehouse', 'WorkCenter'];
@@ -491,6 +504,9 @@ export async function docTargets(db: PrismaService, text: string): Promise<{ ent
       if (pids.length) put(child, ((await delegateOf(c, child).findMany({ where: { [fk]: { in: pids } }, select: { id: true }, take: 500 })) as { id: number }[]).map((x) => x.id));
     }),
   );
+  // 工序参数（测试规格）挂在工序下：再取一层
+  const opIds = [...(out.get(tableOf('RoutingOperation')) ?? [])];
+  if (opIds.length) put('RoutingParam', ((await delegateOf(c, 'RoutingParam').findMany({ where: { operation_id: { in: opIds } }, select: { id: true }, take: 2000 })) as { id: number }[]).map((x) => x.id));
   const users = [...(out.get('sys_user') ?? [])];
   const res = [...out.entries()].map(([entity, s]) => ({ entity, entity_id: { in: [...s] } }));
   if (users.length) res.push({ entity: 'sys_login', entity_id: { in: users } });

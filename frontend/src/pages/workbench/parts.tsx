@@ -1,19 +1,18 @@
 /** 岗位工作台的各个区块（G1）：KPI 卡、待办、待我拍板、财务应收应付、管理员账号安全、操作员首页、仓管九宫格、厂长图表与下钻。 */
-import { Alert, Badge, Button, Card, Col, Empty, List, Modal, Row, Space, Statistic, Table, Tag, Typography } from 'antd';
-import {
-  ArrowRightOutlined, AuditOutlined, BarcodeOutlined, CarOutlined, ContainerOutlined, DatabaseOutlined, ExportOutlined, ImportOutlined,
-  InboxOutlined, RollbackOutlined, ScanOutlined, SwapOutlined, ToolOutlined,
-} from '@ant-design/icons';
+import { Alert, Badge, Button, Card, Col, Empty, Input, List, Modal, Row, Space, Statistic, Table, Tag, Typography, message } from 'antd';
+import { ArrowRightOutlined, AuditOutlined, ScanOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import * as echarts from 'echarts';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { get, type Rec } from '../../api/http';
+import { get, post, type Rec } from '../../api/http';
 import { useAuth } from '../../auth';
+import { isCancel, useESign } from '../../components/ESign';
 import ResponsiveTable, { type RColumn } from '../../components/ResponsiveTable';
 import { dictLabel } from '../../utils/dict';
 import { fmtDateTime, fmtMoney } from '../../utils/format';
-import { canPath, firstRoute, useGo } from './links';
+import { PDA_TILES } from '../wms/pda/tiles';
+import { canPath, useGo } from './links';
 
 /** ECharts 封装（支持点击下钻） */
 export function ClickChart({ option, height = 260, onClick }: { option: echarts.EChartsOption; height?: number; onClick?: (p: any) => void }) {
@@ -266,56 +265,111 @@ export function OperatorHome({ o, kpis }: { o: Rec; kpis?: ReactNode }) {
   );
 }
 
-/** 仓管九宫格：大按钮 + 待办数（PDA 单手可点） */
+/**
+ * 仓管九宫格：与 /wms/pda 共用同一份定义（R5 的 PDA_TILES），角标取工作台待办（与 badgeKey 同名）。
+ * 电脑和 PDA 进入同一批扫码作业页，避免两处入口不一致（B-N12）。
+ */
 export function WarehouseGrid({ todos, narrow }: { todos: Rec[]; narrow: boolean }) {
   const go = useGo();
   const { can } = useAuth();
-  const [putaway, setPutaway] = useState<number | null>(null);
-  useEffect(() => {
-    // G7 待上架清单（接口未上线时不显示数字）
-    get('/wms/putaway', undefined, true)
-      .then((r: any) => setPutaway(Array.isArray(r) ? r.length : Array.isArray(r?.items) ? r.items.length : typeof r?.total === 'number' ? r.total : null))
-      .catch(() => setPutaway(null));
-  }, []);
-  const n = (key: string) => todos.find((t) => t.key === key)?.count ?? 0;
-  // 窄屏（PDA）优先进 G7 的 PDA 作业页（竖排、扫码连续作业），电脑进列表页
-  const pick = (pda: string[], pc: string[]) => (narrow ? firstRoute(...pda, ...pc) : firstRoute(...pc));
-  const tiles: { label: string; icon: ReactNode; path: string; count?: number | null; sub?: string }[] = [
-    { label: '采购收货', icon: <ImportOutlined />, path: pick(['/wms/pda/receive'], ['/wms/receipts']), count: n('po_receive'), sub: '扫采购单收货' },
-    { label: '上架/调拨', icon: <SwapOutlined />, path: pick(['/wms/pda/putaway'], ['/wms/putaway', '/wms/stock']), count: putaway, sub: '扫批号→扫库位' },
-    { label: '拣料领料', icon: <ExportOutlined />, path: pick(['/wms/pda/pick'], ['/wms/issues?status=DRAFT']), count: n('issue'), sub: '按单拣料、过账' },
-    { label: '发货出库', icon: <CarOutlined />, path: n('ship') ? '/wms/shipments?status=DRAFT' : '/wms/shipments?new=1', count: n('ship') + n('shippable'), sub: '扫序列号发货' },
-    { label: '盘点', icon: <ContainerOutlined />, path: pick(['/wms/pda/count'], ['/wms/counts']), count: n('count_open'), sub: '扫库位逐条录入' },
-    { label: '完工入库', icon: <ToolOutlined />, path: pick(['/wms/pda/fg'], ['/mes/work-orders?status=IN_PROGRESS,COMPLETED']), count: n('fg') },
-    { label: '库存查询', icon: <DatabaseOutlined />, path: '/wms/stock', sub: '扫物料/批号/库位' },
-    { label: '客户退货', icon: <RollbackOutlined />, path: n('rma') ? '/wms/customer-returns?status=RECEIVED' : '/wms/customer-returns', count: n('rma') },
-    { label: '退供应商', icon: <BarcodeOutlined />, path: firstRoute('/quality/supplier-returns?status=PENDING', '/quality/ncrs'), count: n('supplier_return'), sub: '不合格品出库' },
-    ...(narrow ? [] : [{ label: '库存流水', icon: <InboxOutlined />, path: '/wms/moves' }]),
-  ].filter((t) => canPath(t.path, can));
+  const n = (key?: string) => (key ? todos.find((t) => t.key === key)?.count ?? 0 : 0);
+  const tiles = PDA_TILES.filter((t) => !t.perm || can(...t.perm));
   return (
     <div className="wh-grid">
-      {tiles.map((t) => (
-        <div key={t.label} className="wh-tile" role="button" tabIndex={0} onClick={() => go(t.path)} onKeyDown={(e) => e.key === 'Enter' && go(t.path)}>
-          {!!t.count && <Badge className="wh-badge" count={t.count} overflowCount={99} />}
-          {t.icon}
-          <span className="wh-label">{t.label}</span>
-          {t.sub && !narrow && <span className="wh-sub">{t.sub}</span>}
-        </div>
-      ))}
+      {tiles.map((t) => {
+        const count = n(t.badgeKey) + (t.key === 'ship' ? n('shippable') : 0);
+        const Icon = t.icon;
+        return (
+          <div key={t.key} className="wh-tile" role="button" tabIndex={0} onClick={() => go(t.path)} onKeyDown={(e) => e.key === 'Enter' && go(t.path)}>
+            {!!count && <Badge className="wh-badge" count={count} overflowCount={99} />}
+            <Icon style={{ color: t.color }} />
+            <span className="wh-label">{t.title}</span>
+            {!narrow && t.badgeKey && count > 0 && <span className="wh-sub">{todos.find((x) => x.key === t.badgeKey)?.title ?? ''}</span>}
+          </div>
+        );
+      })}
     </div>
   );
 }
 
 /** 厂长：待我拍板 */
-export function Approvals({ items, risk, onHash }: { items: Rec[]; risk: number; onHash: (h: string) => void }) {
+export function Approvals({ items, risk, bigPos = [], onHash, onChanged }: { items: Rec[]; risk: number; bigPos?: Rec[]; onHash: (h: string) => void; onChanged?: () => void }) {
   const go = useGo();
+  const [sign, signHolder] = useESign();
+  const [busy, setBusy] = useState<number | null>(null);
+  const [rejecting, setRejecting] = useState<Rec | null>(null);
+  const [reason, setReason] = useState('');
   const rows = [
     ...(risk ? [{ key: 'risk_red', title: '交付风险红灯订单（会延误）', count: risk, path: '#risk-red', level: 'error' }] : []),
-    ...items,
+    // 大额采购单在下方逐张列出，可直接批准/退回
+    ...items.filter((t) => !(t.key === 'po_big' && bigPos.length)),
   ];
+  const approve = async (po: Rec) => {
+    setBusy(po.id);
+    try {
+      await sign({ meaning: `大额采购单审批（${po.no}）`, submit: (signature) => post(`/purchase-orders/${po.id}/approve`, { signature }) });
+      message.success(`${po.no} 已批准`);
+      onChanged?.();
+    } catch (e) {
+      if (!isCancel(e)) throw e;
+    } finally {
+      setBusy(null);
+    }
+  };
+  const reject = async () => {
+    const po = rejecting;
+    if (!po) return;
+    if (!reason.trim()) return message.warning('请填写退回原因（采购员据此修改）');
+    setBusy(po.id);
+    try {
+      await sign({ meaning: `大额采购单退回（${po.no}）`, submit: (signature) => post(`/purchase-orders/${po.id}/reject`, { reason: reason.trim(), signature }) });
+      message.success(`${po.no} 已退回采购员`);
+      setRejecting(null);
+      setReason('');
+      onChanged?.();
+    } catch (e) {
+      if (!isCancel(e)) throw e;
+    } finally {
+      setBusy(null);
+    }
+  };
+  // 没有要拍板的事：收成一行，不占首屏
+  if (!rows.length && !bigPos.length) {
+    return (
+      <Card size="small" styles={{ body: { padding: '10px 16px' } }}>
+        <Space><AuditOutlined style={{ color: '#52c41a' }} /><b>待我拍板</b><Typography.Text type="secondary">暂无需要您拍板的事项</Typography.Text></Space>
+      </Card>
+    );
+  }
   return (
     <Card size="small" title={<Space><AuditOutlined />待我拍板</Space>} style={{ height: '100%' }}>
-      {rows.length ? (
+      {signHolder}
+      {bigPos.length > 0 && (
+        <List
+          size="small"
+          header={<Typography.Text strong>大额采购单待审批（{bigPos.length}）</Typography.Text>}
+          dataSource={bigPos}
+          renderItem={(po: Rec) => (
+            <List.Item
+              actions={[
+                <Button key="ok" size="small" type="primary" loading={busy === po.id} onClick={() => approve(po)}>批准</Button>,
+                <Button key="no" size="small" danger disabled={busy === po.id} onClick={() => { setRejecting(po); setReason(''); }}>退回</Button>,
+              ]}
+            >
+              <Space direction="vertical" size={0}>
+                <Space wrap>
+                  <a className="mono" onClick={() => go(`/purchase/orders/${po.id}`)}>{po.no}</a>
+                  <span>{po.supplier_name}</span>
+                </Space>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {fmtMoney(po.total_amount, po.currency)}{po.currency !== po.base_currency && po.base_amount != null ? `（折合 ${fmtMoney(po.base_amount, po.base_currency)}）` : ''} · 采购 {po.created_by ?? '-'}{po.expected_date ? ` · 要求到货 ${po.expected_date}` : ''}
+                </Typography.Text>
+              </Space>
+            </List.Item>
+          )}
+        />
+      )}
+      {rows.length > 0 && (
         <List
           dataSource={rows}
           renderItem={(t: Rec) => (
@@ -324,7 +378,56 @@ export function Approvals({ items, risk, onHash }: { items: Rec[]; risk: number;
             </List.Item>
           )}
         />
-      ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无需要您拍板的事项" />}
+      )}
+      <Modal open={!!rejecting} title={`退回采购单 ${rejecting?.no ?? ''}`} okText="退回（电子签名）" okButtonProps={{ danger: true, loading: busy === rejecting?.id }}
+        onOk={reject} onCancel={() => setRejecting(null)} destroyOnHidden>
+        <Typography.Paragraph type="secondary">退回后采购单回到草稿，采购员按原因修改后重新提交审批。</Typography.Paragraph>
+        <Input.TextArea autoFocus rows={3} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="退回原因，如：单价高于上次 8%，请再议价；或数量请按 MRP 建议调整" />
+      </Modal>
+    </Card>
+  );
+}
+
+/** 到期预警（QA/厂长/采购/工程）：仪器校准、供应商资质、人员上岗资质、临期批次；点条目进对应资料 */
+const EXPIRY_GROUPS: { key: string; title: string; window: string }[] = [
+  { key: 'calibration', title: '仪器校准', window: '30 天内' },
+  { key: 'supplier', title: '供应商资质', window: '60 天内' },
+  { key: 'qualification', title: '人员上岗资质', window: '30 天内' },
+  { key: 'lot', title: '临期批次', window: '30 天内' },
+];
+export function ExpiryCard({ data }: { data: Record<string, Rec[]> }) {
+  const go = useGo();
+  const groups = EXPIRY_GROUPS.filter((g) => data[g.key]);
+  const total = groups.reduce((n, g) => n + (data[g.key]?.length ?? 0), 0);
+  const dayTag = (d: number | null) => (d === null ? null : d < 0 ? <Tag color="red">已过期 {-d} 天</Tag> : d === 0 ? <Tag color="red">今天到期</Tag> : <Tag color={d <= 7 ? 'orange' : 'gold'}>剩 {d} 天</Tag>);
+  return (
+    <Card id="expiry" size="small" title={<Space><Badge count={total} size="small" offset={[6, -2]}><span>到期预警</span></Badge></Space>}>
+      <Row gutter={[16, 8]}>
+        {groups.map((g) => (
+          <Col key={g.key} xs={24} md={12} xl={groups.length > 2 ? 6 : 12}>
+            <Typography.Text strong>{g.title}</Typography.Text>
+            <Typography.Text type="secondary" style={{ fontSize: 12, marginLeft: 6 }}>{g.window}（{data[g.key].length}）</Typography.Text>
+            <List
+              size="small"
+              dataSource={data[g.key].slice(0, 6)}
+              locale={{ emptyText: '无' }}
+              renderItem={(x: Rec) => (
+                <List.Item className="todo-item" onClick={() => go(x.url)} style={{ paddingLeft: 0, paddingRight: 0 }}>
+                  <Space direction="vertical" size={0} style={{ minWidth: 0 }}>
+                    <span className="mono" style={{ fontSize: 13 }}>{x.code}</span>
+                    <Typography.Text type="secondary" ellipsis style={{ fontSize: 12, maxWidth: 200 }}>{x.name}{x.qty ? ` · ${x.qty}` : ''}</Typography.Text>
+                  </Space>
+                  <Space direction="vertical" size={0} style={{ alignItems: 'flex-end' }}>
+                    {dayTag(x.days_left)}
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>{x.date}</Typography.Text>
+                  </Space>
+                </List.Item>
+              )}
+            />
+            {data[g.key].length > 6 && <Typography.Text type="secondary" style={{ fontSize: 12 }}>另有 {data[g.key].length - 6} 项</Typography.Text>}
+          </Col>
+        ))}
+      </Row>
     </Card>
   );
 }
@@ -341,7 +444,11 @@ export function ManagerCharts({ d, drill }: { d: Rec; drill: { output: (date?: s
   const outputOpt = useMemo(() => ({
     grid: { left: 36, right: 12, top: 16, bottom: 28 },
     tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: (p: any) => `${p[0].axisValue}<br/>完工 <b>${p[0].value}</b> 台（点击看明细）` },
-    xAxis: { type: 'category', data: (d.output_trend || []).map((r: Rec) => dayjs(r.date).format('MM-DD')), ...AXIS },
+    // 横轴隔天显示，保证最右侧“今天”总有标签
+    xAxis: {
+      type: 'category', data: (d.output_trend || []).map((r: Rec, i: number, a: Rec[]) => (i === a.length - 1 ? '今天' : dayjs(r.date).format('MM-DD'))), ...AXIS,
+      axisLabel: { color: '#595959', interval: (i: number) => (((d.output_trend || []).length - 1 - i) % 2 === 0) },
+    },
     yAxis: { type: 'value', minInterval: 1, ...AXIS, ...SPLIT },
     series: [{ type: 'bar', barMaxWidth: 24, itemStyle: { color: SERIES, borderRadius: [4, 4, 0, 0] }, data: (d.output_trend || []).map((r: Rec) => r.qty) }],
   }), [d]);

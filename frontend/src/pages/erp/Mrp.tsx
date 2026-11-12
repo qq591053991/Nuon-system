@@ -2,13 +2,14 @@ import {
   Alert, App, Button, Card, Col, Collapse, Descriptions, Empty, Modal, Popconfirm, Popover, Row, Segmented, Select, Space, Spin, Statistic, Table, Tag, Tooltip,
   Typography, message, type TableColumnsType,
 } from 'antd';
-import { ReloadOutlined, SwapOutlined, ThunderboltOutlined, WarningOutlined } from '@ant-design/icons';
+import { NotificationOutlined, ReloadOutlined, SwapOutlined, ThunderboltOutlined, WarningOutlined } from '@ant-design/icons';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { get, post, type Rec } from '../../api/http';
 import { useAuth } from '../../auth';
 import ExportButton from '../../components/ExportButton';
 import PageHeader from '../../components/PageHeader';
+import { PrintButton, PrintHeader } from '../../components/Print';
 import StatusTag from '../../components/StatusTag';
 import { dictLabel } from '../../utils/dict';
 import { fmtDate, fmtDateTime, fmtQty } from '../../utils/format';
@@ -133,9 +134,9 @@ export default function Mrp() {
   const doConvert = async (force: boolean) => {
     setConverting(true);
     try {
-      const r = await post('/mrp/convert', { suggestion_ids: selected, force });
+      const r = await post('/mrp/convert', { suggestion_ids: toConvert, force });
       setResult(r);
-      setSelected([]);
+      setSelected((s) => s.filter((x) => !toConvert.includes(x)));
       if (runId) await loadRun(runId);
     } finally {
       setConverting(false);
@@ -146,7 +147,7 @@ export default function Mrp() {
   const convert = async () => {
     const st: Rec | null = runId ? await get(`/mrp/runs/${runId}/staleness`, undefined, true).catch(() => null) : null;
     setStale(st);
-    const picked = selected.map((id) => byId.get(id)).filter(Boolean) as Rec[];
+    const picked = toConvert.map((id) => byId.get(id)).filter(Boolean) as Rec[];
     const buy = picked.filter((s) => s.action === 'PURCHASE');
     const make = picked.filter((s) => s.action === 'PRODUCE');
     const suppliers = [...new Set(buy.map((s) => s.supplier_name || '未设置默认供应商'))];
@@ -176,6 +177,23 @@ export default function Mrp() {
       ),
       onOk: () => doConvert(!!st?.stale),
     });
+  };
+
+  const csSelected = selected.filter((id) => byId.get(id)?.action === 'CUSTOMER_SUPPLY');
+  const toConvert = selected.filter((id) => byId.get(id)?.action !== 'CUSTOMER_SUPPLY');
+  const [notifying, setNotifying] = useState(false);
+  const [notice, setNotice] = useState<Rec | null>(null);
+  /** 客供料：生成通知单（按客户分组，可打印/导出发给客户），并标记“已通知” */
+  const notifyCustomers = async () => {
+    setNotifying(true);
+    try {
+      const r = await post('/mrp/suggestions/notify', { suggestion_ids: csSelected });
+      setNotice(r);
+      setSelected((s) => s.filter((x) => !csSelected.includes(x)));
+      if (runId) loadRun(runId);
+    } finally {
+      setNotifying(false);
+    }
   };
 
   const ignore = async (sid: number, ok = '已忽略') => {
@@ -292,6 +310,11 @@ export default function Mrp() {
         return (
           <Space direction="vertical" size={0}>
             <StatusTag dict="mrp_status" value={v} />
+            {r.notified_at && (
+              <Tooltip title={`${r.notified_by ?? ''} ${fmtDateTime(r.notified_at)} 已通知客户供料`}>
+                <Tag color="purple" style={{ marginInlineEnd: 0 }}>已通知客户</Tag>
+              </Tooltip>
+            )}
             {conv.map((x) => (
               <span key={x.no}>
                 <DocLink kind={kind(x)} id={x.id} no={x.no} />
@@ -343,6 +366,9 @@ export default function Mrp() {
 
   return (
     <>
+      {/* 打印客供料通知单时只打印通知单 */}
+      {notice && <style>{'@media print { .mrp-screen { display: none !important; } }'}</style>}
+      <div className="mrp-screen">
       <PageHeader
         title="MRP 物料需求计划"
         sub="根据已确认的销售订单与在制工单，算出要生产什么、要采购什么、要催什么、要通知客户供什么料。"
@@ -439,9 +465,14 @@ export default function Mrp() {
                       { title: '备注', key: 'note', width: 40 },
                     ]}
                   />
+                  {canConvert && csSelected.length > 0 && (
+                    <Button icon={<NotificationOutlined />} loading={notifying} onClick={notifyCustomers}>
+                      生成客供料通知（{csSelected.length}）
+                    </Button>
+                  )}
                   {canConvert && (
-                    <Button type="primary" icon={<SwapOutlined />} disabled={!selected.length} loading={converting} onClick={convert}>
-                      一键转单{selected.length ? `（${selected.length}）` : ''}
+                    <Button type="primary" icon={<SwapOutlined />} disabled={!toConvert.length} loading={converting} onClick={convert}>
+                      一键转单{toConvert.length ? `（${toConvert.length}）` : ''}
                     </Button>
                   )}
                 </Space>
@@ -460,7 +491,7 @@ export default function Mrp() {
                       ? {
                           selectedRowKeys: selected,
                           onChange: (keys) => setSelected(keys as number[]),
-                          getCheckboxProps: (r: Rec) => ({ disabled: r.status !== 'OPEN' || r.action === 'CUSTOMER_SUPPLY' || isExp(r) }),
+                          getCheckboxProps: (r: Rec) => ({ disabled: r.status !== 'OPEN' || isExp(r) }),
                         }
                       : undefined
                   }
@@ -488,7 +519,9 @@ export default function Mrp() {
         />
       </Space>
 
+      </div>
       <ResultModal result={result} onClose={() => setResult(null)} createdPos={createdPos} createdWos={createdWos} skipped={skipped} />
+      <CsNoticeModal notice={notice} onClose={() => setNotice(null)} />
     </>
   );
 }
@@ -532,5 +565,77 @@ function ResultModal({ result, onClose, createdPos, createdWos, skipped }: { res
         )}
       </Space>
     </Modal>
+  );
+}
+
+/** 客户供料通知单（按客户分组；打印发给客户，或导出 Excel 发邮件） */
+function CsNoticeBody({ n, printing }: { n: Rec; printing?: boolean }) {
+  const cell = { border: '1px solid #000', padding: '3px 6px', fontSize: 11 } as const;
+  return (
+    <div style={printing ? { breakAfter: 'page' } : { marginBottom: 16 }}>
+      {printing ? (
+        <PrintHeader title="客供料需求通知 Customer-Supplied Material Request" extra={<div>通知人：{n._by}</div>} />
+      ) : (
+        <Typography.Title level={5} style={{ marginTop: 0 }}>{n.customer_name ?? '（未指定货主客户）'}</Typography.Title>
+      )}
+      {printing && <p style={{ fontSize: 12 }}>致 To：{n.customer_name}{n.contact ? `　${n.contact}` : ''}{n.phone ? `　${n.phone}` : ''}{n.email ? `　${n.email}` : ''}</p>}
+      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+        <thead>
+          <tr>{['物料编码', '名称 / 规格', '需求数量', '单位', '最迟到料日', '需求日期', '对应订单'].map((h) => <th key={h} style={{ ...cell, background: '#f0f0f0' }}>{h}</th>)}</tr>
+        </thead>
+        <tbody>
+          {(n.items as Rec[]).map((i) => (
+            <tr key={i.suggestion_id}>
+              <td style={cell}>{i.material_code}</td>
+              <td style={cell}>{i.material_name}{i.material_spec ? ` / ${i.material_spec}` : ''}</td>
+              <td style={{ ...cell, textAlign: 'right' }}>{fmtQty(i.qty)}</td>
+              <td style={cell}>{i.uom}</td>
+              <td style={cell}>{fmtDate(i.latest_arrival)}</td>
+              <td style={cell}>{fmtDate(i.required_date)}</td>
+              <td style={cell}>{(i.for_orders || []).join('、') || '-'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {printing && <p style={{ fontSize: 11, marginTop: 8 }}>请在“最迟到料日”前送达，送货单注明物料编码与批号；如不能按期供料请尽快告知，以免影响贵司订单交期。</p>}
+    </div>
+  );
+}
+
+function CsNoticeModal({ notice, onClose }: { notice: Rec | null; onClose: () => void }) {
+  const notices: Rec[] = (notice?.notices || []).map((n: Rec) => ({ ...n, _by: notice?.notified_by }));
+  const rows = notices.flatMap((n) => (n.items as Rec[]).map((i) => ({ ...i, customer_name: n.customer_name })));
+  return (
+    <>
+      {notice && (
+        <div className="print-only">
+          {notices.map((n) => <CsNoticeBody key={n.customer_id ?? 0} n={n} printing />)}
+        </div>
+      )}
+      <Modal
+        open={!!notice}
+        wrapClassName="no-print"
+        width={900}
+        title={`客供料通知已生成（${notices.length} 个客户，已标记“已通知”）`}
+        onCancel={onClose}
+        footer={[
+          <ExportButton
+            key="x"
+            rows={rows}
+            filename="客供料需求通知"
+            columns={[
+              { title: '客户', key: 'customer_name' }, { title: '物料编码', key: 'material_code' }, { title: '名称', key: 'material_name' },
+              { title: '规格', key: 'material_spec' }, { title: '需求数量', key: 'qty', type: 'number' }, { title: '单位', key: 'uom' },
+              { title: '最迟到料日', key: 'latest_arrival', type: 'date' }, { title: '需求日期', key: 'required_date', type: 'date' },
+              { title: '对应订单', value: (r) => (r.for_orders || []).join('、') },
+            ]}
+          />,
+          <PrintButton key="p" text="打印通知单" />,
+          <Button key="ok" type="primary" onClick={onClose}>完成</Button>,
+        ]}
+      >
+        {notices.map((n) => <CsNoticeBody key={n.customer_id ?? 0} n={n} />)}
+      </Modal>
+    </>
   );
 }

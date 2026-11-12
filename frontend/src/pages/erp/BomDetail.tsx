@@ -17,6 +17,7 @@ import { del, get, post, put, type Rec } from '../../api/http';
 import { useAuth } from '../../auth';
 import { isCancel, useESign } from '../../components/ESign';
 import PageHeader from '../../components/PageHeader';
+import ChangeLogButton from '../system/ChangeLogButton';
 import { MaterialSelect } from '../../components/RemoteSelect';
 import StatusTag from '../../components/StatusTag';
 import { dictLabel } from '../../utils/dict';
@@ -236,7 +237,7 @@ function BomBody({ bom, versions, reload }: { bom: Rec; versions: Rec[]; reload:
       const ok = await signed(() => sign({
         meaning: 'BOM批准',
         description: effFuture
-          ? `批准后 ${bom.material_code} 版本 ${bom.version} 将于 ${eff} 生效；生效前新下达的工单和 MRP 继续使用${current ? `当前版本 ${current.version}` : '当前已发布版本'}，到生效日原版本自动作废。已下达的工单不受影响。`
+          ? `批准后 ${bom.material_code} 版本 ${bom.version} 将于 ${eff} 生效；生效前新下达的工单和 MRP 继续使用${current ? `当前版本 ${current.version}` : '当前已发布版本'}，到生效日原版本自动作废。已下达的工单不受影响。${diff?.base ? `\n本次变更：${diff.summary}` : ''}`
           : `批准后 ${bom.material_code} 版本 ${bom.version} 立即生效（生效日期 ${eff ?? '今天'}），原已发布版本自动作废；已下达的工单不受影响。${diff?.base ? `\n本次变更：${diff.summary}` : ''}`,
         submit: (signature) => post(`/boms/${bom.id}/approve`, { signature }, true),
       }));
@@ -362,6 +363,7 @@ function BomBody({ bom, versions, reload }: { bom: Rec; versions: Rec[]; reload:
         extra={
           <>
             <Button icon={<ArrowLeftOutlined />} onClick={() => nav('/engineering/boms')}>返回列表</Button>
+            <ChangeLogButton entity="eng_bom" id={bom.id} />
             {editing && (
               <>
                 <Popconfirm title="确定删除此 BOM 草稿？" onConfirm={remove}>

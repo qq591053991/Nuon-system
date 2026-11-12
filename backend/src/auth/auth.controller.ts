@@ -12,6 +12,12 @@ import { DEMO_PASSWORD, demoPasswordUsers, isDemoMode } from './demo';
 import { checkPasswordPolicy, hashPassword, passwordChangeReason, passwordExpiresAt, passwordPolicyText, PIN_PATTERN, verifyPassword } from './password';
 import { ROLES, roleList, userPermissions } from './roles';
 import { User } from './user.decorator';
+import { getCompany } from '../system/settings';
+
+const companyForOptions = async (db: PrismaService) => {
+  const { updated_at: _a, updated_by: _b, ...c } = await getCompany(db);
+  return c;
+};
 
 class LoginDto {
   @IsString() username: string;
@@ -25,6 +31,12 @@ class ChangePwdDto {
   @IsString() old_password: string;
   @IsString() new_password: string;
 }
+class UnlockDto {
+  /** 本人登录密码；或刷本人工牌 + PIN */
+  @IsOptional() @IsString() password?: string;
+  @IsOptional() @IsString() badge_no?: string;
+  @IsOptional() @IsString() pin?: string;
+}
 class ChangePinDto {
   /** 验证身份：登录密码（办公端）或原 PIN（工位刷工牌会话），二选一 */
   @IsOptional() @IsString() password?: string;
@@ -32,7 +44,7 @@ class ChangePinDto {
   @IsString() new_pin: string;
 }
 
-type UserRow = CurrentUser & Partial<Pick<DbUser, 'password_changed_at' | 'badge_no' | 'must_change_password' | 'pin_hash'>>;
+type UserRow = CurrentUser & Partial<Pick<DbUser, 'password_changed_at' | 'badge_no' | 'must_change_password' | 'pin_hash' | 'must_change_pin'>>;
 
 export function userInfo(u: UserRow, amr: TokenPayload['amr'] = 'password') {
   const roles = roleList(u.roles);
@@ -50,6 +62,8 @@ export function userInfo(u: UserRow, amr: TokenPayload['amr'] = 'password') {
     password_change_reason: amr === 'badge' ? null : passwordChangeReason(pwd),
     /** 密码到期时间（ISO；金蝶账号或不过期时为 null），前端在到期前 7 天提醒 */
     password_expires_at: passwordExpiresAt(pwd),
+    /** 工位 PIN 由管理员生成/重置、本人尚未修改：刷卡后须先设置自己的 PIN（POST /auth/change-pin，old_pin = 当前 PIN） */
+    must_change_pin: !!u.must_change_pin,
   };
 }
 
@@ -77,8 +91,8 @@ export class AuthController {
       demo_password: demo ? DEMO_PASSWORD : null,
       kingdee_enabled: config.kingdee.enabled,
       kingdee_name: '金蝶云星空',
-      /** 本公司信息（单据打印抬头） */
-      company: config.company,
+      /** 本公司信息（单据打印抬头）：系统设置优先，环境变量作默认值 */
+      company: await companyForOptions(this.db),
       idle_minutes: config.idleTimeoutMinutes,
       password_policy: {
         min_length: config.passwordMinLength,
@@ -107,6 +121,18 @@ export class AuthController {
   @Get('me')
   me(@User() user: CurrentUser, @Req() req: { authMethod?: TokenPayload['amr'] }) {
     return userInfo(user as UserRow, req.authMethod);
+  }
+
+  /**
+   * 空闲锁屏解锁（同一账号，页面与未提交内容保留）：本人登录密码，或本人工牌 + PIN。
+   * 成功返回新的会话令牌；失败返回 400 并计入连续失败（达到上限锁定账号）。换人请退出后重新登录。
+   */
+  @AllowNoRole()
+  @AllowExpiredPassword()
+  @Post('unlock')
+  async unlock(@Body() body: UnlockDto, @User() user: CurrentUser, @Req() req: { authMethod?: TokenPayload['amr'] }) {
+    const u = await this.auth.unlock(user.id, body);
+    return this.session(u, req.authMethod ?? 'password');
   }
 
   @AllowNoRole()
@@ -145,7 +171,7 @@ export class AuthController {
     if (row.pin_hash && verifyPassword(body.new_pin, row.pin_hash)) throw new BizError('新 PIN 不能与原 PIN 相同');
     await this.db.tx(async (tx) => {
       // PIN 哈希直接写库，不进入审计追踪内容（审计只记录“本人修改 PIN”）
-      await tx.$executeRaw`UPDATE "sys_user" SET "pin_hash" = ${hashPassword(body.new_pin)} WHERE "id" = ${user.id}`;
+      await tx.$executeRaw`UPDATE "sys_user" SET "pin_hash" = ${hashPassword(body.new_pin)}, "must_change_pin" = false WHERE "id" = ${user.id}`;
       await tx.auditLog.create({
         data: {
           username: user.username, full_name: user.full_name, entity: 'sys_user', entity_id: user.id, action: 'UPDATE',

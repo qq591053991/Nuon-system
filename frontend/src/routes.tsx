@@ -104,6 +104,7 @@ export const routes: RouteDef[] = [
   { path: '/system/audit', element: lazy(() => import('./pages/system/AuditLogs')) },
   { path: '/system/esign', element: lazy(() => import('./pages/system/ESignatures')) },
   { path: '/system/import', element: lazy(() => import('./pages/system/DataImport')) },
+  { path: '/system/settings', element: lazy(() => import('./pages/system/Settings')) },
   { path: '/system/qualifications', element: lazy(() => import('./pages/system/Qualifications')) },
 ];
 
@@ -166,6 +167,7 @@ export const menu: MenuDef[] = [
     key: 'engineering', label: '工程数据', icon: <ApartmentOutlined />, children: [
       { key: '/engineering/boms', label: 'BOM 物料清单', perm: ['engineering', 'qa', 'plan'] },
       { key: '/engineering/routings', label: '工艺路线与测试规格', perm: ['engineering', 'qa'] },
+      { key: '/quality/inspection-specs?from=engineering', label: '来料检验规范', perm: ['engineering'] },
     ],
   },
   {
@@ -183,6 +185,7 @@ export const menu: MenuDef[] = [
   {
     key: 'system', label: '系统与合规', icon: <SettingOutlined />, children: [
       { key: '/system/users', label: '用户与角色', perm: ['admin'] },
+      { key: '/system/settings', label: '系统设置（公司信息）', perm: ['admin'] },
       { key: '/system/audit', label: '审计追踪', perm: ['audit', 'admin'] },
       { key: '/system/esign', label: '电子签名记录', perm: ['audit', 'admin'] },
       { key: '/system/import', label: '数据导入（金蝶迁移）', perm: ['admin', 'master', 'engineering', 'wms'] },

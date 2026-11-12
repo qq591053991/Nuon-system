@@ -109,6 +109,7 @@ function ReceiptModal({ kind, onClose, onDone }: { kind: ReceiptKind | null; onC
         delivery_note: v.delivery_note,
         remark: v.remark,
         lines,
+        confirm_placement: warns.length > 0, // 湿敏物料放非防潮柜：上一步已确认
       });
       const iqc = (rc.lines as Rec[]).filter((l) => l.inspection_id).length;
       message.success(`入库单 ${rc.no} 已生成：${(rc.lines as Rec[]).map((l) => `${l.material_code}→${l.location_code}`).join('、')}${iqc ? `；${iqc} 行需来料检验，已自动生成 IQC 检验单` : ''}`, 6);

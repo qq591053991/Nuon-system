@@ -100,16 +100,17 @@ describe('G6 质量好用性修复', () => {
 
     // 定量项 2 件超限 → 自动判不合格；外观不良 1 件
     const bad = allPass(d, { 峰值波长抽测: { sample_values: [660, 661, 668.2, 659, 669] }, 外观: { result: 'FAIL', defect_qty: 1, value: '引脚氧化' } });
-    r = await api.as('qc').post(`/api/inspections/${d.id}/submit`, { items: bad, defect_qty: 1, signature: SIG });
-    expect(r.body.detail).toContain('少于检验项目“峰值波长抽测”的不良数（2）');
-    const res = await api.as('qc').ok('post', `/api/inspections/${d.id}/submit`, { items: bad, defect_qty: 3, remark: '波长偏移', signature: SIG });
+    // R3 D-N7：AQL 抽样不良数只按定性项计（定量项对子样逐件判定，单独统计）
+    r = await api.as('qc').post(`/api/inspections/${d.id}/submit`, { items: bad, defect_qty: 0, signature: SIG });
+    expect(r.body.detail).toContain('少于检验项目“外观”的不良数（1）');
+    const res = await api.as('qc').ok('post', `/api/inspections/${d.id}/submit`, { items: bad, defect_qty: 1, remark: '波长偏移', signature: SIG });
     expect(res.status).toBe('REJECTED');
     const wl2 = res.items.find((i: any) => i.name === '峰值波长抽测');
     expect([wl2.result, wl2.item_defects, wl2.samples]).toEqual(['FAIL', 2, [660, 661, 668.2, 659, 669]]);
     expect(res.items.find((i: any) => i.name === '外观').item_defects).toBe(1);
     const ncr = await api.find('/api/ncrs', { q: 'Q-660-A' });
-    expect(ncr.description).toContain('峰值波长抽测（2 件超限）');
-    expect(ncr.description).toContain('外观（1 件）');
+    expect(ncr.description).toContain('定量项超限（逐件判定，Ac=0）：峰值波长抽测 2/5 件超限');
+    expect(ncr.description).toContain('外观（不良 1 件');
     expect(ncr.due_on).toBe(addDays(today(), 7).toISOString().slice(0, 10));
 
     // 快照：修改规范后，已建检验单的项目不变
@@ -282,7 +283,7 @@ describe('G6 质量好用性修复', () => {
     expect((await api.as('qa').ok('put', `/api/qualifications/${q.id}`, { level: 'TRAINER', signature: SIG })).level).toBe('TRAINER');
     const v = await api.as('qa').ok('post', `/api/qualifications/${q.id}/void`, { reason: '选错工序', signature: SIG });
     expect([v.is_active, v.valid]).toEqual([false, false]);
-    expect(v.remark).toContain('作废：选错工序');
+    expect(v.void_reason).toBe('选错工序'); // R3：作废写入正式字段 voided_by / voided_at / void_reason
     const sigs = (await api.ok('get', '/api/system/esignatures', { entity: 'hr_qualification' })).items.map((s: any) => s.meaning);
     expect(sigs.sort()).toEqual(['上岗资质作废', '上岗资质变更', '上岗资质登记']);
   });
@@ -294,7 +295,7 @@ describe('G6 质量好用性修复', () => {
       customer_id: c1.id, description: '用户反馈面板发烫，皮肤轻度红肿', is_adverse_event: true,
       reporter_contact: 'Dr. Smith / +1-555-0100', event_date: addDays(today(), -3).toISOString().slice(0, 10), country: 'US',
     });
-    expect([c.reporter_contact, c.country, c.reportable, c.report_due]).toEqual(['Dr. Smith / +1-555-0100', 'US', null, addDays(today(), 30).toISOString().slice(0, 10)]);
+    expect([c.reporter_contact, c.country, c.reportable, c.report_due]).toEqual(['Dr. Smith / +1-555-0100', '美国', null, addDays(today(), 30).toISOString().slice(0, 10)]); // R3：国家统一为中文
     expect(c.report_days_left).toBe(30);
     c = await api.as('qa').ok('post', `/api/complaints/${c.id}/investigate`, { investigation: '复现：风扇转速偏低' });
     let r = await api.as('qa').post(`/api/complaints/${c.id}/close`, { signature: SIG });

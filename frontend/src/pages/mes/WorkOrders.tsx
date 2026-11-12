@@ -144,6 +144,7 @@ export default function WorkOrders() {
     status: sp.get('status') || (sp.get('kitting') ? 'PLANNED,RELEASED,IN_PROGRESS' : undefined),
     kitting: sp.get('kitting') || undefined,
     so_id: sp.get('so_id') || undefined,
+    mismatch: sp.get('mismatch') || undefined,
   });
   const [open, setOpen] = useState(false);
 
@@ -167,7 +168,27 @@ export default function WorkOrders() {
         </div>
       ),
     },
-    { title: '状态', dataIndex: 'status', width: 80, sorter: true, render: (v: string) => <StatusTag dict="wo_status" value={v} /> },
+    {
+      title: '状态', dataIndex: 'status', width: 110, sorter: true,
+      render: (v: string, r: Rec) => (
+        <Space direction="vertical" size={2}>
+          <StatusTag dict="wo_status" value={v} />
+          {r.mismatch && (
+            <Popover
+              title="与订单不符（订单已变更）"
+              content={
+                <div>
+                  订单 <Link to={`/sales/orders/${r.mismatch.so_id}`}>{r.mismatch.so_no}</Link> 第{r.mismatch.line_no}行：订单 <b>{fmtQty(r.mismatch.so_qty)}</b> / 工单合计 <b>{fmtQty(r.mismatch.wo_qty)}</b>
+                  <div><Link to={`/mes/work-orders/${r.id}`}>到工单上一键调整 →</Link></div>
+                </div>
+              }
+            >
+              <Tag color="red" style={{ cursor: 'pointer', marginInlineEnd: 0 }}>与订单不符</Tag>
+            </Popover>
+          )}
+        </Space>
+      ),
+    },
     { title: '齐套', key: 'kitting', width: 120, render: (_: any, r: Rec) => <KitCell k={r.kitting} id={r.id} /> },
     {
       title: '计划 / 完工 / 报废', key: 'qty', width: 130, align: 'right',
@@ -207,6 +228,14 @@ export default function WorkOrders() {
           <Select allowClear placeholder="DHR 状态" style={{ width: 130 }} options={dictOptions('dhr_status')} onChange={(v) => setQuery({ dhr_status: v })} />
           <Select
             allowClear
+            placeholder="订单变更"
+            style={{ width: 150 }}
+            options={[{ value: '1', label: '与订单不符' }]}
+            defaultValue={sp.get('mismatch') || undefined}
+            onChange={(v) => setQuery({ mismatch: v })}
+          />
+          <Select
+            allowClear
             placeholder="齐套情况"
             style={{ width: 150 }}
             options={KIT_OPTIONS}
@@ -236,6 +265,9 @@ export default function WorkOrders() {
             ]}
           />
         </Space>
+        {query.mismatch === '1' && (
+          <Alert type="error" showIcon style={{ marginBottom: 12 }} message="订单变更待处理：这些工单的数量与销售订单不一致（销售改了订单数量）。打开工单点【一键调整】即可按订单同步数量。" />
+        )}
         {sp.get('kitting') === 'SHORT' && (
           <Alert type="warning" showIcon style={{ marginBottom: 12 }} message="当前只看缺料的未完工工单：库存按 已开工 → 已下达 → 计划开工日 先后分配，点“缺 N 项”查看缺哪些料、在途采购单和预计到货。" />
         )}

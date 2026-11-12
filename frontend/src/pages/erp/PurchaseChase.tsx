@@ -162,6 +162,22 @@ export default function PurchaseChase() {
       title: '供应商回复交期', dataIndex: 'promised_date', sorter: true, width: 140,
       render: (v, r) => (can('purchase') ? <PromiseEditor row={r} onDone={refresh} /> : fmtDate(v)),
     },
+    {
+      title: <Tooltip title="缺这种料的未完工工单（齐套分析口径），催货时可告诉供应商影响哪张工单">影响工单</Tooltip>, key: 'affected', width: 170,
+      render: (_, r) =>
+        r.affected_wos?.length ? (
+          <Space direction="vertical" size={0}>
+            {(r.affected_wos as Rec[]).map((w) => (
+              <span key={w.wo_id}>
+                <Link to={`/mes/work-orders/${w.wo_id}?tab=kitting`} className="mono">{w.wo_no}</Link>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}> 缺 {fmtQty(w.shortage)}{w.planned_start ? ` · ${fmtDate(w.planned_start).slice(5)} 开工` : ''}</Typography.Text>
+              </span>
+            ))}
+          </Space>
+        ) : (
+          <Typography.Text type="secondary">-</Typography.Text>
+        ),
+    },
     { title: '最近到货', dataIndex: 'last_receipt_date', render: (v) => (v ? fmtDate(v) : '-') },
     { title: '采购员', dataIndex: 'buyer', render: (v) => v || '-' },
   ];
@@ -184,6 +200,7 @@ export default function PurchaseChase() {
     { title: '已收数量', key: 'received_qty', type: 'number' as const },
     { title: '未交数量', key: 'open_qty', type: 'number' as const },
     { title: '未交金额', key: 'open_amount', type: 'money' as const },
+    { title: '影响工单', value: (r: Rec) => ((r.affected_wos || []) as Rec[]).map((w) => `${w.wo_no}缺${w.shortage}`).join('、'), width: 30 },
     { title: '币别', key: 'currency' },
     { title: '预计到货', key: 'expected_date', type: 'date' as const },
     { title: '供应商回复交期', key: 'promised_date', type: 'date' as const },

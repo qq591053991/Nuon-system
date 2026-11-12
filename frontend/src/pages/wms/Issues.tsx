@@ -9,7 +9,7 @@ import ExportButton from '../../components/ExportButton';
 import PageHeader from '../../components/PageHeader';
 import RemoteSelect, { LocationSelect } from '../../components/RemoteSelect';
 import ResponsiveTable, { useNarrow, type RColumn } from '../../components/ResponsiveTable';
-import ScanInput from '../../components/ScanInput';
+import ScanInput, { type ScanInputHandle } from '../../components/ScanInput';
 import StatusTag from '../../components/StatusTag';
 import { usePaged } from '../../components/usePaged';
 import { dictLabel } from '../../utils/dict';
@@ -40,9 +40,12 @@ function IssueActions({ row, onChanged, size = 'small', compact = false, inList 
   const doConfirm = async () => {
     const left = lines.length - nPicked;
     const partial = nPicked > 0 && left > 0;
+    const unverified = !isReturn(row) && nPicked === 0;
     const ok = await modal.confirm({
-      title: partial ? `部分过账（已拣 ${nPicked} 行，未拣 ${left} 行）？` : '确认过账？',
-      okText: partial ? '部分过账' : '过账', cancelText: '返回',
+      title: partial ? `部分过账（已拣 ${nPicked} 行，未拣 ${left} 行）？` : unverified ? '不核对实物，全部过账？' : '确认过账？',
+      okText: partial ? '部分过账' : unverified ? '不核对，全部过账' : '过账', cancelText: '返回',
+      // 未扫码核对时默认焦点在“返回”，防止扫码枪的回车误确认
+      autoFocusButton: unverified ? 'cancel' : 'ok',
       content: isReturn(row)
         ? '请确认退料实物已清点并放回指定库位。过账后库存加回“合格”，并扣减工单已领数量。如有错误可“冲销”。'
         : partial
@@ -94,7 +97,11 @@ function IssueActions({ row, onChanged, size = 'small', compact = false, inList 
       {draft && !isReturn(row) && can('wms') && (
         <Button size={size} icon={<MobileOutlined />} onClick={() => nav(`/wms/pda/pick/${row.id}`)}>{compact ? '拣料' : `扫码拣料${nPicked ? `（${nPicked}/${lines.length}）` : ''}`}</Button>
       )}
-      {draft && can('wms') && <Button size={size} type="primary" icon={<CheckOutlined />} loading={busy} onClick={doConfirm}>过账</Button>}
+      {draft && can('wms') && (
+        <Button size={size} type={!isReturn(row) && !nPicked ? 'default' : 'primary'} icon={<CheckOutlined />} loading={busy} onClick={doConfirm}>
+          {!isReturn(row) && !nPicked && !compact ? '不核对，全部过账' : '过账'}
+        </Button>
+      )}
       {draft && can('wms', 'plan') && !compact && <Button size={size} danger icon={<StopOutlined />} disabled={busy} onClick={doCancel}>作废</Button>}
       {row.status === 'CONFIRMED' && can('wms') && !compact && <Button size={size} danger icon={<UndoOutlined />} onClick={doReverse}>冲销</Button>}
     </Space>
@@ -108,11 +115,12 @@ function IssueDrawer({ issue, onClose, onChanged }: { issue: Rec | null; onClose
     () => [...(issue?.lines || [])].sort((a: Rec, b: Rec) => String(a.location_code).localeCompare(String(b.location_code)) || String(a.material_code).localeCompare(String(b.material_code))),
     [issue],
   );
-  const columns: TableColumnsType<Rec> = [
-    { title: '#', key: 'idx', width: 40, render: (_, __, i) => i + 1 },
-    { title: '库位', dataIndex: 'location_code', width: 90, render: (v) => <b className="mono">{v}</b> },
+  // 窄屏（PDA）自动变卡片：库位 · 物料 · 批号 · 数量
+  const columns: RColumn[] = [
+    { title: '#', key: 'idx', width: 40, mobile: 'hidden', render: (_, __, i) => i + 1 },
+    { title: '库位', dataIndex: 'location_code', width: 90, render: (v) => <b className="mono" style={{ fontSize: 15 }}>{v}</b> },
     {
-      title: '物料', key: 'm',
+      title: '物料', key: 'm', mobile: 'title',
       render: (_, r) => <MaterialCell code={r.material_code} name={r.material_name} spec={r.material_spec} extra={r.owner_customer_id ? <CsTag /> : undefined} />,
     },
     { title: '批号', dataIndex: 'lot_no', render: (v, r) => <LotLink code={r.material_code} lot={v} /> },
@@ -152,7 +160,7 @@ function IssueDrawer({ issue, onClose, onChanged }: { issue: Rec | null; onClose
           {issue.status === 'DRAFT' && isReturn(issue) && (
             <Alert type="warning" showIcon style={{ marginBottom: 12 }} message="退料：请清点实物、核对批号，放回下列库位后点击“过账”。过账后库存加回“合格”，工单已领数量相应减少。" />
           )}
-          <Table rowKey="id" size="small" columns={columns} dataSource={lines} pagination={false} scroll={{ x: 'max-content' }} />
+          <ResponsiveTable rowKey="id" size="small" columns={columns} dataSource={lines} pagination={false} scroll={{ x: 'max-content' }} />
           <Typography.Paragraph type="secondary" style={{ marginTop: 12, fontSize: 12 }}>
             共 {lines.length} 行。{isReturn(issue) ? '客供料退回原客户货主名下；退料批次只能是本工单已领用的批次。' : '客供料（紫色标记）只能用于对应客户的工单；过期批次系统不会推荐。'}
           </Typography.Paragraph>
@@ -174,6 +182,7 @@ function ReturnModal({ open, woId: initWo, onClose, onDone }: { open: boolean; w
   const [saving, setSaving] = useState(false);
   const [hit, setHit] = useState<string | null>(null);
   const inputs = useRef<Record<string, InputRef | null>>({});
+  const locateRef = useRef<ScanInputHandle>(null);
   const keyOf = (l: Rec) => `${l.material_id}|${l.lot_no}|${l.owner_customer_id ?? ''}`;
 
   useEffect(() => {
@@ -194,6 +203,8 @@ function ReturnModal({ open, woId: initWo, onClose, onDone }: { open: boolean; w
       .then((d) => {
         setLots(d);
         setLoc(Object.fromEntries(d.map((l) => [keyOf(l), l.location_id])));
+        // 选中工单后焦点直接进“扫物料 / 批号定位”框
+        setTimeout(() => locateRef.current?.focus(), 120);
       })
       .finally(() => setLoading(false));
   }, [open, woId]);
@@ -268,7 +279,7 @@ function ReturnModal({ open, woId: initWo, onClose, onDone }: { open: boolean; w
           labelOf={(r) => `${r.no} ${r.material_code} ${r.material_name}（${r.lot_no ?? ''}）`} />
         <Input style={{ width: narrow ? '100%' : 360 }} placeholder="退料原因 / 备注（如：工单完工剩余）" value={remark} onChange={(e) => setRemark(e.target.value)} />
       </Space>
-      {woId && lots.length > 0 && <ScanInput onScan={onScan} autoFocus={false} size="middle" placeholder="扫物料编码 / 批号定位到行" style={{ marginBottom: 12 }} />}
+      {woId && lots.length > 0 && <ScanInput ref={locateRef} onScan={onScan} autoFocus={false} size={narrow ? 'large' : 'middle'} placeholder="扫物料编码 / 批号定位到行" style={{ marginBottom: 12 }} />}
       {loading ? <div style={{ textAlign: 'center', padding: 32 }}><Spin /></div> : woId ? (
         narrow ? (
           lots.length ? (
@@ -309,10 +320,17 @@ export default function Issues() {
   const { can } = useAuth();
   const nav = useNavigate();
 
-  // /wms/issues?id=123 直接打开明细（全局搜索 / 待办跳转）
+  // /wms/issues?id=123 直接打开明细（全局搜索 / 待办跳转）；?return=1 直接新建退料单（PDA 九宫格“生产退料”）
   useEffect(() => {
     const id = Number(sp.get('id'));
     if (id) get(`/issues/${id}`).then(setCurrent).catch(() => undefined);
+    if (sp.get('return') === '1' && can('wms')) {
+      setReturnOpen(true);
+      const next = new URLSearchParams(sp);
+      next.delete('return');
+      setSp(next, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sp]);
 
   const changed = (r: Rec) => {

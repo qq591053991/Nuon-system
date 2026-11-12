@@ -224,7 +224,7 @@ export class MrpService {
 
       // 3) 采购在途（按供应商回复交期 / 预计到货日）
       const pls = await tx.purchaseOrderLine.findMany({
-        where: { order: { status: { in: ['DRAFT', 'APPROVED', 'PARTIAL_RECEIVED'] } } },
+        where: { order: { status: { in: ['DRAFT', 'SUBMITTED', 'APPROVED', 'PARTIAL_RECEIVED'] } } },
         orderBy: { id: 'asc' },
         include: { order: true },
       });
@@ -518,15 +518,26 @@ export class MrpService {
         }
       }
       for (const [supplierId, items] of bySupplier) {
+        // 同一物料的多周建议合并为一行：数量合计、到货日取最早，备注写明分周需求（供应商按批送货可参考）
+        const byMat = new Map<number, (MrpSuggestion & { material: Material })[]>();
+        for (const it of items) {
+          if (!byMat.has(it.material_id)) byMat.set(it.material_id, []);
+          byMat.get(it.material_id)!.push(it);
+        }
         const total = new MoneySum();
-        const lines = items.map((s, n) => {
-          const m = s.material;
+        const lines = [...byMat.values()].map((group, n) => {
+          const m = group[0].material;
+          const qty = round(group.reduce((a, x) => a + x.suggested_qty, 0));
           const c = hasPurchaseUnit(m)
-            ? calcPoLine(m, { purchase_qty: purchaseUnitsFor(m, s.suggested_qty), purchase_uom: m.purchase_uom, unit_price: m.std_cost }, n + 1)
-            : calcPoLine(m, { qty: s.suggested_qty, unit_price: m.std_cost }, n + 1);
+            ? calcPoLine(m, { purchase_qty: purchaseUnitsFor(m, qty), purchase_uom: m.purchase_uom, unit_price: m.std_cost }, n + 1)
+            : calcPoLine(m, { qty, unit_price: m.std_cost }, n + 1);
           total.add(c.amount);
-          const expected = s.due_date ? addDays(s.due_date, m.lead_time_days || 0) : null;
-          return { line_no: n + 1, material_id: s.material_id, ...c, expected_date: expected };
+          const dates = group.map((x) => (x.due_date ? addDays(x.due_date, m.lead_time_days || 0) : null)).filter((d): d is Date => !!d);
+          const expected = dates.length ? dates.reduce(minDate) : null;
+          const remark = group.length > 1
+            ? `分批需求：${group.map((x) => `${fmtDate(x.required_date ?? x.due_date)?.slice(5) ?? '-'} ×${fmtNum(x.suggested_qty)}`).join('，')}`.slice(0, 250)
+            : null;
+          return { line_no: n + 1, material_id: m.id, ...c, expected_date: expected, remark };
         });
         const dues = lines.map((l) => l.expected_date).filter((d): d is Date => !!d);
         const po = await tx.purchaseOrder.create({
@@ -601,6 +612,32 @@ export class MrpService {
       await tx.mrpSuggestion.update({ where: { id: s.id }, data: { status: 'IGNORED', remark: `${s.remark ? `${s.remark}；` : ''}订单需求已由其他工单/库存覆盖`.slice(0, 256) } });
     }
     return { created, skipped };
+  }
+
+  /**
+   * 客供料通知：把客供料建议标记为“已通知客户”（记录通知人、时间），返回按客户分组的通知内容（打印/导出用）。
+   */
+  notify(ids: number[], user: CurrentUser) {
+    return this.db.tx(async (tx) => {
+      const sugs = await tx.mrpSuggestion.findMany({ where: { id: { in: ids } }, include: { material: true, customer: true }, orderBy: [{ customer_id: 'asc' }, { required_date: 'asc' }, { id: 'asc' }] });
+      const bad = sugs.filter((x) => x.action !== 'CUSTOMER_SUPPLY');
+      if (bad.length) throw new BizError(`只有客供料建议可以生成客户供料通知（${bad.map((x) => x.material.code).join('、')} 不是客供料）`);
+      if (!sugs.length) throw new BizError('请勾选要通知客户的客供料建议');
+      const now = new Date();
+      await tx.mrpSuggestion.updateMany({ where: { id: { in: sugs.map((x) => x.id) } }, data: { notified_at: now, notified_by: user.full_name } });
+      const groups = new Map<number, { customer_id: number | null; customer_name: string | null; contact: string | null; phone: string | null; email: string | null; items: any[] }>();
+      for (const x of sugs) {
+        const k = x.customer_id ?? 0;
+        if (!groups.has(k)) groups.set(k, { customer_id: x.customer_id, customer_name: x.customer?.name ?? null, contact: x.customer?.contact ?? null, phone: x.customer?.phone ?? null, email: x.customer?.email ?? null, items: [] });
+        const refs = parseRefs(x.demand_refs).filter((r) => !r.role);
+        groups.get(k)!.items.push({
+          suggestion_id: x.id, material_code: x.material.code, material_name: x.material.name, material_spec: x.material.spec, uom: x.material.uom,
+          qty: x.suggested_qty, required_date: fmtDate(x.required_date), latest_arrival: fmtDate(x.due_date),
+          for_orders: [...new Set(refs.flatMap((r) => (r.type === 'SO' ? [r.no!] : r.so ?? [])))],
+        });
+      }
+      return { notified_at: now, notified_by: user.full_name, notices: [...groups.values()] };
+    });
   }
 
   ignore(id: number) {

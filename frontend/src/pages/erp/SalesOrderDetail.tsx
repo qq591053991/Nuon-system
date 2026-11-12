@@ -17,7 +17,7 @@ import StatusTag from '../../components/StatusTag';
 import { dictLabel } from '../../utils/dict';
 import { fmtDate, fmtDateTime, fmtMoney, fmtQty, toDate } from '../../utils/format';
 import {
-  CURRENCY_OPTIONS, DueDate, KittingTable, OrderLinesEditor, QtyProgress, checkLines, isPast, kittingSummary, linesBody, sumBy, toDayjs, uid,
+  CURRENCY_OPTIONS, DueDate, KittingTable, OrderLinesEditor, QtyProgress, SoStatusTag, checkLines, isPast, kittingSummary, linesBody, sumBy, toDayjs, uid,
   type LineLock, type LineRow,
 } from './shared';
 import { useCompany } from '../../utils/company';
@@ -172,7 +172,21 @@ function SoEditor({ so, mode, copyFrom, onSaved, onExit }: { so: Rec | null; mod
   const priceHint = (mid: number) => {
     const h = prices[mid];
     if (!h) return undefined;
-    return { price: h.unit_price, text: `上次 ${fmtMoney(h.unit_price, h.currency)}（${h.so_no}）` };
+    return {
+      price: h.unit_price,
+      text: `上次 ${fmtMoney(h.unit_price, h.currency)}（${h.so_no}）`,
+      tip: (
+        <div>
+          <div>最近成交价（已排除备品/赠品行和异常低价，点击带入上次价）：</div>
+          {(h.recent || []).map((x: Rec) => (
+            <div key={x.so_no}>{fmtDate(x.order_date)} {x.so_no}：{fmtMoney(x.unit_price, x.currency)} × {fmtQty(x.qty)}</div>
+          ))}
+          {(h.skipped || []).slice(0, 2).map((x: Rec) => (
+            <div key={`s${x.so_no}${x.unit_price}`} style={{ opacity: 0.7 }}>未采用：{x.so_no} {fmtMoney(x.unit_price, x.currency)}（{x.why}）</div>
+          ))}
+        </div>
+      ),
+    };
   };
 
   // 变更：行级锁定（已排产/已发货的行不能换产品、不能删；数量不少于已发货）
@@ -269,13 +283,19 @@ function SoEditor({ so, mode, copyFrom, onSaved, onExit }: { so: Rec | null; mod
       const r = await post(`/sales-orders/${so!.id}/change`, { ...changeBody(), reason });
       message.success(`订单已变更：${r.changes.join('；')}`);
       if (r.affected?.length || r.warnings?.length) {
-        modal.info({
-          title: '变更已保存，请跟进以下事项',
+        const who = (r.notified as string[] | undefined)?.length ? `计划员 ${(r.notified as string[]).join('、')}` : '计划员';
+        modal.success({
+          title: `变更已保存，已通知${who}`,
           width: 640,
           content: (
-            <ul style={{ paddingLeft: 18, margin: 0 }}>
-              {[...(r.warnings || []), ...(r.affected || []).map((a: Rec) => a.message)].map((t: string) => <li key={t}>{t}</li>)}
-            </ul>
+            <div>
+              <Typography.Paragraph style={{ marginBottom: 8 }}>
+                计划员的待办里会出现“订单变更待处理”，受影响的工单上标出“与订单不符”并可一键调整，您无需再去改工单：
+              </Typography.Paragraph>
+              <ul style={{ paddingLeft: 18, margin: 0 }}>
+                {[...(r.warnings || []), ...(r.affected || []).map((a: Rec) => a.message)].map((t: string) => <li key={t}>{t}</li>)}
+              </ul>
+            </div>
           ),
         });
       }
@@ -458,6 +478,7 @@ function SoEditor({ so, mode, copyFrom, onSaved, onExit }: { so: Rec | null; mod
             defaultDate={delivery ? dayjs(delivery).format('YYYY-MM-DD') : null}
             priceHint={priceHint}
             lockedRow={lockedRow}
+            materialNoun={customerId ? '该客户可销售的产品（其他品牌的产品不能卖给该客户）' : '产品'}
           />
         </Card>
         {isChange && (
@@ -665,10 +686,19 @@ function SoHistory({ soId, refreshKey }: { soId: number; refreshKey: number }) {
 
 // ---------------- 形式发票（打印） ----------------
 function ProformaInvoice({ so, customer }: { so: Rec; customer: Rec | null }) {
-  const company = useCompany();
+  const company = useCompany() as (ReturnType<typeof useCompany> & { swift?: string }) | null;
   const cell = { border: '1px solid #000', padding: '3px 6px', fontSize: 11 } as const;
+  const num = { ...cell, textAlign: 'right' as const, whiteSpace: 'nowrap' as const };
+  const hasRemark = (so.lines as Rec[]).some((l) => l.remark);
   return (
     <div className="print-only">
+      {company?.name && (
+        <div style={{ textAlign: 'center', marginBottom: 6 }}>
+          <div style={{ fontSize: 16, fontWeight: 700 }}>{company.name}</div>
+          {company.name_en && <div style={{ fontSize: 12 }}>{company.name_en}</div>}
+          <div style={{ fontSize: 10 }}>{[company.address, company.phone ? `Tel ${company.phone}` : '', company.tax_no ? `税号 ${company.tax_no}` : ''].filter(Boolean).join('　')}</div>
+        </div>
+      )}
       <PrintHeader title="形式发票 PROFORMA INVOICE" no={so.no} extra={<div>日期 Date：{fmtDate(so.order_date)}</div>} />
       <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 10 }}>
         <tbody>
@@ -681,18 +711,9 @@ function ProformaInvoice({ so, customer }: { so: Rec; customer: Rec | null }) {
               {customer?.tax_no ? <><br />税号 Tax No.：{customer.tax_no}</> : null}
             </td>
             <td style={{ ...cell, verticalAlign: 'top' }}>
-              {company?.name ? (
-                <>
-                  <b>卖方 Seller</b><br />
-                  {company.name}{company.name_en ? ` / ${company.name_en}` : ''}<br />
-                  {company.address ? <>{company.address}<br /></> : null}
-                  {company.phone ? <>电话 Tel：{company.phone}<br /></> : null}
-                  {company.bank ? <>开户行及账号 Bank：{company.bank}<br /></> : null}
-                </>
-              ) : null}
               客户订单号 Customer PO：{so.customer_po || '-'}<br />
               币别 Currency：{so.currency}<br />
-              交期 Delivery：{fmtDate(so.delivery_date)}<br />
+              交期 Delivery：{fmtDate(so.earliest_delivery || so.delivery_date)}{so.delivery_count > 1 ? '（分批，见明细 / partial, see lines）' : ''}<br />
               付款条件 Payment：{customer?.payment_terms_days != null ? `${customer.payment_terms_days} 天 / ${customer.payment_terms_days} days` : '-'}<br />
               收货地址 Ship to：{so.ship_to || customer?.address || '-'}
             </td>
@@ -702,7 +723,7 @@ function ProformaInvoice({ so, customer }: { so: Rec; customer: Rec | null }) {
       <table style={{ width: '100%', borderCollapse: 'collapse' }}>
         <thead>
           <tr>
-            {['No.', '产品编码 Item', '品名/规格 Description', '数量 Qty', '单位 Unit', `单价 Unit Price (${so.currency})`, `金额 Amount (${so.currency})`, '交期 Delivery'].map((h) => (
+            {['No.', '产品编码 Item', '品名/规格 Description', '数量 Qty', '单位 Unit', `单价 Unit Price (${so.currency})`, `金额 Amount (${so.currency})`, '交期 Delivery', ...(hasRemark ? ['备注 Remarks'] : [])].map((h) => (
               <th key={h} style={{ ...cell, background: '#f0f0f0' }}>{h}</th>
             ))}
           </tr>
@@ -711,23 +732,42 @@ function ProformaInvoice({ so, customer }: { so: Rec; customer: Rec | null }) {
           {(so.lines as Rec[]).map((l) => (
             <tr key={l.id}>
               <td style={cell}>{l.line_no}</td>
-              <td style={cell}>{l.material_code}</td>
-              <td style={cell}>{l.material_name}{l.material_spec ? ` / ${l.material_spec}` : ''}</td>
-              <td style={{ ...cell, textAlign: 'right' }}>{fmtQty(l.qty)}</td>
+              <td style={{ ...cell, whiteSpace: 'nowrap' }}>{l.material_code}</td>
+              <td style={cell}>
+                {l.material_name_en || l.material_name}
+                {l.material_name_en && <div style={{ fontSize: 9 }}>{l.material_name}</div>}
+                {l.material_spec ? <div style={{ fontSize: 9 }}>{l.material_spec}</div> : null}
+              </td>
+              <td style={num}>{fmtQty(l.qty)}</td>
               <td style={cell}>{l.uom}</td>
-              <td style={{ ...cell, textAlign: 'right' }}>{fmtMoney(l.unit_price, so.currency)}</td>
-              <td style={{ ...cell, textAlign: 'right' }}>{fmtMoney(l.amount, so.currency)}</td>
-              <td style={cell}>{fmtDate(l.delivery_date || so.delivery_date)}</td>
+              <td style={num}>{fmtMoney(l.unit_price, so.currency)}</td>
+              <td style={num}>{fmtMoney(l.amount, so.currency)}</td>
+              <td style={{ ...cell, whiteSpace: 'nowrap' }}>{fmtDate(l.delivery_date || so.delivery_date)}</td>
+              {hasRemark && <td style={cell}>{l.remark || ''}</td>}
             </tr>
           ))}
           <tr>
             <td style={{ ...cell, textAlign: 'right' }} colSpan={6}><b>合计 Total</b></td>
-            <td style={{ ...cell, textAlign: 'right' }}><b>{fmtMoney(so.total_amount, so.currency)}</b></td>
-            <td style={cell} />
+            <td style={num}><b>{fmtMoney(so.total_amount, so.currency)}</b></td>
+            <td style={cell} colSpan={hasRemark ? 2 : 1} />
           </tr>
         </tbody>
       </table>
       {so.remark && <p style={{ fontSize: 11, marginTop: 8 }}>备注 Remarks：{so.remark}</p>}
+      {(company?.bank || company?.swift) && (
+        <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: 8 }}>
+          <tbody>
+            <tr>
+              <td style={cell}>
+                <b>收款银行 Bank Information</b><br />
+                {company?.name_en || company?.name ? <>户名 Beneficiary：{company?.name_en || company?.name}<br /></> : null}
+                {company?.bank ? <>开户行及账号 Bank / Account：{company.bank}<br /></> : null}
+                {company?.swift ? <>SWIFT：{company.swift}</> : null}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      )}
       <PrintSignatures roles={['卖方（签章）Seller', '买方（签章）Buyer']} />
     </div>
   );
@@ -887,7 +927,7 @@ function SoView({ so, reload, onChange }: { so: Rec; reload: () => Promise<unkno
     <>
       <div className="no-print">
       <PageHeader
-        title={<Space>销售订单 {so.no}<StatusTag dict="so_status" value={st} /></Space>}
+        title={<Space>销售订单 {so.no}<SoStatusTag so={so} /></Space>}
         sub={`${so.customer_name ?? ''}${so.customer_po ? ` · 客户PO ${so.customer_po}` : ''}`}
         extra={
           <>
@@ -997,6 +1037,7 @@ function SoView({ so, reload, onChange }: { so: Rec; reload: () => Promise<unkno
         okText="退回草稿"
         okButtonProps={{ disabled: !unReason.trim(), loading: busy === 'unconfirm' }}
         onCancel={() => setUnconfirmOpen(false)}
+        afterOpenChange={(o) => o && setTimeout(() => document.getElementById('so-unconfirm-reason')?.focus(), 0)}
         onOk={async () => {
           await act('unconfirm', `/sales-orders/${so.id}/unconfirm`, '已退回草稿，可修改后重新确认', { reason: unReason });
           setUnconfirmOpen(false);
@@ -1005,7 +1046,7 @@ function SoView({ so, reload, onChange }: { so: Rec; reload: () => Promise<unkno
         destroyOnHidden
       >
         <Typography.Paragraph>订单还没有生成工单、没有发货，退回草稿后可直接修改再确认。原因将记入审计追踪。</Typography.Paragraph>
-        <Input.TextArea autoFocus rows={3} value={unReason} onChange={(e) => setUnReason(e.target.value)} placeholder="如：客户更换型号，需重新下单" />
+        <Input.TextArea id="so-unconfirm-reason" autoFocus rows={3} value={unReason} onChange={(e) => setUnReason(e.target.value)} placeholder="如：客户更换型号，需重新下单" />
       </Modal>
 
       <Modal

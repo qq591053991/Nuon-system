@@ -11,6 +11,7 @@ import { useParams, useSearchParams } from 'react-router-dom';
 import { get, type Rec } from '../../api/http';
 import { PrintButton, PrintHeader, PrintSignatures } from '../../components/Print';
 import { dictLabel } from '../../utils/dict';
+import { useCompany } from '../../utils/company';
 import { fmtDate, fmtDateTime, fmtQty } from '../../utils/format';
 import { Barcode, LocationLabel, LotLabel, printLabels, type LabelSize } from './print';
 
@@ -56,6 +57,23 @@ const Title = ({ text, no }: { text: string; no: string }) => (
     <div style={{ width: 200, marginLeft: 'auto' }}><Barcode value={no} height={34} /></div>
   </div>
 );
+
+/** 本公司抬头（系统设置 › 公司信息）：发货单用中文，装箱单用英文 */
+function CompanyHead({ en = false }: { en?: boolean }) {
+  const c = useCompany() as (Record<string, string> | null);
+  if (!c?.name && !c?.name_en) return null;
+  const name = en ? c.name_en || c.name : c.name;
+  const sub = en ? c.name : c.name_en;
+  const tel = c.phone ? `${en ? 'Tel' : '电话'}：${c.phone}` : '';
+  const tax = c.tax_no && !en ? `税号：${c.tax_no}` : '';
+  return (
+    <div style={{ textAlign: 'center', marginBottom: 6 }}>
+      <div style={{ fontSize: 16, fontWeight: 700 }}>{name}</div>
+      {sub && <div style={{ fontSize: 11 }}>{sub}</div>}
+      <div style={{ fontSize: 11 }}>{[en ? c.address_en || c.address : c.address, tel, tax].filter(Boolean).join('　')}</div>
+    </div>
+  );
+}
 
 const mat = (r: Rec) => <><b>{r.material_code}</b><div style={{ fontSize: 10, color: '#555' }}>{r.material_name}{r.material_spec ? ` | ${r.material_spec}` : ''}</div></>;
 
@@ -111,6 +129,7 @@ function ShipmentDoc({ d }: { d: Rec }) {
   return (
     <>
       <PrintHeader title="发货单" no={d.no} />
+      <CompanyHead />
       <Title text="发货单" no={d.no} />
       <Info items={head} />
       <DocTable rows={lines} columns={[
@@ -124,6 +143,7 @@ function ShipmentDoc({ d }: { d: Rec }) {
       <PrintSignatures roles={['仓库发货', '承运商签收', '客户签收']} />
       <div className="page-break" />
       <PrintHeader title="装箱单 Packing List" no={d.no} />
+      <CompanyHead en />
       <Title text="装箱单 Packing List" no={d.no} />
       <Info items={head} />
       {lines.map((l) => (

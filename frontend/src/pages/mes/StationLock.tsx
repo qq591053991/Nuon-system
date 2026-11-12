@@ -3,13 +3,14 @@
  * - C-F12：刷卡的回车不再传到 PIN 页（不会一进去就报“请输入 4 位以上 PIN”）；本终端记住各工牌 PIN 位数，输满自动提交；
  * - C-F13：空闲锁定后，同一操作员同一班次只需刷工牌即可恢复（服务端核对工牌），未提交的数据保留；
  * - C-F14：解锁时即按本工位工序校验上岗资质（由 onUnlock 返回错误）；
- * - C-F07：退出工位终端需终端账号密码（由 onExit 处理）。
+ * - C-F07 / C-N3：退出工位终端需班组长刷工牌 + PIN 授权（由 onExit 处理）；
+ * - must_change_pin：管理员生成 / 重置的 PIN 首次使用后须本人重设——刷卡 + 原 PIN 后引导两次输入新 PIN（POST /auth/change-pin）。
  */
 import { Alert, Button, Input, Space, Typography, type InputRef } from 'antd';
 import { ArrowLeftOutlined, CreditCardOutlined, LockOutlined, LogoutOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { badgeLogin, httpStatus, pinLength, rememberPinLength, type StationSession } from './stationApi';
+import { badgeLogin, httpStatus, pinLength, rememberPinLength, stationPost, type StationOperator, type StationSession } from './stationApi';
 import { errDetail } from './spec';
 
 const PIN_MAX = 8;
@@ -53,7 +54,10 @@ interface Props {
 }
 
 export default function StationLock({ reason, terminalUser, stationText, resume, onUnlock, onResume, onExit }: Props) {
-  const [step, setStep] = useState<'badge' | 'pin'>('badge');
+  /** badge 刷卡 → pin 输入 PIN →（须改 PIN 时）new1 / new2 两次输入新 PIN */
+  const [step, setStep] = useState<'badge' | 'pin' | 'new1' | 'new2'>('badge');
+  /** 须改 PIN：已通过原 PIN 校验的登录结果 */
+  const changing = useRef<{ token: string; user: StationOperator; old: string; first?: string } | null>(null);
   const [badge, setBadge] = useState('');
   const [pin, setPinState] = useState('');
   const pinRef = useRef('');
@@ -88,9 +92,67 @@ export default function StationLock({ reason, terminalUser, stationText, resume,
     setBadge('');
     setStep('badge');
     setError(msg ?? null);
+    changing.current = null;
   }, [setPin]);
 
+  const finish = useCallback(async (token: string, user: StationOperator) => {
+    const t = Date.now();
+    const msg = await onUnlock({ token, user: { ...user, badge_no: user.badge_no ?? badge.trim() }, since: t, last: t });
+    if (msg) backToBadge(msg);
+  }, [badge, onUnlock, backToBadge]);
+
+  /** 设置新 PIN：第一次输入 → 再输一次确认 → 提交 */
+  const submitNew = useCallback(async (p: string) => {
+    const c = changing.current;
+    if (!c || busyRef.current) return;
+    if (p.length < PIN_MIN) {
+      setError(`新 PIN 须为 ${PIN_MIN}–${PIN_MAX} 位数字`);
+      return;
+    }
+    if (step === 'new1') {
+      if (/^(\d)\1+$/.test(p)) {
+        setPin('');
+        setError('PIN 不能是相同的数字（如 1111），请重新输入');
+        return;
+      }
+      if (p === c.old) {
+        setPin('');
+        setError('新 PIN 不能与原 PIN 相同');
+        return;
+      }
+      c.first = p;
+      setPin('');
+      setError(null);
+      setStep('new2');
+      return;
+    }
+    if (p !== c.first) {
+      c.first = undefined;
+      setPin('');
+      setStep('new1');
+      setError('两次输入的新 PIN 不一致，请重新设置');
+      return;
+    }
+    busyRef.current = true;
+    setBusy(true);
+    try {
+      await stationPost(c.token, '/auth/change-pin', { old_pin: c.old, new_pin: p });
+      rememberPinLength(badge, p.length);
+      changing.current = null;
+      await finish(c.token, { ...c.user, must_change_pin: false } as StationOperator);
+    } catch (e) {
+      c.first = undefined;
+      setPin('');
+      setStep('new1');
+      setError(errDetail(e));
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  }, [step, badge, finish, setPin]);
+
   const submit = useCallback(async (p: string) => {
+    if (step === 'new1' || step === 'new2') return submitNew(p);
     if (busyRef.current) return;
     if (p.length < PIN_MIN) {
       setError(`PIN 至少 ${PIN_MIN} 位`);
@@ -102,14 +164,19 @@ export default function StationLock({ reason, terminalUser, stationText, resume,
     try {
       const r = await badgeLogin(badge.trim(), p);
       if (!r?.access_token || !r.user) throw new Error('登录响应无效');
-      rememberPinLength(badge, p.length);
       if (!(r.user.permissions || []).includes('mes')) {
         backToBadge(`${r.user.full_name} 没有产线报工权限，不能在工位终端操作`);
         return;
       }
-      const t = Date.now();
-      const msg = await onUnlock({ token: r.access_token, user: { ...r.user, badge_no: r.user.badge_no ?? badge.trim() }, since: t, last: t });
-      if (msg) backToBadge(msg);
+      if ((r.user as StationOperator & { must_change_pin?: boolean }).must_change_pin) {
+        // 管理员生成 / 重置的 PIN：首次使用须本人重设
+        changing.current = { token: r.access_token, user: r.user, old: p };
+        setPin('');
+        setStep('new1');
+        return;
+      }
+      rememberPinLength(badge, p.length);
+      await finish(r.access_token, r.user);
     } catch (e) {
       const st = httpStatus(e);
       if (st === 404) backToBadge('工牌登录服务尚未部署（/api/auth/badge-login 不可用），请联系系统管理员升级后端。');
@@ -124,9 +191,9 @@ export default function StationLock({ reason, terminalUser, stationText, resume,
       busyRef.current = false;
       setBusy(false);
     }
-  }, [badge, onUnlock, backToBadge, setPin]);
+  }, [badge, step, submitNew, finish, backToBadge, setPin]);
 
-  /** 数字键：输满本工牌已知的 PIN 位数时自动提交 */
+  /** 数字键：输满本工牌已知的 PIN 位数时自动提交（设置新 PIN 时不自动提交） */
   const addDigit = useCallback((d: string) => {
     if (busyRef.current) return;
     setError(null);
@@ -134,14 +201,16 @@ export default function StationLock({ reason, terminalUser, stationText, resume,
     if (p.length >= PIN_MAX) return;
     const np = p + d;
     setPin(np);
-    const n = pinLength(badge);
+    const n = step === 'pin' ? pinLength(badge) : null;
     if (n && np.length === n) submit(np);
-  }, [badge, submit, setPin]);
+  }, [badge, step, submit, setPin]);
 
   // PIN 步骤：支持实体键盘数字 / 退格 / 回车（刷卡那一下的回车已在工牌框内拦截，不会传到这里）
   useEffect(() => {
-    if (step !== 'pin') return;
+    if (step === 'badge') return;
     const onKey = (e: KeyboardEvent) => {
+      // 弹窗（班组长授权）里的输入不归 PIN 键盘处理
+      if ((e.target as HTMLElement)?.tagName === 'INPUT' || document.querySelector('.ant-modal-wrap .ant-modal')) return;
       if (/^[0-9]$/.test(e.key)) addDigit(e.key);
       else if (e.key === 'Backspace') setPin(pinRef.current.slice(0, -1));
       else if (e.key === 'Escape') backToBadge();
@@ -222,10 +291,15 @@ export default function StationLock({ reason, terminalUser, stationText, resume,
         ) : (
           <>
             <LockOutlined style={{ fontSize: 44, color: '#b7a6ff', marginTop: 8 }} />
-            <div className="lock-title" style={{ fontSize: 28 }}>请输入 PIN</div>
+            <div className="lock-title" style={{ fontSize: 28 }}>
+              {step === 'pin' ? '请输入 PIN' : step === 'new1' ? '请设置新 PIN' : '请再输一次新 PIN'}
+            </div>
             <div className="lock-sub">
-              工牌 <b className="mono" style={{ color: '#fff' }}>{masked}</b>
-              {known ? ` · 输满 ${known} 位自动确认` : ' · 输完按回车或【确认】'}
+              {step === 'pin' ? (
+                <>工牌 <b className="mono" style={{ color: '#fff' }}>{masked}</b>{known ? ` · 输满 ${known} 位自动确认` : ' · 输完按回车或【确认】'}</>
+              ) : step === 'new1' ? (
+                <>{changing.current?.user.full_name}：PIN 由管理员生成，首次使用须改成只有您知道的 {PIN_MIN}–{PIN_MAX} 位数字，输完按回车</>
+              ) : '再输一次确认，输完按回车'}
             </div>
             {error && <Alert style={{ marginTop: 10, textAlign: 'left' }} type="error" showIcon message={<b>{error}</b>} />}
             <div className="pin-dots">
@@ -241,7 +315,7 @@ export default function StationLock({ reason, terminalUser, stationText, resume,
               <Button className="pin-key" onClick={() => press('0')} disabled={busy}>0</Button>
               <Button className="pin-key fn" onClick={() => press('<')} disabled={busy}>退格</Button>
             </div>
-            <Button block type="primary" className="pin-ok" loading={busy} disabled={pin.length < PIN_MIN} onClick={() => submit(pin)}>确认</Button>
+            <Button block type="primary" className="pin-ok" loading={busy} disabled={pin.length < PIN_MIN} onClick={() => submit(pin)}>{step === 'pin' ? '确认' : step === 'new1' ? '下一步' : '确认新 PIN'}</Button>
             <Button type="link" icon={<ArrowLeftOutlined />} style={{ marginTop: 4, color: 'rgba(255,255,255,.85)', height: 44 }} onClick={() => backToBadge()}>重新刷卡</Button>
           </>
         )}
@@ -249,7 +323,7 @@ export default function StationLock({ reason, terminalUser, stationText, resume,
           <Space split="·" wrap style={{ justifyContent: 'center' }}>
             <span>记录归属刷卡的操作员（GMP / 21 CFR Part 11）</span>
             {terminalUser && <span>终端账号：{terminalUser}</span>}
-            <Button type="link" size="small" icon={<LogoutOutlined />} onClick={onExit}>退出工位终端（需密码）</Button>
+            <Button type="link" size="small" icon={<LogoutOutlined />} onClick={onExit}>退出工位终端（需班组长授权）</Button>
           </Space>
           <Typography.Paragraph style={{ color: 'rgba(255,255,255,.45)', fontSize: 12, margin: '4px 0 0' }}>
             忘记 PIN 或工牌丢失请联系班组长 / 系统管理员

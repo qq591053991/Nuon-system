@@ -1,6 +1,7 @@
 import { Alert, Button, Card, Col, Collapse, Descriptions, Empty, Input, InputNumber, List, Row, Select, Space, Spin, Table, Tag, Typography, message } from 'antd';
 import { CopyOutlined, DeleteOutlined, PlusOutlined, ReloadOutlined, SafetyCertificateOutlined, UndoOutlined } from '@ant-design/icons';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { InputRef } from 'antd';
 import { useSearchParams } from 'react-router-dom';
 import { get, type Rec } from '../../api/http';
 import { useAuth } from '../../auth';
@@ -44,6 +45,9 @@ export default function InspectionSpecs() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
+  /** 修订说明（写在编辑页上，签名时带入签名理由，签名框里只需输入密码回车） */
+  const [note, setNote] = useState('');
+  const noteRef = useRef<InputRef>(null);
   const editable = canEdit && !data?.exempt;
 
   const loadSpecs = useCallback(() => {
@@ -55,6 +59,7 @@ export default function InspectionSpecs() {
     setData(d);
     setRows(toRows(d.items));
     setDirty(false);
+    setNote('');
   };
 
   useEffect(() => {
@@ -116,6 +121,11 @@ export default function InspectionSpecs() {
       message.warning(`定量项“${inv.name}”的下限大于上限`);
       return;
     }
+    if (!note.trim()) {
+      message.warning('请先填写“修订说明”（改了什么、依据），再签名批准');
+      noteRef.current?.focus();
+      return;
+    }
     setSaving(true);
     try {
       const d = await sign({
@@ -125,7 +135,7 @@ export default function InspectionSpecs() {
           : `${data!.material_code} ${data!.material_name}：清空检验规范，之后的 IQC 检验单使用系统默认模板。`,
         reasonRequired: true,
         reasonLabel: '修订说明',
-        reasonPlaceholder: '如：增加峰值波长定量检验，上下限按规格书 660±5nm',
+        defaultReason: note.trim(),
         submit: (signature) => putSilent(`/materials/${data!.material_id}/inspection-items`, {
           items: [...rows].sort((a, b) => a.seq - b.seq).map((r) => ({
             id: r.id ?? null, seq: r.seq, name: r.name.trim(), standard: r.standard.trim() || null, method: r.method.trim() || null,
@@ -145,43 +155,53 @@ export default function InspectionSpecs() {
     }
   };
 
-  const num = (v: number | null, r: Row, k: 'lower' | 'upper') => (editable
-    ? <InputNumber value={v} disabled={r.item_type !== 'QUANT'} style={{ width: 90 }} placeholder={r.item_type === 'QUANT' ? (k === 'lower' ? '下限' : '上限') : '-'}
+  const num = (v: number | null, r: Row, k: 'lower' | 'upper') => (
+    <InputNumber value={v} size="small" disabled={r.item_type !== 'QUANT'} style={{ width: 72 }} placeholder={r.item_type === 'QUANT' ? (k === 'lower' ? '下限' : '上限') : '-'}
       onChange={(x) => update(r.key, { [k]: x === null ? null : Number(x) } as Partial<Row>)} />
-    : r.item_type === 'QUANT' ? (v ?? '-') : '-');
+  );
+  // 1366 宽度下不横向滚动：标准与方法合并一列、上下限与单位合并一列
   const columns: any[] = [
     {
-      title: '序号', dataIndex: 'seq', width: 80,
-      render: (v: number, r: Row) => (editable ? <InputNumber min={0} max={9999} precision={0} value={v} style={{ width: 64 }} onChange={(x) => update(r.key, { seq: Number(x) || 0 })} /> : v),
+      title: '序号', dataIndex: 'seq', width: 64,
+      render: (v: number, r: Row) => (editable ? <InputNumber min={0} max={9999} precision={0} size="small" value={v} style={{ width: 54 }} onChange={(x) => update(r.key, { seq: Number(x) || 0 })} /> : v),
     },
     {
-      title: '检验项目', dataIndex: 'name', width: 160,
-      render: (v: string, r: Row) => (editable ? <Input value={v} maxLength={64} placeholder="如：外观" onChange={(e) => update(r.key, { name: e.target.value })} /> : <b>{v}</b>),
-    },
-    {
-      title: '类型', dataIndex: 'item_type', width: 110,
+      title: '检验项目 / 类型', dataIndex: 'name', width: 150,
       render: (v: string, r: Row) => (editable
-        ? <Select value={v} style={{ width: 96 }} onChange={(x) => update(r.key, { item_type: x as Row['item_type'] })} options={[{ value: 'QUAL', label: '定性' }, { value: 'QUANT', label: '定量' }]} />
-        : <StatusTag dict="insp_item_type" value={v} />),
+        ? (
+          <Space direction="vertical" size={4} style={{ width: '100%' }}>
+            <Input size="small" value={v} maxLength={64} placeholder="如：外观" onChange={(e) => update(r.key, { name: e.target.value })} />
+            <Select size="small" value={r.item_type} style={{ width: '100%' }} onChange={(x) => update(r.key, { item_type: x as Row['item_type'] })} options={[{ value: 'QUAL', label: '定性（逐项确认）' }, { value: 'QUANT', label: '定量（逐件录值）' }]} />
+          </Space>
+        )
+        : <Space direction="vertical" size={2}><b>{v}</b><StatusTag dict="insp_item_type" value={r.item_type} /></Space>),
     },
     {
-      title: '标准 / 要求', dataIndex: 'standard',
-      render: (v: string, r: Row) => (editable ? <Input value={v} maxLength={256} placeholder={r.item_type === 'QUANT' ? '如：峰值波长 660±5nm' : '判定标准，如：无破损、无氧化'} onChange={(e) => update(r.key, { standard: e.target.value })} /> : v || '-'),
+      title: '标准 / 要求 · 检验方法', dataIndex: 'standard',
+      render: (v: string, r: Row) => (editable
+        ? (
+          <Space direction="vertical" size={4} style={{ width: '100%', minWidth: 180 }}>
+            <Input size="small" value={v} maxLength={256} placeholder={r.item_type === 'QUANT' ? '标准，如：峰值波长 660±5nm' : '标准，如：无破损、无氧化'} onChange={(e) => update(r.key, { standard: e.target.value })} />
+            <Input size="small" value={r.method} maxLength={128} placeholder="方法 / 工具，如：光谱仪逐件测量" onChange={(e) => update(r.key, { method: e.target.value })} />
+          </Space>
+        )
+        : <div>{v || '-'}{r.method && <div><Typography.Text type="secondary" style={{ fontSize: 12 }}>方法：{r.method}</Typography.Text></div>}</div>),
     },
-    { title: '下限', dataIndex: 'lower', width: 100, render: (v: number | null, r: Row) => num(v, r, 'lower') },
-    { title: '上限', dataIndex: 'upper', width: 100, render: (v: number | null, r: Row) => num(v, r, 'upper') },
     {
-      title: '单位', dataIndex: 'unit', width: 80,
-      render: (v: string, r: Row) => (editable ? <Input value={v} maxLength={16} disabled={r.item_type !== 'QUANT'} placeholder={r.item_type === 'QUANT' ? 'nm' : '-'} onChange={(e) => update(r.key, { unit: e.target.value })} /> : v || '-'),
-    },
-    {
-      title: '检验方法 / 工具', dataIndex: 'method', width: 200,
-      render: (v: string, r: Row) => (editable ? <Input value={v} maxLength={128} placeholder="如：光谱仪逐件测量" onChange={(e) => update(r.key, { method: e.target.value })} /> : v || '-'),
+      title: '规格限（下限 ~ 上限 单位）', key: 'limits', width: 230,
+      render: (_: any, r: Row) => (editable
+        ? (
+          <Space size={4}>
+            {num(r.lower, r, 'lower')}<span>~</span>{num(r.upper, r, 'upper')}
+            <Input size="small" value={r.unit} maxLength={16} disabled={r.item_type !== 'QUANT'} placeholder={r.item_type === 'QUANT' ? '单位' : '-'} style={{ width: 54 }} onChange={(e) => update(r.key, { unit: e.target.value })} />
+          </Space>
+        )
+        : r.item_type === 'QUANT' ? `${r.lower ?? ''} ~ ${r.upper ?? ''} ${r.unit || ''}` : '-'),
     },
   ];
   if (editable) {
     columns.push({
-      title: '', key: 'del', width: 48,
+      title: '', key: 'del', width: 40,
       render: (_: any, r: Row) => (
         <Button type="text" danger icon={<DeleteOutlined />} onClick={() => { setRows((rs) => rs.filter((x) => x.key !== r.key)); setDirty(true); }} />
       ),
@@ -201,7 +221,7 @@ export default function InspectionSpecs() {
         message="检验规范是受控文件（编号 IQC-SPEC-物料编码，每次批准升一版）：修改需 QA 或工程人员电子签名并填写修订说明；只影响之后新建的检验单，已建检验单保留建单时的项目。免检物料、成品、半成品不做来料检验，不能维护。"
       />
       <Row gutter={[16, 16]}>
-        <Col xs={24} lg={7}>
+        <Col xs={24} lg={6}>
           <Card size="small" title="选择物料" extra={<Button size="small" icon={<ReloadOutlined />} onClick={loadSpecs} />}>
             <RemoteSelect url="/inspection-specs/materials" noun="需检验物料" style={{ width: '100%' }} value={materialId} onChange={(v) => pick(v as number | undefined)}
               placeholder="输入物料编码或名称（仅列需来料检验的物料）" labelOf={(r) => `${r.code} ${r.name}`} />
@@ -226,7 +246,7 @@ export default function InspectionSpecs() {
             />
           </Card>
         </Col>
-        <Col xs={24} lg={17}>
+        <Col xs={24} lg={18}>
           {!materialId ? (
             <Card><Empty description="请在左侧选择物料" /></Card>
           ) : loading || !data ? (
@@ -281,7 +301,14 @@ export default function InspectionSpecs() {
                       ]} />
                   </>
                 ) : (
-                  <Table<Row> rowKey="key" size="middle" pagination={false} dataSource={editable ? rows : sorted} columns={columns} scroll={{ x: 'max-content' }} />
+                  <Table<Row> rowKey="key" size="small" pagination={false} dataSource={editable ? rows : sorted} columns={columns} scroll={{ x: 'max-content' }} />
+                )}
+                {editable && dirty && (
+                  <div style={{ marginTop: 12 }}>
+                    <Typography.Text strong>修订说明</Typography.Text><Typography.Text type="danger"> *</Typography.Text>
+                    <Input ref={noteRef} value={note} maxLength={250} style={{ marginTop: 4 }} placeholder="改了什么、依据（如：增加峰值波长定量检验，上下限按规格书 660±5nm）——签名时作为签名理由"
+                      onChange={(e) => setNote(e.target.value)} onPressEnter={save} />
+                  </div>
                 )}
                 {!canEdit && <Typography.Paragraph type="secondary" style={{ marginTop: 12, fontSize: 12 }}>只有 QA 或工程人员可以修改检验规范。</Typography.Paragraph>}
               </Card>

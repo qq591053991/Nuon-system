@@ -226,8 +226,24 @@ function CreateModal({ open, onClose, onDone }: { open: boolean; onClose: () => 
             ];
             return (
               <>
-                <Table rowKey="key" size="small" columns={columns} dataSource={fields} pagination={false} scroll={{ x: 'max-content' }}
-                  locale={{ emptyText: '请扫描序列号或添加明细' }} />
+                {narrow ? (
+                  // PDA：每行一张卡片，删除按钮够大
+                  fields.length ? fields.map((f, i) => (
+                    <Card key={f.key} size="small" style={{ marginBottom: 8 }}
+                      title={<span className="mono">{form.getFieldValue(['lines', f.name, 'sn']) || `明细 ${i + 1}`}</span>}
+                      extra={<Button danger icon={<DeleteOutlined />} aria-label="删除这一行" style={{ width: 44, height: 40 }} onClick={() => remove(f.name)} />}>
+                      {columns.filter((c) => c.key !== 'del').map((c) => (
+                        <div key={String(c.key)} style={{ marginBottom: 6 }}>
+                          <div style={{ color: '#888', fontSize: 13 }}>{c.title as string}</div>
+                          {(c.render as any)?.(null, f, i)}
+                        </div>
+                      ))}
+                    </Card>
+                  )) : <Typography.Text type="secondary">请扫描序列号或添加明细</Typography.Text>
+                ) : (
+                  <Table rowKey="key" size="small" columns={columns} dataSource={fields} pagination={false} scroll={{ x: 'max-content' }}
+                    locale={{ emptyText: '请扫描序列号或添加明细' }} />
+                )}
                 <Button type="dashed" icon={<PlusOutlined />} style={{ marginTop: 8 }} onClick={() => add({ qty: 1, location_id: rejLoc })}>添加明细</Button>
               </>
             );
@@ -299,8 +315,8 @@ function RmaDrawer({ rma, onClose, onCloseIt }: { rma: Rec | null; onClose: () =
   const narrow = useNarrow(768);
   if (!rma) return <Drawer open={false} onClose={onClose} />;
   const ncrDone = rma.ncr_status && rma.ncr_status !== 'OPEN';
-  const columns: TableColumnsType<Rec> = [
-    { title: '物料/产品', key: 'm', render: (_, r) => <MaterialCell code={r.material_code} name={r.material_name} spec={r.material_spec} /> },
+  const columns: RColumn[] = [
+    { title: '物料/产品', key: 'm', mobile: 'title', render: (_, r) => <MaterialCell code={r.material_code} name={r.material_name} spec={r.material_spec} /> },
     { title: '序列号', dataIndex: 'sn', render: (v) => (v ? <SnLink sn={v} /> : '-') },
     { title: '序列号状态', dataIndex: 'sn_status', render: (v) => (v ? <StatusTag dict="sn_status" value={v} /> : '-') },
     { title: '批号', dataIndex: 'lot_no', render: (v, r) => <LotLink code={r.material_code} lot={v} /> },
@@ -340,7 +356,7 @@ function RmaDrawer({ rma, onClose, onCloseIt }: { rma: Rec | null; onClose: () =
         { key: 'by', label: '登记', children: `${rma.created_by || '-'} · ${fmtDateTime(rma.created_at)}` },
         { key: 'rm', label: '备注', children: <span style={{ whiteSpace: 'pre-wrap' }}>{rma.remark || '-'}</span> },
       ]} />
-      <Table rowKey="id" size="small" columns={columns} dataSource={rma.lines} pagination={false} scroll={{ x: 'max-content' }} />
+      <ResponsiveTable rowKey="id" size="small" columns={columns} dataSource={rma.lines} pagination={false} scroll={{ x: 'max-content' }} />
       <div style={{ marginTop: 16 }}>
         <Attachments entity="wms_customer_return" entityId={rma.id} bare hint="退货照片、客户退货单、物流单据、检测报告等。" canUpload={can('wms', 'qa')} />
       </div>

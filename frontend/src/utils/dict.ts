@@ -6,7 +6,7 @@ export const DICT: Record<string, Record<string, Entry>> = {
     PARTIAL_SHIPPED: ['部分发货', 'gold'], SHIPPED: ['已发货', 'green'], CLOSED: ['已关闭', 'default'], CANCELLED: ['已取消', 'red'],
   },
   po_status: {
-    DRAFT: ['草稿', 'default'], APPROVED: ['已审批', 'blue'], PARTIAL_RECEIVED: ['部分到货', 'gold'],
+    DRAFT: ['草稿', 'default'], SUBMITTED: ['待厂长审批', 'orange'], APPROVED: ['已审批', 'blue'], PARTIAL_RECEIVED: ['部分到货', 'gold'],
     RECEIVED: ['已到货', 'green'], CLOSED: ['已关闭', 'default'], CANCELLED: ['已取消', 'red'],
   },
   wo_status: {
@@ -55,7 +55,7 @@ export const DICT: Record<string, Record<string, Entry>> = {
   mrp_status: { OPEN: ['待处理', 'gold'], CONVERTED: ['已转单', 'green'], IGNORED: ['已忽略', 'default'] },
   fin_type: { AR: ['应收', 'blue'], AP: ['应付', 'orange'], PR: ['预收款', 'purple'], PP: ['预付款', 'magenta'] },
   fin_status: { OPEN: ['未结', 'gold'], PARTIAL: ['部分结算', 'blue'], PAID: ['已结清', 'green'], VOID: ['已作废', 'default'] },
-  audit_action: { CREATE: ['新增', 'green'], UPDATE: ['修改', 'blue'], DELETE: ['删除', 'red'], LOGIN: ['登录', 'cyan'], LOGIN_FAILED: ['登录失败', 'volcano'] },
+  audit_action: { CREATE: ['新增', 'green'], UPDATE: ['修改', 'blue'], DELETE: ['删除', 'red'], LOGIN: ['登录', 'cyan'], LOGIN_FAILED: ['登录失败', 'volcano'], UNLOCK: ['解锁屏幕', 'cyan'], VERIFY: ['完整性校验', 'purple'] },
   device_class: { I: ['I类'], II: ['II类'], III: ['III类'] },
   // 质量/仓储逆向（代理 4）
   issue_type: { ISSUE: ['领料', 'blue'], RETURN: ['退料', 'orange'] },

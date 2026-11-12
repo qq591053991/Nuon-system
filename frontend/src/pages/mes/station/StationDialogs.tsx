@@ -3,7 +3,7 @@
  * 判不合格（不良现象大按钮 + 确认）、设备选择（不可用设备置灰并写明原因）。
  */
 import { Alert, Button, Form, Input, InputNumber, Modal, Radio, Select, Switch, Tag, Typography, type InputRef } from 'antd';
-import { CloseOutlined, LockOutlined, SafetyCertificateOutlined, WarningOutlined } from '@ant-design/icons';
+import { CloseOutlined, IdcardOutlined, LockOutlined, SafetyCertificateOutlined, WarningOutlined } from '@ant-design/icons';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { get, post, type Rec } from '../../../api/http';
 import { errDetail } from '../spec';
@@ -15,39 +15,54 @@ interface AuthProps {
   title: string;
   /** 说明：为什么需要授权 */
   hint: string;
-  terminalUser?: string | null;
   onOk: (who: string) => void;
   onCancel: () => void;
+  /** 弹窗完全关闭后（焦点回到录入框） */
+  onClosed?: () => void;
 }
 
-/** 输入本终端登录账号的密码（工位专用账号，班组长 / 管理员掌握）；回车提交，错误不关闭 */
-export function AuthModal({ open, title, hint, terminalUser, onOk, onCancel }: AuthProps) {
-  const [pwd, setPwd] = useState('');
+/**
+ * 班组长授权（C-N3）：刷班组长本人工牌 + 输入 PIN（须有“班组长”权限 mes_lead）。
+ * 刷卡回车自动跳到 PIN；PIN 回车确认；错误不关闭弹窗、清空 PIN 重输。
+ */
+export function AuthModal({ open, title, hint, onOk, onCancel, onClosed }: AuthProps) {
+  const [badge, setBadge] = useState('');
+  const [pin, setPin] = useState('');
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const ref = useRef<InputRef>(null);
+  const badgeRef = useRef<InputRef>(null);
+  const pinRef = useRef<InputRef>(null);
 
   useEffect(() => {
     if (open) {
-      setPwd('');
+      setBadge('');
+      setPin('');
       setErr(null);
-      setTimeout(() => ref.current?.focus(), 60);
+      setTimeout(() => badgeRef.current?.focus(), 60);
     }
   }, [open]);
 
   const submit = async () => {
-    if (!pwd) {
-      setErr('请输入密码');
+    if (!badge.trim()) {
+      setErr('请先刷班组长工牌');
+      badgeRef.current?.focus();
+      return;
+    }
+    if (!pin) {
+      setErr('请输入班组长 PIN');
+      pinRef.current?.focus();
       return;
     }
     setBusy(true);
     try {
-      const r = await post('/mes/station/authorize', { password: pwd }, true);
-      onOk(r.full_name);
+      const r = await post('/mes/station/authorize', { badge_no: badge.trim(), pin }, true);
+      onOk(r.user?.full_name ?? '班组长');
     } catch (e) {
       setErr(errDetail(e));
-      setPwd('');
-      ref.current?.focus();
+      // 重新刷卡 + 输 PIN
+      setPin('');
+      setBadge('');
+      badgeRef.current?.focus();
     } finally {
       setBusy(false);
     }
@@ -56,11 +71,12 @@ export function AuthModal({ open, title, hint, terminalUser, onOk, onCancel }: A
   return (
     <Modal
       open={open}
-      title={<span><LockOutlined /> {title}</span>}
-      okText="确认"
+      title={<span style={{ fontSize: 20 }}><LockOutlined /> {title}</span>}
+      okText="确认授权"
       cancelText="取消"
       onOk={submit}
       onCancel={onCancel}
+      afterClose={onClosed}
       confirmLoading={busy}
       destroyOnHidden
       maskClosable={false}
@@ -68,20 +84,40 @@ export function AuthModal({ open, title, hint, terminalUser, onOk, onCancel }: A
       okButtonProps={{ size: 'large' }}
       cancelButtonProps={{ size: 'large' }}
     >
-      <Typography.Paragraph>{hint}</Typography.Paragraph>
-      <Input.Password
-        ref={ref}
+      <Typography.Paragraph style={{ fontSize: 15 }}>{hint}</Typography.Paragraph>
+      <Input
+        ref={badgeRef}
         size="large"
         autoComplete="off"
-        placeholder={`终端账号${terminalUser ? `（${terminalUser}）` : ''}的密码`}
-        value={pwd}
+        prefix={<IdcardOutlined />}
+        placeholder="刷班组长工牌（或输入工牌号）后回车"
+        value={badge}
         onChange={(e) => {
-          setPwd(e.target.value);
+          setBadge(e.target.value);
+          setErr(null);
+        }}
+        onPressEnter={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (badge.trim()) pinRef.current?.focus();
+        }}
+      />
+      <Input.Password
+        ref={pinRef}
+        size="large"
+        style={{ marginTop: 12 }}
+        inputMode="numeric"
+        autoComplete="off"
+        prefix={<LockOutlined />}
+        placeholder="班组长 PIN"
+        value={pin}
+        onChange={(e) => {
+          setPin(e.target.value.replace(/\D/g, ''));
           setErr(null);
         }}
         onPressEnter={submit}
       />
-      {err && <Alert style={{ marginTop: 12 }} type="error" showIcon message={err} />}
+      {err && <Alert style={{ marginTop: 12 }} type="error" showIcon message={<b>{err}</b>} />}
     </Modal>
   );
 }
@@ -165,10 +201,11 @@ interface SetupProps {
   first?: boolean;
   onSave: (c: StationConfig) => void;
   onCancel: () => void;
+  onClosed?: () => void;
 }
 
 /** 终端设置（班组长授权后打开）：本工位工序设定后锁定，操作员不能更改 */
-export function SetupModal({ open, config, by, first, onSave, onCancel }: SetupProps) {
+export function SetupModal({ open, config, by, first, onSave, onCancel, onClosed }: SetupProps) {
   const [form] = Form.useForm();
   const [ops, setOps] = useState<Rec[]>([]);
   const [eqs, setEqs] = useState<StationEq[]>([]);
@@ -218,6 +255,7 @@ export function SetupModal({ open, config, by, first, onSave, onCancel }: SetupP
       cancelText={first ? '暂不设定' : '取消'}
       onOk={save}
       onCancel={onCancel}
+      afterClose={onClosed}
       destroyOnHidden
       maskClosable={false}
       okButtonProps={{ size: 'large' }}
@@ -288,10 +326,11 @@ interface FailProps {
   busy?: boolean;
   onConfirm: (code: string, remark: string) => void;
   onCancel: () => void;
+  onClosed?: () => void;
 }
 
 /** 判不合格：点选不良现象（大按钮，键盘 1–9 也可）→ 确认（Enter），“其他”须说明（C-F16） */
-export function FailDialog({ open, sn, opName, codes, busy, onConfirm, onCancel }: FailProps) {
+export function FailDialog({ open, sn, opName, codes, busy, onConfirm, onCancel, onClosed }: FailProps) {
   const [code, setCode] = useState<string | null>(null);
   const [remark, setRemark] = useState('');
   const [err, setErr] = useState<string | null>(null);
@@ -360,6 +399,7 @@ export function FailDialog({ open, sn, opName, codes, busy, onConfirm, onCancel 
       width={860}
       zIndex={2000}
       footer={null}
+      afterClose={onClosed}
       closable={false}
       destroyOnHidden
       maskClosable={false}

@@ -85,7 +85,7 @@ export class SalesService {
     if (!(await tx.customer.findUnique({ where: { id } }))) throw new NotFound('客户');
   }
 
-  list(q: Record<string, string>) {
+  async list(q: Record<string, string>) {
     const where: Prisma.SalesOrderWhereInput = {};
     if (q.q) {
       where.OR = [
@@ -102,7 +102,28 @@ export class SalesService {
     if (od) where.order_date = od;
     const dd = range(q.delivery_from, q.delivery_to);
     if (dd) where.delivery_date = dd;
-    return paginate(this.db.client.salesOrder, 'SalesOrder', { where, orderBy: { id: 'desc' }, children: CH }, q);
+    const page = await paginate(this.db.client.salesOrder, 'SalesOrder', { where, orderBy: { id: 'desc' }, children: CH }, q);
+    await this.decorate(page.items);
+    return page;
+  }
+
+  /**
+   * 计算字段：earliest_delivery（各行交期最早的，行未填用表头）、delivery_count（不同交期个数）、
+   * production_state（生产中订单：SCHEDULED = 工单都还是计划状态、PRODUCING = 已有下达/生产中的工单）。
+   */
+  private async decorate(items: any[]) {
+    if (!items.length) return;
+    const wos = await this.db.client.workOrder.findMany({
+      where: { so_id: { in: items.map((x) => x.id) }, status: { not: 'CANCELLED' } },
+      select: { so_id: true, status: true },
+    });
+    for (const so of items) {
+      const dates = [...new Set((so.lines ?? []).map((l: any) => fmtDate(l.delivery_date ?? so.delivery_date)).filter(Boolean))].sort() as string[];
+      so.earliest_delivery = dates[0] ?? fmtDate(so.delivery_date);
+      so.delivery_count = dates.length;
+      const mine = wos.filter((w) => w.so_id === so.id);
+      so.production_state = !mine.length ? null : mine.every((w) => w.status === 'PLANNED') ? 'SCHEDULED' : 'PRODUCING';
+    }
   }
 
   /** 详情（含关联工单/发货、各行已排产数量） */
@@ -113,6 +134,7 @@ export class SalesService {
     const d = ser('SalesOrder', so, CH);
     d.work_orders = serList('WorkOrder', await c.workOrder.findMany({ where: { so_id: id }, orderBy: { id: 'asc' }, include: inc('WorkOrder') }));
     d.shipments = serList('Shipment', await c.shipment.findMany({ where: { so_id: id }, orderBy: { id: 'asc' }, include: inc('Shipment') }));
+    await this.decorate([d]);
     const live = d.work_orders.filter((w: any) => w.status !== 'CANCELLED');
     for (const l of d.lines) l.planned_qty = round(live.filter((w: any) => w.so_line_id === l.id).reduce((s: number, w: any) => s + (w.planned_qty || 0), 0));
     return d;
@@ -253,7 +275,7 @@ export class SalesService {
         if (w.planned_end && w.planned_end.getTime() > newD.getTime()) {
           affected.push({
             wo_id: w.id, wo_no: w.no, status: w.status,
-            message: `第${lineNo}行 ${code} 新交期 ${fmtDate(newD)} 早于工单 ${w.no} 计划完工 ${fmtDate(w.planned_end)}，请在工单上【调整】计划日期`,
+            message: `第${lineNo}行 ${code} 新交期 ${fmtDate(newD)} 早于工单 ${w.no} 计划完工 ${fmtDate(w.planned_end)}，计划员需提前工单计划日期`,
           });
         } else if (oldD && newD.getTime() > oldD.getTime()) {
           affected.push({ wo_id: w.id, wo_no: w.no, status: w.status, message: `第${lineNo}行 ${code} 交期推迟到 ${fmtDate(newD)}，工单 ${w.no} 可按需推迟（不调整也不影响交付）` });
@@ -298,7 +320,7 @@ export class SalesService {
         changes.push(`${tag} 数量 ${g(old.qty)} → ${g(ln.qty)}`);
         const woQty = round(mine.reduce((s, w) => s + w.planned_qty - (w.scrap_qty || 0), 0));
         if (ln.qty > old.qty && mine.length && ln.qty > woQty + EPS) {
-          warnings.push(`${tag} 增加 ${g(ln.qty - old.qty)}，已排产 ${g(woQty)}：变更后请点【生成工单】补排 ${g(ln.qty - Math.max(woQty, shipped))}`);
+          warnings.push(`${tag} 增加 ${g(ln.qty - old.qty)}，已排产 ${g(woQty)}：计划员需补排 ${g(ln.qty - Math.max(woQty, shipped))}`);
         }
         if (ln.qty < woQty - EPS) {
           let over = round(woQty - ln.qty);
@@ -308,8 +330,8 @@ export class SalesService {
             affected.push({
               wo_id: w.id, wo_no: w.no, status: w.status,
               message: started
-                ? `${tag} 订单减到 ${g(ln.qty)}，工单 ${w.no}（计划 ${g(w.planned_qty)}）已开工：未开工部分可在工单上【调整】减少，已完工的多余数量入库为库存`
-                : `${tag} 订单减到 ${g(ln.qty)}，工单 ${w.no} 计划 ${g(w.planned_qty)}，请在工单上【调整】减少 ${g(Math.min(over, w.planned_qty))}${w.status === 'PLANNED' ? '' : '（已下达未开工，可调）'}`,
+                ? `${tag} 订单减到 ${g(ln.qty)}，工单 ${w.no}（计划 ${g(w.planned_qty)}）已开工：计划员需调减未开工部分，已完工的多余数量入库为库存`
+                : `${tag} 订单减到 ${g(ln.qty)}，工单 ${w.no} 计划 ${g(w.planned_qty)}，计划员需调减 ${g(Math.min(over, w.planned_qty))}${w.status === 'PLANNED' ? '' : '（已下达，未开工部分可调）'}`,
             });
             over = round(over - w.planned_qty);
           }
@@ -345,7 +367,7 @@ export class SalesService {
       try {
         const m = await this.checkProduct(tx, so.customer_id, dto.material_id);
         changes.push(`新增 ${m.code} × ${g(dto.qty)}`);
-        warnings.push(`新增行 ${m.code} 需要排产：变更后请点【生成工单】`);
+        warnings.push(`新增行 ${m.code} 需要排产：计划员需生成工单`);
       } catch (e: any) {
         errors.push(`第${idx + 1}行：${e?.response?.detail ?? e.message}`);
       }
@@ -404,8 +426,17 @@ export class SalesService {
       });
       await auditReason(tx, user, 'erp_sales_order', id, `订单变更：${a.changes.join('；')}。原因：${b.reason.trim()}`);
       const row = await tx.salesOrder.findUniqueOrThrow({ where: { id }, include: inc('SalesOrder', CH) });
-      return { ...result, order: ser('SalesOrder', row, CH) };
+      // 有工单受影响/需补排时通知计划员：计划员待办“订单变更待处理”、工单上标“与订单不符”
+      const needPlan = a.affected.length > 0 || a.warnings.length > 0;
+      const notified = needPlan ? await this.planners(tx) : [];
+      return { ...result, notified, order: ser('SalesOrder', row, CH) };
     });
+  }
+
+  /** 计划员（PMC）姓名：订单变更后由其处理受影响工单 */
+  private async planners(tx: Tx): Promise<string[]> {
+    const users = await tx.user.findMany({ where: { is_active: true }, select: { full_name: true, roles: true } });
+    return users.filter((u) => String(u.roles || '').split(',').includes('planner')).map((u) => u.full_name);
   }
 
   /** 订单的变更记录（订单与订单行的审计追踪，含变更原因） */
@@ -559,11 +590,16 @@ export class SalesService {
     return rows.map((r) => ({ id: r.id, no: r.no, status: r.status, order_date: fmtDate(r.order_date), customer_po: r.customer_po }));
   }
 
-  /** 该客户各产品的上次成交价（已确认及之后的订单） */
+  /**
+   * 该客户各产品的上次成交价（已确认及之后的订单）：
+   *   排除备品/赠品/样品/免费行与 0 价；同一订单同产品多行时取数量最大的主行；
+   *   低于近 10 次主行价格中位数 70% 的视为异常低价（如特价/补偿）不带出；返回最近 3 次成交价供参考。
+   */
   async lastPrices(q: Record<string, string>) {
     const cid = qInt(q.customer_id);
     const ids = String(q.material_ids || '').split(',').map(Number).filter((x) => Number.isInteger(x) && x > 0);
-    const out: Record<number, { unit_price: number; currency: string; so_id: number; so_no: string; order_date: string | null; qty: number }> = {};
+    type P = { unit_price: number; currency: string; so_id: number; so_no: string; order_date: string | null; qty: number; remark: string | null };
+    const out: Record<number, P & { recent: P[]; skipped: (P & { why: string })[] }> = {};
     if (!cid || !ids.length) return out;
     const rows = await this.db.client.salesOrderLine.findMany({
       where: {
@@ -571,11 +607,34 @@ export class SalesService {
         order: { customer_id: cid, status: { notIn: ['DRAFT', 'CANCELLED'] }, ...(qInt(q.exclude_id) ? { id: { not: qInt(q.exclude_id) } } : {}) },
       },
       include: { order: true },
-      orderBy: [{ order: { order_date: 'desc' } }, { id: 'desc' }],
+      orderBy: [{ order: { order_date: 'desc' } }, { order_id: 'desc' }, { qty: 'desc' }, { id: 'asc' }],
+      take: 500,
     });
-    for (const r of rows) {
-      if (out[r.material_id]) continue;
-      out[r.material_id] = { unit_price: num(r.unit_price), currency: r.order.currency, so_id: r.order_id, so_no: r.order.no, order_date: fmtDate(r.order.order_date), qty: r.qty };
+    const SPARE = /备品|备件|赠品|赠送|样品|样机|免费|FOC|free|spare|sample|gift/i;
+    for (const mid of ids) {
+      const skipped: (P & { why: string })[] = [];
+      const mains: P[] = [];
+      const seen = new Set<number>();
+      for (const r of rows.filter((x) => x.material_id === mid)) {
+        const p: P = { unit_price: num(r.unit_price), currency: r.order.currency, so_id: r.order_id, so_no: r.order.no, order_date: fmtDate(r.order.order_date), qty: r.qty, remark: r.remark };
+        if (SPARE.test(r.remark || '')) skipped.push({ ...p, why: '备品/赠品/样品行' });
+        else if (!(p.unit_price > 0)) skipped.push({ ...p, why: '0 价' });
+        else if (!seen.has(r.order_id)) {
+          seen.add(r.order_id); // 同一订单取数量最大的主行（已按数量降序）
+          mains.push(p);
+        }
+      }
+      const recent10 = mains.slice(0, 10).map((m) => m.unit_price).sort((a, b) => a - b);
+      const median = recent10.length ? recent10[Math.floor((recent10.length - 1) / 2)] : 0;
+      const valid = mains.filter((m) => {
+        if (median > 0 && m.unit_price < median * 0.7) {
+          skipped.push({ ...m, why: `异常低价（低于近期中位价 ${g(median)} 的 70%）` });
+          return false;
+        }
+        return true;
+      });
+      if (!valid.length) continue;
+      out[mid] = { ...valid[0], recent: valid.slice(0, 3), skipped: skipped.slice(0, 5) };
     }
     return out;
   }

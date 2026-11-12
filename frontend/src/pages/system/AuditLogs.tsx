@@ -1,5 +1,5 @@
 import { Alert, Button, Card, DatePicker, Input, Modal, Result, Select, Space, Table, Tag, Tooltip, Typography, type TableColumnsType } from 'antd';
-import { CloseOutlined, LockOutlined, ReloadOutlined, SafetyCertificateOutlined } from '@ant-design/icons';
+import { CloseOutlined, HistoryOutlined, LockOutlined, PrinterOutlined, ReloadOutlined, SafetyCertificateOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { useState, type ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
@@ -91,12 +91,12 @@ function LineChangesView({ list, row, max }: { list: LineChanges[]; row: Rec; ma
   const parent = row.entity_name || entityName(row.entity);
   return (
     <Space direction="vertical" size={2} style={{ width: '100%' }}>
-      {list.map((lc) => {
+      {/* 明细未变化的子表（如保存 BOM 时测试参数原样重写）不显示，避免“内容未变化”噪音 */}
+      {list.filter((lc) => lc.items.length > 0 || !lc.before_known).map((lc) => {
         const items = max ? lc.items.slice(0, max) : lc.items;
         return (
           <div key={lc.rel} style={{ fontSize: 13 }}>
             <Typography.Text strong>{parent} {lc.rel_name}：</Typography.Text>
-            {!lc.items.length && <Typography.Text type="secondary">内容未变化</Typography.Text>}
             {!lc.before_known && <Typography.Text type="secondary">（修改前无记录，仅列出保存后的内容）</Typography.Text>}
             {items.map((it) => <LineItemView key={`${it.op}-${it.key}`} it={it} row={row} />)}
             {max && lc.items.length > max && <div><Typography.Text type="secondary" style={{ fontSize: 12 }}>等 {lc.items.length} 处变更，展开查看全部</Typography.Text></div>}
@@ -261,6 +261,8 @@ interface VerifyResult {
 function IntegrityCheck() {
   const [busy, setBusy] = useState(false);
   const [res, setRes] = useState<VerifyResult | null>(null);
+  const [history, setHistory] = useState<Rec[] | null>(null);
+  const loadHistory = async () => setHistory(await get('/system/audit-verify/history'));
   const run = async () => {
     setBusy(true);
     try {
@@ -272,7 +274,45 @@ function IntegrityCheck() {
   return (
     <>
       <Button icon={<SafetyCertificateOutlined />} loading={busy} onClick={run}>完整性校验</Button>
-      <Modal open={!!res} title="审计追踪完整性校验" width={720} footer={<Button type="primary" onClick={() => setRes(null)}>关闭</Button>} onCancel={() => setRes(null)}>
+      <Button icon={<HistoryOutlined />} onClick={loadHistory}>校验历史</Button>
+      <Modal open={!!history} title="完整性校验历史（每次校验自动留档，最近 200 次）" width={820} footer={(
+        <Space>
+          <ExportButton rows={history ?? []} filename="审计追踪完整性校验历史" title="审计追踪完整性校验历史" columns={[
+            { title: '校验时间', key: 'ts', type: 'datetime' }, { title: '校验人', value: (r) => `${r.full_name ?? ''}（${r.username ?? ''}）` },
+            { title: '结论', value: (r) => (r.ok ? '完整，未发现篡改' : `发现 ${r.problems} 条异常`) }, { title: '已封存记录', key: 'sealed_total', type: 'number' },
+            { title: '本次新封存', key: 'sealed_now', type: 'number' }, { title: '异常记录', value: (r) => (r.problem_records ?? []).join('；') },
+          ]} />
+          <Button type="primary" onClick={() => setHistory(null)}>关闭</Button>
+        </Space>
+      )} onCancel={() => setHistory(null)}>
+        <Table<Rec>
+          rowKey="id"
+          size="small"
+          dataSource={history ?? []}
+          pagination={{ pageSize: 10, size: 'small' }}
+          columns={[
+            { title: '校验时间', dataIndex: 'ts', render: (v) => fmtTs(v) },
+            { title: '校验人', dataIndex: 'full_name', render: (v, r) => `${v ?? ''}（${r.username ?? ''}）` },
+            { title: '结论', dataIndex: 'ok', render: (v, r) => (v ? <Tag color="green">完整</Tag> : <Tag color="red">异常 {r.problems} 条</Tag>) },
+            { title: '已封存记录', dataIndex: 'sealed_total', align: 'right' },
+            { title: '本次新封存', dataIndex: 'sealed_now', align: 'right' },
+          ]}
+        />
+      </Modal>
+      <Modal open={!!res} title="审计追踪完整性校验" width={720} footer={(
+        <Space className="no-print">
+          {res && (
+            <ExportButton rows={[{ ...res, problem_count: res.problems.length }]} filename={`审计追踪完整性校验_${fmtTs(res.verified_at).slice(0, 10)}`} title="审计追踪完整性校验结果" columns={[
+              { title: '校验时间', key: 'verified_at', type: 'datetime' }, { title: '结论', value: (r) => (r.ok ? '审计追踪完整，未发现篡改' : `发现 ${r.problem_count} 条异常记录`) },
+              { title: '已封存记录', key: 'sealed_total', type: 'number' }, { title: '本次新封存', key: 'sealed_now', type: 'number' },
+              { title: '异常明细', value: (r) => (r.problems ?? []).map((p: Rec) => `封存序号 ${p.seal_no} / 记录 ${p.id}：${p.problem}`).join('；') || '无' },
+            ]} />
+          )}
+          <Button icon={<PrinterOutlined />} onClick={() => window.print()}>打印</Button>
+          <Button type="primary" onClick={() => setRes(null)}>关闭</Button>
+        </Space>
+      )} onCancel={() => setRes(null)}>
+        <Typography.Paragraph type="secondary" className="print-only">审计追踪完整性校验报告 · 打印时间 {fmtTs(new Date().toISOString())}</Typography.Paragraph>
         {res && (res.ok ? (
           <Result
             status="success"

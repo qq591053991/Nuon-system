@@ -1,5 +1,5 @@
 /** 财务（G4 好用性）：单据详情（含来料 IQC 状态）、收付款流水、作废、合并收付款、预收冲抵、金蝶凭证引出 */
-import { Body, Controller, Get, Param, ParseIntPipe, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Param, ParseIntPipe, Post, Put, Query } from '@nestjs/common';
 import { Type } from 'class-transformer';
 import { IsArray, IsBoolean, IsIn, IsInt, IsNumber, IsOptional, IsPositive, IsString, Min, MinLength, ValidateNested } from 'class-validator';
 import { Perms, User } from '../auth';
@@ -27,11 +27,18 @@ export class SettleDto {
   @IsOptional() @IsString() method?: string | null;
   @IsOptional() @IsString() reference?: string | null;
   @IsOptional() @IsString() remark?: string | null;
+  /** 收付款银行账户 */
+  @IsOptional() @IsString() bank_account?: string | null;
   /** 不传 = 按到期日先后自动分配 */
   @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => AllocationDto) allocations?: AllocationDto[];
   @IsOptional() @IsBoolean() as_advance?: boolean;
   /** 只返回分配方案，不登记 */
   @IsOptional() @IsBoolean() dry_run?: boolean;
+}
+
+export class InvoiceDto {
+  @IsOptional() @IsString() invoice_no?: string | null;
+  @IsOptional() @IsString() invoice_date?: string | null;
 }
 
 export class ApplyAdvanceDto {
@@ -49,6 +56,13 @@ export class FinanceExtraController {
   @Perms('finance')
   get(@Param('id', ParseIntPipe) id: number) {
     return this.svc.get(id);
+  }
+
+  /** 应收单登记发票号 / 开票日期 */
+  @Put('docs/:id/invoice')
+  @Perms('finance')
+  setInvoice(@Param('id', ParseIntPipe) id: number, @Body() body: InvoiceDto) {
+    return this.svc.setInvoice(id, body);
   }
 
   /** 收付款流水（含已作废） */
@@ -82,7 +96,7 @@ export class FinanceExtraController {
   /** 金蝶凭证引出：period=YYYY-MM 或 date_from/date_to */
   @Get('voucher')
   @Perms('finance')
-  voucher(@Query() q: Record<string, string>) {
-    return this.svc.voucher(q);
+  voucher(@Query() q: Record<string, string>, @User() user: CurrentUser) {
+    return this.svc.voucher(q, user);
   }
 }

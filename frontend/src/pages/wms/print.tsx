@@ -82,13 +82,13 @@ const LABEL: CSSProperties = {
   overflow: 'hidden', display: 'flex', flexDirection: 'column', fontFamily: 'sans-serif', breakInside: 'avoid',
 };
 
-/** 批次标签：物料、批号条码、数量、效期、库位、质量状态 */
+/** 批次标签：物料、批号条码、数量、效期、库位（不印质量状态：IQC 判定后会变，以系统为准） */
 export function LotLabel({ r }: { r: Rec }) {
   return (
     <div className="wms-label" style={LABEL}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 4 }}>
         <b style={{ fontSize: 11, whiteSpace: 'nowrap' }}>{r.material_code}</b>
-        <span style={{ fontSize: 9, border: '1px solid #000', padding: '0 2px' }}>{r.status === 'QUARANTINE' ? '待检' : r.status === 'AVAILABLE' ? '合格' : r.status === 'HOLD' ? '冻结' : r.status === 'REJECTED' ? '不合格' : ''}</span>
+        {/* 不印质量状态：IQC 判定后状态会变，以系统为准（扫批号可查） */}
       </div>
       <div style={{ fontSize: 8, lineHeight: 1.2, height: '2.4em', overflow: 'hidden' }}>{r.material_name}{r.material_spec ? ` | ${r.material_spec}` : ''}</div>
       <Barcode value={r.lot_no || r.material_code} height={34} showText={false} style={{ margin: '1mm 0 0' }} />

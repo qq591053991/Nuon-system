@@ -58,14 +58,25 @@ export class WoAdjustService {
     const p = await this.progress(this.db.client, id);
     const { wo } = p;
     const adjustable = ['RELEASED', 'IN_PROGRESS'].includes(wo.status);
-    let so_line: { so_no: string; line_no: number; qty: number; other_wo_qty: number } | null = null;
+    let so_line: { so_id: number; so_no: string; line_no: number; qty: number; other_wo_qty: number } | null = null;
     if (wo.so_line_id) {
       const ln = await this.db.client.salesOrderLine.findUnique({ where: { id: wo.so_line_id }, include: { order: true } });
       const others = await this.db.client.workOrder.findMany({ where: { so_line_id: wo.so_line_id, id: { not: wo.id }, status: { not: 'CANCELLED' } } });
-      if (ln) so_line = { so_no: ln.order.no, line_no: ln.line_no, qty: ln.qty, other_wo_qty: round(others.reduce((s, w) => s + w.planned_qty - (w.scrap_qty || 0), 0)) };
+      if (ln) so_line = { so_id: ln.order_id, so_no: ln.order.no, line_no: ln.line_no, qty: ln.qty, other_wo_qty: round(others.reduce((s, w) => s + w.planned_qty, 0)) };
+    }
+    const minQty = Math.max(p.started, wo.material.serial_control ? 1 : EPS);
+    // 与订单不符：订单数量 ≠ 关联工单合计 → 建议本工单调到“订单数量 − 其他工单”（不少于已开工数量）
+    let mismatch: { so_qty: number; wo_total: number; suggest_qty: number; cancel_suggested: boolean } | null = null;
+    if (so_line && ['PLANNED', 'RELEASED', 'IN_PROGRESS'].includes(wo.status)) {
+      const total = round(so_line.other_wo_qty + wo.planned_qty);
+      if (Math.abs(total - so_line.qty) > EPS) {
+        const target = round(so_line.qty - so_line.other_wo_qty);
+        mismatch = { so_qty: so_line.qty, wo_total: total, suggest_qty: Math.max(target, minQty), cancel_suggested: target <= EPS && p.started <= EPS };
+      }
     }
     return {
-      wo_id: wo.id, wo_no: wo.no, status: wo.status, adjustable, planned_qty: wo.planned_qty, min_qty: Math.max(p.started, wo.material.serial_control ? 1 : EPS),
+      mismatch,
+      wo_id: wo.id, wo_no: wo.no, status: wo.status, adjustable, planned_qty: wo.planned_qty, min_qty: minQty,
       started: p.started, completed_qty: wo.completed_qty, scrap_qty: wo.scrap_qty, unstarted_serials: p.unstarted.length,
       serial_control: wo.material.serial_control, uom: wo.material.uom, planned_start: fmtDate(wo.planned_start), planned_end: fmtDate(wo.planned_end),
       so_line,

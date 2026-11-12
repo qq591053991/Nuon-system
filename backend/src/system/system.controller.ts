@@ -14,7 +14,7 @@ import { ser, serList } from '../common/presenter';
 import { PrismaService } from '../common/prisma.service';
 import { AuditSealService } from './audit-seal.service';
 import { docTargets, enrichAudit, entityName } from './audit-view';
-import { checkBadge, checkKingdeeEnabled, checkRoles, clearPin, createUserTx, deactivateTx, resetPasswordTx, setPin } from './user-admin';
+import { checkBadge, checkKingdeeEnabled, checkRoles, clearPin, createUserTx, deactivateTx, resetPasswordTx, resetPinTx, setPin } from './user-admin';
 
 class UserDto {
   @IsString() username: string;
@@ -36,6 +36,8 @@ class UserDto {
   @IsOptional() @IsString() @Matches(/^(\d{4,8})?$/, { message: '工位 PIN 须为 4–8 位数字' }) pin?: string | null;
   /** 由启用改为停用时：同时释放工牌、清除工位 PIN（离职人员的工牌可直接分配给新人） */
   @IsOptional() @IsBoolean() release_badge?: boolean;
+  /** 由系统生成工位 PIN（新建时有工牌未填 PIN 默认生成；编辑时传 true 表示重置），仅在本次响应的 temp_pin 中返回一次 */
+  @IsOptional() @IsBoolean() generate_pin?: boolean;
 }
 
 class ResetPwdDto {
@@ -48,10 +50,12 @@ class DeactivateDto {
   @IsOptional() @IsBoolean() release_badge?: boolean;
 }
 
-const BATCH_ACTIONS = ['set_roles', 'add_roles', 'remove_roles', 'deactivate', 'activate', 'force_change', 'reset_password', 'unlock', 'set_department'] as const;
+const BATCH_ACTIONS = ['set_roles', 'add_roles', 'remove_roles', 'deactivate', 'activate', 'force_change', 'reset_password', 'reset_pin', 'unlock', 'set_department'] as const;
 class BatchDto {
   @IsArray() @ArrayMinSize(1, { message: '请先勾选用户' }) @ArrayMaxSize(1000) @IsInt({ each: true }) ids: number[];
   @IsIn(BATCH_ACTIONS as unknown as string[]) action: (typeof BATCH_ACTIONS)[number];
+  /** 勾选中包含管理员本人时，须显式确认（改密/重置会立即影响本人当前登录） */
+  @IsOptional() @IsBoolean() confirm_self?: boolean;
   @IsOptional() @IsArray() @IsString({ each: true }) roles?: string[];
   @IsOptional() @IsString() department?: string | null;
   @IsOptional() @IsBoolean() release_badge?: boolean;
@@ -173,7 +177,7 @@ export class SystemController {
   createUser(@Body() b: UserDto, @User() admin: CurrentUser) {
     return this.db.tx(async (tx) => {
       const r = await createUserTx(tx, { ...b, roles: b.roles ?? [] }, admin);
-      return { ...(await this.view(r.user)), temp_password: r.temp_password };
+      return { ...(await this.view(r.user)), temp_password: r.temp_password, temp_pin: r.temp_pin };
     });
   }
 
@@ -213,10 +217,12 @@ export class SystemController {
               : {}),
         },
       });
+      let tempPin: string | null = null;
       if (release) await clearPin(tx, cur, admin);
       else if (b.pin) await setPin(tx, u, b.pin, admin);
-      if (release || b.pin) u = (await tx.user.findUnique({ where: { id } }))!;
-      return { ...(await this.view(u)), temp_password: tempPassword };
+      else if (u.badge_no && (b.generate_pin || (!cur.pin_hash && b.badge_no && b.badge_no !== cur.badge_no))) tempPin = await resetPinTx(tx, u, admin);
+      if (release || b.pin || tempPin) u = (await tx.user.findUnique({ where: { id } }))!;
+      return { ...(await this.view(u)), temp_password: tempPassword, temp_pin: tempPin };
     });
   }
 
@@ -246,6 +252,17 @@ export class SystemController {
     });
   }
 
+  /** 行内“重置工位 PIN”：生成随机 PIN（仅本次返回），本人首次刷卡后须修改 */
+  @Post('users/:id/reset-pin')
+  @Perms('admin')
+  resetPin(@Param('id', ParseIntPipe) id: number, @User() admin: CurrentUser) {
+    return this.db.tx(async (tx) => {
+      const cur = await this.one(tx, id);
+      const pin = await resetPinTx(tx, cur, admin);
+      return { ...(await this.view(await this.one(tx, id))), temp_pin: pin };
+    });
+  }
+
   /** 行内“停用”（离职）：默认释放工牌、清除工位 PIN */
   @Post('users/:id/deactivate')
   @Perms('admin')
@@ -264,21 +281,36 @@ export class SystemController {
 
   /**
    * 批量操作（勾选多个用户）：set_roles 设为指定角色 / add_roles 追加角色 / remove_roles 移除角色 / set_department 设部门 /
-   * deactivate 停用（默认释放工牌、清 PIN）/ activate 启用 / force_change 要求下次登录改密 / reset_password 重置为临时密码 / unlock 解锁。
+   * deactivate 停用（默认释放工牌、清 PIN）/ activate 启用 / force_change 要求下次登录改密（公开演示密码账号不允许）/
+ * reset_password 重置为临时密码 / reset_pin 重置工位 PIN（有工牌的启用账号）/ unlock 解锁。含本人时改密类操作须 confirm_self。
    * 整批在一个事务中，任何一个失败全部回滚。reset_password 返回每人的临时密码（仅本次）。
    */
   @Post('users/batch')
   @Perms('admin')
-  batch(@Body() b: BatchDto, @User() admin: CurrentUser) {
+  async batch(@Body() b: BatchDto, @User() admin: CurrentUser) {
     const roles = b.roles ?? [];
     if (['set_roles', 'add_roles', 'remove_roles'].includes(b.action)) {
       if (!roles.length) throw new BizError('请选择角色');
       checkRoles(roles);
     }
+    // 对本人的改密/重置/重置 PIN 会立即影响当前登录：须二次确认
+    if (['force_change', 'reset_password', 'reset_pin'].includes(b.action) && b.ids.includes(admin.id) && !b.confirm_self) {
+      throw new BizError(`勾选的账号中包含您自己（${admin.username}）。对自己执行此操作会立即影响您当前的登录，请取消勾选自己，或在确认框中确认后重试`);
+    }
+    // 公开演示密码账号不能“要求下次登录改密”：知道演示密码的人会抢先登录并设成只有他知道的密码，冒用其电子签名身份
+    if (b.action === 'force_change') {
+      const demo = (await demoPasswordUsers(this.db)).filter((u) => b.ids.includes(u.id));
+      if (demo.length) {
+        throw new BizError(
+          `${demo.map((u) => u.username).join('、')} 仍在使用公开的演示密码，不能用“要求下次登录改密”——知道演示密码的人会抢先登录并改成自己的密码，冒用其电子签名身份。`
+          + '请改用“重置为随机临时密码”（当面发给本人）或“停用”',
+        );
+      }
+    }
     return this.db.tx(async (tx) => {
       const users = await tx.user.findMany({ where: { id: { in: b.ids } }, orderBy: { id: 'asc' } });
       if (users.length !== new Set(b.ids).size) throw new BizError('部分用户不存在，请刷新后重试');
-      const passwords: { id: number; username: string; full_name: string; temp_password: string }[] = [];
+      const passwords: { id: number; username: string; full_name: string; temp_password: string | null; temp_pin?: string | null; badge_no?: string | null }[] = [];
       let changed = 0;
       const skipped: string[] = [];
       for (const u of users) {
@@ -327,7 +359,16 @@ export class SystemController {
               continue;
             }
             const r = await resetPasswordTx(tx, u, null);
-            passwords.push({ id: u.id, username: u.username, full_name: u.full_name, temp_password: r.temp_password! });
+            passwords.push({ id: u.id, username: u.username, full_name: u.full_name, temp_password: r.temp_password!, badge_no: u.badge_no });
+            break;
+          }
+          case 'reset_pin': {
+            if (!u.badge_no || !u.is_active) {
+              skipped.push(u.username);
+              continue;
+            }
+            const pin = await resetPinTx(tx, u, admin);
+            passwords.push({ id: u.id, username: u.username, full_name: u.full_name, temp_password: null, temp_pin: pin, badge_no: u.badge_no });
             break;
           }
           case 'unlock':
@@ -381,11 +422,43 @@ export class SystemController {
     return { items, total, page, page_size: size };
   }
 
-  /** 审计追踪完整性校验：先封存未封存的记录，再复算整条哈希链，返回被篡改/删除/插入的记录 */
+  /**
+   * 审计追踪完整性校验：先封存未封存的记录，再复算整条哈希链，返回被篡改/删除/插入的记录。
+   * 每次校验的结论写入审计追踪（对象“审计完整性校验”），作为校验历史留档（E-30）。
+   */
   @Get('audit-verify')
   @Perms('admin', 'qa')
-  auditVerify() {
-    return this.sealer.verify();
+  async auditVerify(@User() user: CurrentUser) {
+    const r = await this.sealer.verify();
+    await this.db.base.auditLog.create({
+      data: {
+        username: user.username, full_name: user.full_name, entity: 'sys_audit_verify', entity_id: null, action: 'VERIFY',
+        changes: JSON.stringify({
+          ok: r.ok, sealed_total: r.sealed_total, sealed_now: r.sealed_now, problems: r.problems.length,
+          problem_records: r.problems.slice(0, 50).map((p) => `${p.seal_no}/${p.id}：${p.problem}`),
+        }),
+      },
+    });
+    return r;
+  }
+
+  /** 完整性校验历史（最近 200 次）：时间、校验人、结论、已封存条数、异常条数 */
+  @Get('audit-verify/history')
+  @Perms('admin', 'qa', 'audit')
+  async auditVerifyHistory() {
+    const rows = await this.db.base.auditLog.findMany({ where: { entity: 'sys_audit_verify' }, orderBy: { id: 'desc' }, take: 200 });
+    return rows.map((r) => {
+      let c: Record<string, any> = {};
+      try {
+        c = JSON.parse(r.changes || '{}');
+      } catch {
+        c = {};
+      }
+      return {
+        id: r.id, ts: r.ts, username: r.username, full_name: r.full_name, ok: !!c.ok, sealed_total: c.sealed_total ?? null,
+        sealed_now: c.sealed_now ?? null, problems: c.problems ?? 0, problem_records: c.problem_records ?? [],
+      };
+    });
   }
 
   /**

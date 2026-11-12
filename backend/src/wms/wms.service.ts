@@ -3,7 +3,7 @@
  * 发货（仅已放行产品）、调拨、盘点，并自动生成应付/应收。
  *
  * 导出方法（tx = 事务客户端；工单/领料单/销售订单/发货单/盘点单既可传 id 也可传带 id 的记录，方法内会在 tx 中重新读取）：
- *   receive(tx, user, { receipt_type, lines, supplier_id?, customer_id?, po?, delivery_note?, remark? })
+ *   receive(tx, user, { receipt_type, lines, supplier_id?, customer_id?, po?, delivery_note?, remark?, confirm_placement? })
  *       → Receipt & { lines }                      收货（采购/客供料/期初/其他）；采购收货更新订单状态并生成应付
  *   createIssue(tx, user, wo, lines?)            → { issue, shortages }   生成领料单（lines 为空 = 按 FEFO 自动分配）
  *   confirmIssue(tx, user, issue, { partial }?)  → MaterialIssue & { lines }  领料过账（扣库存、更新工单已领数量；拣料模式只过账已拣行，partial 时未拣行转新单）
@@ -61,6 +61,8 @@ export interface ReceiveArgs {
   po?: (PurchaseOrder & { lines: { id: number; qty: number; received_qty: number; material_id: number; unit_price: Prisma.Decimal | number }[] }) | null;
   delivery_note?: string | null;
   remark?: string | null;
+  /** 操作人已确认放置警告（湿敏物料放非防潮柜库位）；未确认时这类行返回 400，detail 以【需确认】开头。期初导入不要求。 */
+  confirm_placement?: boolean | null;
 }
 
 /** 手工指定批次领料：stock_id = 库存行 */
@@ -144,6 +146,10 @@ export class WmsService {
       // 库位放置规则：自有料不能进客供料仓、客供料不能进自有仓（按货主判断）
       const place = await this.inv.checkPlacement(tx, { material_id: m.id, location_id: locId, owner_customer_id: owner });
       if (place.errors.length) throw new BizError(`第 ${i} 行：${place.errors.join('；')}`);
+      // 湿敏物料放非防潮柜：与调拨一致，须操作人确认（期初导入按实际存放位置记账，不要求）
+      if (place.warnings.length && !args.confirm_placement && receipt_type !== 'OPENING') {
+        throw new BizError(`【需确认】第 ${i} 行：${place.warnings.join('；')}。如确需放入 ${place.location?.code ?? ''}，请确认后重新提交`);
+      }
       const status = m.iqc_required && receipt_type !== 'OPENING' ? 'QUARANTINE' : 'AVAILABLE';
       const lot = await this.lotFor(tx, m.lot_control, ln.lot_no);
       const mfg = dateOnly(ln.mfg_date);
@@ -532,6 +538,16 @@ export class WmsService {
     if (uncounted.length && !opts.uncounted_as_book) {
       const ln = uncounted[0];
       throw new BizError(`还有 ${uncounted.length} 行未录入实盘数量（如 ${ln.location.code} ${ln.material.code} 批次 ${ln.lot_no || '-'}）。请盘完，或确认“未盘行按账面”后过账`);
+    }
+    // 录入实盘后又有收发的行：实盘数已过时，须重新清点（system_qty = 录入时账面）
+    const stale: string[] = [];
+    for (const ln of sc.lines) {
+      if (ln.counted_qty === null || ln.counted_qty === undefined) continue;
+      const book = await this.inv.lockedQty(tx, { material_id: ln.material_id, location_id: ln.location_id, lot_no: ln.lot_no, status: ln.status, owner_customer_id: ln.owner_customer_id });
+      if (Math.abs(book - ln.system_qty) > EPS) stale.push(`${ln.location.code} ${ln.material.code} 批次 ${ln.lot_no || '-'}`);
+    }
+    if (stale.length) {
+      throw new BizError(`有 ${stale.length} 行在录入实盘后又有收发/调拨，实盘数已过时，请重新清点后再过账：${stale.slice(0, 5).join('；')}${stale.length > 5 ? ' 等' : ''}`);
     }
     for (const ln of sc.lines) {
       const k = { material_id: ln.material_id, location_id: ln.location_id, lot_no: ln.lot_no, status: ln.status, owner_customer_id: ln.owner_customer_id };

@@ -22,6 +22,7 @@ import { useAuth } from '../../auth';
 import Attachments from '../../components/Attachments';
 import { isCancel, useESign } from '../../components/ESign';
 import PageHeader from '../../components/PageHeader';
+import ChangeLogButton from '../system/ChangeLogButton';
 import { MaterialSelect, WorkCenterSelect } from '../../components/RemoteSelect';
 import StatusTag from '../../components/StatusTag';
 import { dictLabel, dictOptions } from '../../utils/dict';
@@ -479,6 +480,7 @@ function RoutingBody({ routing, versions, reload }: { routing: Rec; versions: Re
         extra={
           <>
             <Button icon={<ArrowLeftOutlined />} onClick={() => nav('/engineering/routings')}>返回列表</Button>
+            <ChangeLogButton entity="eng_routing" id={routing.id} />
             {editing && (
               <>
                 <Popconfirm title="确定删除此工艺路线草稿？" onConfirm={remove}>
@@ -652,7 +654,7 @@ function RoutingBody({ routing, versions, reload }: { routing: Rec; versions: Re
               <ParamsEditor op={drawerOp} hl={hl} onChange={(params) => patch(drawerOp._key, { params })} />
             </Card>
             {drawerOp.id ? (
-              <Attachments entity="eng_routing_op" entityId={drawerOp.id} title="作业指导附件（图片 / SOP 文件，工位可查看）" hint="上传后永久保存；新版本自动带上" />
+              <Attachments entity="eng_routing_op" entityId={drawerOp.id} title="作业指导附件（图片 / SOP 文件，工位可查看）" hint="随本版本提交审批（差异对比列出附件增删）；已发布版本不能再改，升版后自动带上" />
             ) : (
               <Alert type="info" showIcon message="新工序保存草稿后即可上传作业指导图片 / SOP 附件。" />
             )}

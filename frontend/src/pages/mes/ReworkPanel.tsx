@@ -1,20 +1,20 @@
 /**
- * 工位终端 · 返工换件引导（C-F17）：产品按 NCR 返工时，重测前先登记换件（或确认未换件）。
- *   ① 点选拆下的零件（本机已绑定的关键件 / 工单 BOM 用料，原批号自动带出）；
- *   ② 扫描装上的新零件批号（从合格库存按先到期先出补领；未选拆下件时自动生成同物料的拆下行）；
- *   ③【提交换件记录】→ 确认。约 4 步（原 12 次点击 + 6 次输入）。
- * QA 处置意见要求换件时，不能跳过登记（后端同样拦截）。
+ * 工位终端 · 返工换件引导：产品按 NCR 返工时，重测前先登记换件（或确认未换件）。
+ *   ① 点选拆下的零件：本机已绑定的关键件、工单 BOM 用料，以及组件内的下级零件（如灯板里的驱动 IC，C-N4）；
+ *      QA 处置意见里提到的零件自动预选；拆下行可补原批号、位号 / 部件序列号；
+ *   ② 扫描装上的新零件批号（从合格库存按先到期先出补领；未选拆下件时自动生成同物料的拆下行）——扫码后焦点就在这里（N5）；
+ *   ③【提交换件记录】（固定在面板底部，N9）→ 确认。
+ * QA 处置时勾选“需更换零件”（Ncr.require_part_change）时，不能跳过登记（后端同样拦截）。
  */
-import { Alert, App, Button, Card, Input, Space, Table, Tag, Typography, type InputRef } from 'antd';
-import { CloseOutlined, SwapOutlined } from '@ant-design/icons';
-import { useRef, useState } from 'react';
+import { Alert, App, Button, Input, Space, Tag, Typography, type InputRef } from 'antd';
+import { CloseOutlined, DownOutlined, SwapOutlined, UpOutlined } from '@ant-design/icons';
+import { useEffect, useRef, useState } from 'react';
 import type { Rec } from '../../api/http';
-import { fmtDateTime } from '../../utils/format';
 import { beep } from './station/feedback';
 import { errDetail, num } from './spec';
 import { stationGet, stationPost } from './stationApi';
 
-interface RemovedRow { key: number; material_id: number; material: string; lot_no?: string | null; part_sn?: string | null }
+interface RemovedRow { key: number; material_id: number; material: string; lot_no: string; part_sn: string; lots: string[]; designator?: string | null }
 interface InstalledRow { key: number; material_id: number; material: string; lot_no: string; qty: number }
 
 const ACTION_COLOR: Record<string, string> = { REMOVE: 'volcano', INSTALL: 'green', BIND: 'blue' };
@@ -37,38 +37,53 @@ interface Props {
 
 let seq = 0;
 
+const rowOf = (c: Rec): RemovedRow => ({
+  key: ++seq, material_id: c.material_id, material: `${c.code} ${c.name}`, lot_no: c.lot_no ?? '', part_sn: c.part_sn ?? '',
+  lots: c.lots ?? [], designator: c.designator ?? null,
+});
+
 export default function ReworkPanel({ scan, token, onDone, onSkip, readOnly, sound = true }: Props) {
   const { modal, message } = App.useApp();
   const rw: Rec = scan.rework;
   const candidates: Rec[] = rw.candidates || [];
   const done: Rec[] = (scan.key_parts || []).filter((k: Rec) => k.action !== 'BIND' && k.ncr_no === rw.ncr_no);
-  const [removed, setRemoved] = useState<RemovedRow[]>([]);
+  // QA 意见里提到的零件预选为拆下件
+  const [removed, setRemoved] = useState<RemovedRow[]>(() => (readOnly ? [] : candidates.filter((c) => c.suggested).slice(0, 2).map(rowOf)));
   const [installed, setInstalled] = useState<InstalledRow[]>([]);
   const [saving, setSaving] = useState(false);
   const [lot, setLot] = useState('');
   const [looking, setLooking] = useState(false);
   const [lookErr, setLookErr] = useState<string | null>(null);
   const [choices, setChoices] = useState<Rec[]>([]);
+  const [showSub, setShowSub] = useState(false);
   const lotRef = useRef<InputRef>(null);
 
+  // 扫码进入返工：焦点直接到②新零件批号框（N5）
+  useEffect(() => {
+    const t = setTimeout(() => lotRef.current?.focus(), 80);
+    return () => clearTimeout(t);
+  }, []);
+
   const candOf = (materialId: number) => candidates.find((c) => c.material_id === materialId);
-  const isRemoved = (c: Rec) => removed.some((r) => r.material_id === c.material_id && (r.part_sn ?? null) === (c.part_sn ?? null));
+  const sameCand = (r: RemovedRow, c: Rec) => r.material_id === c.material_id;
+  const isRemoved = (c: Rec) => removed.some((r) => sameCand(r, c));
+  const subCount = candidates.filter((c) => c.source === 'SUB' && !c.suggested).length;
+  const visible = candidates.filter((c) => c.source !== 'SUB' || c.suggested || showSub || isRemoved(c));
 
   const toggleRemoved = (c: Rec) => {
-    if (isRemoved(c)) {
-      setRemoved((l) => l.filter((r) => !(r.material_id === c.material_id && (r.part_sn ?? null) === (c.part_sn ?? null))));
-      return;
-    }
-    setRemoved((l) => [...l, { key: ++seq, material_id: c.material_id, material: `${c.code} ${c.name}`, lot_no: c.lot_no ?? null, part_sn: c.part_sn ?? null }]);
+    if (isRemoved(c)) setRemoved((l) => l.filter((r) => !sameCand(r, c)));
+    else setRemoved((l) => [...l, rowOf(c)]);
     setTimeout(() => lotRef.current?.focus(), 30);
   };
+
+  const patchRemoved = (key: number, p: Partial<RemovedRow>) => setRemoved((l) => l.map((r) => (r.key === key ? { ...r, ...p } : r)));
 
   const addInstalled = (s: Rec) => {
     setInstalled((l) => [...l, { key: ++seq, material_id: s.material_id, material: `${s.material_code} ${s.material_name}`, lot_no: s.lot_no, qty: 1 }]);
     // 未选拆下件时，默认拆下同一物料（常见：坏件换新件），原批号取本机绑定/工单领用记录
     if (!removed.some((r) => r.material_id === s.material_id)) {
       const c = candOf(s.material_id);
-      setRemoved((l) => [...l, { key: ++seq, material_id: s.material_id, material: `${s.material_code} ${s.material_name}`, lot_no: c?.lot_no ?? null, part_sn: c?.part_sn ?? null }]);
+      setRemoved((l) => [...l, c ? rowOf(c) : { key: ++seq, material_id: s.material_id, material: `${s.material_code} ${s.material_name}`, lot_no: '', part_sn: '', lots: [] }]);
     }
     setChoices([]);
     setLot('');
@@ -126,7 +141,7 @@ export default function ReworkPanel({ scan, token, onDone, onSkip, readOnly, sou
         try {
           await stationPost(token, '/mes/rework-parts', {
             sn: scan.sn,
-            removed: removed.map(({ material_id, lot_no, part_sn }) => ({ material_id, lot_no: lot_no || undefined, part_sn: part_sn || undefined })),
+            removed: removed.map((r) => ({ material_id: r.material_id, lot_no: r.lot_no.trim() || undefined, part_sn: r.part_sn.trim() || undefined })),
             installed: installed.map(({ material_id, lot_no, qty }) => ({ material_id, lot_no, qty })),
           });
           message.success('返工换件已登记，请重新测试该工序');
@@ -143,49 +158,59 @@ export default function ReworkPanel({ scan, token, onDone, onSkip, readOnly, sou
   };
 
   const total = removed.length + installed.length;
+  const mustRegister = rw.require_parts && !done.length;
 
   return (
-    <Card className="station-rework" size="small" title={<Space><SwapOutlined style={{ color: '#fa8c16' }} />返工换件<Tag color="orange">{rw.ncr_no}</Tag><span style={{ fontWeight: 400 }}>工序 {rw.ng_seq} {rw.op_name} 不合格</span></Space>}>
-      <Alert
-        type={rw.require_parts && !done.length ? 'error' : 'warning'}
-        showIcon
-        style={{ marginBottom: 10 }}
-        message={<b style={{ fontSize: 17 }}>QA 处置意见：{rw.disposition_remark || '返工'}</b>}
-        description={
-          rw.require_parts && !done.length
-            ? '要求更换零件：必须先登记拆下 / 装上的零件（①点选拆下件 → ②扫新零件批号 → ③提交），才能重新测试。'
-            : '如更换了零件请先登记（①点选拆下件 → ②扫新零件批号 → ③提交）；未换件请点【未更换零件，直接重测】。'
-        }
-      />
+    <div className="station-rework">
+      <div className="rw-head">
+        <Space wrap size={6}>
+          <SwapOutlined style={{ color: '#fa8c16' }} />
+          <b>返工换件</b>
+          <Tag color="orange">{rw.ncr_no}</Tag>
+          <span>工序 {rw.ng_seq} {rw.op_name} 不合格</span>
+          {rw.require_parts && <Tag color="red">QA 要求换件</Tag>}
+        </Space>
+        <div className={`rw-qa${mustRegister ? ' must' : ''}`}>
+          QA 处置意见：<b>{rw.disposition_remark || '返工'}</b>
+          {mustRegister ? '（必须先登记换件才能重测）' : ''}
+        </div>
+      </div>
       {done.length > 0 && (
-        <Table<Rec> rowKey="id" size="small" pagination={false} style={{ marginBottom: 10 }} dataSource={done} columns={[
-          { title: '本次已登记', dataIndex: 'action', render: (v, r) => <KeyPartActionTag action={v} text={r.action_text} /> },
-          { title: '零件', key: 'm', render: (_, r) => `${r.material_code} ${r.material_name}` },
-          { title: '批号', dataIndex: 'lot_no', render: (v) => <span className="mono">{v || '-'}</span> },
-          { title: '部件序列号', dataIndex: 'part_sn', render: (v) => v || '-' },
-          { title: '操作员', dataIndex: 'operator_name' },
-          { title: '时间', dataIndex: 'ts', render: (v) => fmtDateTime(v) },
-        ]} />
+        <div className="rw-done">
+          本次已登记：
+          {done.map((k) => (
+            <span key={k.id} style={{ marginRight: 10 }}>
+              <KeyPartActionTag action={k.action} text={k.action_text} /> {k.material_code} {k.lot_no ? `· ${k.lot_no}` : ''}{k.part_sn ? ` · ${k.part_sn}` : ''}
+            </span>
+          ))}
+        </div>
       )}
       {!readOnly && (
         <>
-          <Typography.Text strong style={{ fontSize: 16 }}>① 点选拆下的零件</Typography.Text>
+          <div className="rw-step">
+            <Typography.Text strong>① 点选拆下的零件</Typography.Text>
+            {subCount > 0 && (
+              <Button size="small" type="link" icon={showSub ? <UpOutlined /> : <DownOutlined />} onClick={() => setShowSub((x) => !x)}>
+                {showSub ? '收起组件内零件' : `显示组件内零件（${subCount}）`}
+              </Button>
+            )}
+          </div>
           <div className="rw-cands">
-            {candidates.map((c) => (
-              <button key={`${c.material_id}-${c.part_sn ?? ''}`} type="button" className={`rw-cand${isRemoved(c) ? ' on' : ''}`} onClick={() => toggleRemoved(c)}>
+            {visible.map((c) => (
+              <button key={`${c.source}-${c.material_id}-${c.part_sn ?? ''}`} type="button" className={`rw-cand${isRemoved(c) ? ' on' : ''}${c.suggested ? ' sug' : ''}`} onClick={() => toggleRemoved(c)}>
                 <b className="mono">{c.code}</b> {c.name}
-                <div className="rw-sub" style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {c.source === 'BIND' ? '本机绑定' : 'BOM'} · 批号 {c.lot_no || (c.lots?.length ? c.lots.join('/') : '-')}
-                  {c.part_sn ? ` · ${c.part_sn}` : ''}
+                <div className="rw-sub">
+                  {c.suggested ? 'QA 意见提到 · ' : ''}{c.source === 'BIND' ? '本机绑定' : c.source === 'SUB' ? `${c.parent_code} 内` : 'BOM'}
+                  {c.designator ? ` · 位号 ${c.designator}` : ''}{c.lot_no || c.lots?.length ? ` · 批号 ${c.lot_no || c.lots.join('/')}` : ''}
                 </div>
               </button>
             ))}
           </div>
-          <Typography.Text strong style={{ fontSize: 16 }}>② 扫描装上的新零件批号</Typography.Text>
+          <div className="rw-step"><Typography.Text strong>② 扫描装上的新零件批号</Typography.Text></div>
           <Input
             ref={lotRef}
+            data-rework-lot="1"
             size="large"
-            style={{ marginTop: 6 }}
             disabled={looking}
             placeholder="扫描新零件批号后回车（从合格库存补领）"
             value={lot}
@@ -199,9 +224,9 @@ export default function ReworkPanel({ scan, token, onDone, onSkip, readOnly, sou
               lookup();
             }}
           />
-          {lookErr && <div className="sp-err" style={{ fontSize: 16 }}>{lookErr}</div>}
+          {lookErr && <div className="sp-err" style={{ fontSize: 15 }}>{lookErr}</div>}
           {choices.length > 0 && (
-            <Space wrap style={{ marginTop: 8 }}>
+            <Space wrap style={{ marginTop: 6 }}>
               该批号对应多个物料，请选择：
               {choices.map((s) => <Button key={s.material_id} size="large" onClick={() => addInstalled(s)}>{s.material_code} {s.material_name}</Button>)}
             </Space>
@@ -211,32 +236,37 @@ export default function ReworkPanel({ scan, token, onDone, onSkip, readOnly, sou
               {removed.map((r) => (
                 <div key={r.key} className="rw-row">
                   <KeyPartActionTag action="REMOVE" text="拆下" />
-                  <span>{r.material}</span>
-                  <span className="mono">{r.lot_no || ''}{r.part_sn ? ` · ${r.part_sn}` : ''}</span>
+                  <span className="rw-mat">{r.material}</span>
+                  <Input size="middle" style={{ width: 150 }} placeholder="原批号（可选）" value={r.lot_no} list={`rw-lots-${r.key}`}
+                    onChange={(e) => patchRemoved(r.key, { lot_no: e.target.value })} />
+                  {r.lots.length > 0 && <datalist id={`rw-lots-${r.key}`}>{r.lots.map((x) => <option key={x} value={x} />)}</datalist>}
+                  <Input size="middle" style={{ width: 170 }} placeholder={r.designator ? `位号（${r.designator}）` : '位号 / 部件序列号'} value={r.part_sn}
+                    onChange={(e) => patchRemoved(r.key, { part_sn: e.target.value })} />
                   <Button type="text" danger className="rw-del" icon={<CloseOutlined />} onClick={() => setRemoved((l) => l.filter((x) => x.key !== r.key))} />
                 </div>
               ))}
               {installed.map((r) => (
                 <div key={r.key} className="rw-row">
                   <KeyPartActionTag action="INSTALL" text="装上" />
-                  <span>{r.material}</span>
+                  <span className="rw-mat">{r.material}</span>
                   <span className="mono">{r.lot_no} × {num(r.qty)}</span>
                   <Button type="text" danger className="rw-del" icon={<CloseOutlined />} onClick={() => setInstalled((l) => l.filter((x) => x.key !== r.key))} />
                 </div>
               ))}
             </div>
           )}
-          <div style={{ display: 'flex', gap: 12, marginTop: 12 }}>
+          <div className="rw-bar">
             <Button size="large" type="primary" className="station-btn-md" style={{ flex: 2, background: total ? '#fa8c16' : undefined, borderColor: total ? '#fa8c16' : undefined }}
               loading={saving} disabled={!total} onClick={submit}>
               ③ 提交换件记录{total ? `（${total} 项）` : ''}
             </Button>
-            {onSkip && !(rw.require_parts && !done.length) && (
+            {onSkip && !mustRegister && (
               <Button size="large" className="station-btn-md" style={{ flex: 1 }} onClick={onSkip}>{done.length ? '换件已登记，开始重测' : '未更换零件，直接重测'}</Button>
             )}
           </div>
         </>
       )}
-    </Card>
+      {readOnly && <Alert type="warning" showIcon message="当前操作员没有生产报工权限，不能登记返工换件" />}
+    </div>
   );
 }

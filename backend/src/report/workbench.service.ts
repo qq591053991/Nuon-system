@@ -18,6 +18,9 @@ import { num, round, round2 } from '../common/num';
 import { PrismaService, type Tx } from '../common/prisma.service';
 import { RateBook } from '../erp/currency';
 import { KittingService } from '../erp/kitting.service';
+import * as soPlan from '../erp/so-plan';
+import { closableNcrIds } from '../qms/qms-rules';
+import * as placement from '../wms/placement';
 import { localStart, pendingReleaseCount } from './report.service';
 
 export type Level = 'error' | 'warning' | 'success';
@@ -26,8 +29,11 @@ export interface TodoItem { key: string; title: string; count: number; path: str
 
 /** 主岗位优先级（多角色用户取最靠前的） */
 const PROFILE_ORDER = ['manager', 'qa', 'qc', 'planner', 'purchaser', 'sales', 'finance', 'warehouse', 'engineer', 'operator', 'admin'];
+/** 班组长、工位终端设备账号的首页与操作员相同（进入工位终端） */
+const ROLE_ALIAS: Record<string, string> = { leader: 'operator', station: 'operator' };
+const profileRoles = (user: { roles: string }) => [...new Set(roleList(user.roles).map((r) => ROLE_ALIAS[r] ?? r))];
 export function profileOf(user: { roles: string }): string {
-  const roles = roleList(user.roles);
+  const roles = profileRoles(user);
   return PROFILE_ORDER.find((r) => roles.includes(r)) ?? roles[0] ?? 'none';
 }
 
@@ -51,6 +57,10 @@ export const PATHS = {
   soOpen: '/sales/orders?status=CONFIRMED,IN_PRODUCTION,PARTIAL_SHIPPED',
   soOverdue: '/?risk=overdue',
   poApprove: '/purchase/orders?status=DRAFT',
+  poBig: '/purchase/orders?status=SUBMITTED',
+  ncrClosable: '/quality/ncrs?closable=1',
+  woMismatch: '/mes/work-orders?mismatch=1',
+  expiry: '/?panel=expiry',
   poReceive: '/purchase/orders?status=APPROVED,PARTIAL_RECEIVED',
   poChase: '/purchase/chase',
   mrp: '/plan/mrp',
@@ -66,8 +76,8 @@ export const PATHS = {
   expiring: '/wms/stock?expiring_days=30',
   belowSafety: '/wms/stock?tab=summary&below_safety=1',
   stockSummary: '/wms/stock?tab=summary',
-  calib: '/master/equipment',
-  supplierQual: '/master/suppliers',
+  calib: '/?panel=expiry',
+  supplierQual: '/?panel=expiry',
   rates: '/master/exchange-rates',
   arOverdue: '/finance?tab=AR&overdue=1',
   arOpen: '/finance?tab=AR',
@@ -127,7 +137,7 @@ class Counters {
   });
   /** 缺料工单（与工单列表 kitting=SHORT 同口径：G3 齐套分析；不可用时按估算） */
   woShort = () => this.m('wo_short', async () => (await this.shortage()).size);
-  poDraft = () => this.m('po_d', () => this.tx.purchaseOrder.count({ where: { status: { in: ['DRAFT', 'SUBMITTED'] } } }));
+  poDraft = () => this.m('po_d', () => this.tx.purchaseOrder.count({ where: { status: 'DRAFT' } }));
   poToReceive = () => this.m('po_r', () => this.tx.purchaseOrder.count({ where: { status: { in: ['APPROVED', 'PARTIAL_RECEIVED'] } } }));
   /** 逾期未到货的采购订单（按行：回复交期 > 行交期 > 单头交期） */
   poOverdue = () => this.m('po_od', async () => {
@@ -157,6 +167,37 @@ class Counters {
   calibDue = () => this.m('cal30', () => this.tx.equipment.count({ where: { calibration_required: true, next_calibration_date: { lte: addDays(this.t, 30) } } }));
   supplierQualDue = () => this.m('supq', () => this.tx.supplier.count({ where: { status: 'QUALIFIED', qualification_expiry: { not: null, lte: addDays(this.t, 60) } } }));
   mrpOpen = (action?: string) => this.m(`mrp_${action ?? ''}`, () => this.tx.mrpSuggestion.count({ where: { status: 'OPEN', ...(action ? { action } : {}) } }));
+  /** MRP 采购建议中“需新下单”的（不含提前催交例外） */
+  mrpPurchaseNew = () => this.m('mrp_new', () => this.tx.mrpSuggestion.count({ where: { status: 'OPEN', action: 'PURCHASE', OR: [{ exception: null }, { exception: { not: 'EXPEDITE' } }] } }));
+  /** MRP 例外“提前催交”：已有在途采购但晚于需求，应催供应商提前交货（直达催货清单） */
+  mrpExpedite = () => this.m('mrp_exp', () => this.tx.mrpSuggestion.count({ where: { status: 'OPEN', exception: 'EXPEDITE' } }));
+  /** 处置已执行完毕、可以关闭的 NCR（R3 口径） */
+  closableNcr = () => this.m('ncr_closable', async () => (await closableNcrIds(this.tx)).length);
+  /** 订单变更待处理：订单行（数量 − 已发）与关联未关闭工单计划量不一致的订单数（R2 口径；未提供时为 0） */
+  soMismatch = () => this.m('so_mismatch', async () => {
+    const fn = (soPlan as unknown as { woMismatches?: (db: Tx) => Promise<{ so_id: number }[]> }).woMismatches;
+    if (typeof fn !== 'function') return 0;
+    try {
+      return new Set((await fn(this.tx)).map((x) => x.so_id)).size;
+    } catch {
+      return 0;
+    }
+  });
+  /** 待上架的批次（与 /wms/putaway 同口径：合格库存不在合适库位，如暂存区、湿敏不在防潮柜、不在默认库位） */
+  putaway = () => this.m('putaway', async () => {
+    const reasonOf = (placement as unknown as { putawayReason?: (tx: Tx, st: any, cache: Map<number, any>) => Promise<unknown> }).putawayReason;
+    if (typeof reasonOf !== 'function') return 0;
+    const rows = await this.tx.stock.findMany({
+      where: { qty: { gt: 1e-9 }, status: 'AVAILABLE', location: { warehouse: { warehouse_type: { in: ['RAW', 'CUSTOMER', 'FG'] } } } },
+      include: { material: true, location: { include: { warehouse: true } } },
+    });
+    const cache = new Map<number, any>();
+    let n = 0;
+    for (const st of rows) if (await reasonOf(this.tx, st, cache).catch(() => null)) n++;
+    return n;
+  });
+  /** 已提交厂长审批的大额采购单 */
+  poSubmitted = () => this.m('po_sub', () => this.tx.purchaseOrder.count({ where: { status: 'SUBMITTED' } }));
   /** 已放行可发货：未发完的销售订单中，其成品有合格可用库存（不含已有待过账发货单的订单） */
   shippable = () => this.m('shippable', async () => {
     const sos = await this.tx.salesOrder.findMany({
@@ -167,11 +208,6 @@ class Counters {
     return sos.filter((s) => s.lines.some((l) => l.qty - l.shipped_qty > 1e-9 && (avail.get(l.material_id) ?? 0) > 1e-9)).map((s) => s.id);
   });
   /** 大额待审批采购单（本位币 ≥ 阈值） */
-  bigPoDraft = () => this.m('po_big', async () => {
-    const pos = await this.tx.purchaseOrder.findMany({ where: { status: { in: ['DRAFT', 'SUBMITTED'] } } });
-    const book = await RateBook.load(this.tx);
-    return pos.filter((p) => (book.toBase(p.total_amount, p.currency, this.t) ?? 0) >= PO_APPROVAL_THRESHOLD).length;
-  });
 }
 
 /** 成品合格可用库存（自有，不含客供） */
@@ -252,13 +288,15 @@ export class WorkbenchService {
     };
     // 厂长：要他拍板/关注的
     await add(['manager'], 'so_overdue', '已逾期未发完的销售订单', c.overdueSo, PATHS.soOverdue, 'error');
-    await add(['manager'], 'po_big', `待审批的大额采购单（≥${PO_APPROVAL_THRESHOLD.toLocaleString()}）`, c.bigPoDraft, PATHS.poApprove, 'warning');
+    await add(['manager'], 'po_big', `待您审批的大额采购单（≥${PO_APPROVAL_THRESHOLD.toLocaleString()}）`, c.poSubmitted, PATHS.poBig, 'warning');
+    await add(['manager', 'planner'], 'so_changed', '订单变更待处理（订单与工单数量不符）', c.soMismatch, PATHS.woMismatch, 'warning');
     await add(['manager', 'qa'], 'ncr_overdue', '超期未处置的不合格品（NCR）', c.overdueNcr, PATHS.ncrOverdue, 'error');
     // 质量
     await add(['qc', 'qa'], 'iqc', '待检验的来料（IQC）', c.pendingIqc, PATHS.iqc);
     await add(['qc', 'qa'], 'insp_other', '待检验的过程/成品检验单', c.pendingOtherInsp, PATHS.inspOther);
     await add(['qa'], 'dhr', '待审核放行的生产批（DHR，含可分批放行）', c.pendingRelease, PATHS.release);
     await add(['qa'], 'ncr', '待评审处置的不合格品（NCR）', c.openNcr, PATHS.ncrOpen);
+    await add(['qa'], 'ncr_closable', '可关闭的 NCR（处置已执行完毕）', c.closableNcr, PATHS.ncrClosable, 'warning');
     await add(['qa'], 'bom_submitted', '待批准的 BOM', c.bomSubmitted, PATHS.bomSubmitted);
     await add(['qa'], 'routing_submitted', '待批准的工艺路线', c.routingSubmitted, PATHS.routingSubmitted);
     await add(['qa'], 'capa', '进行中的 CAPA', c.openCapa, PATHS.capa);
@@ -270,10 +308,12 @@ export class WorkbenchService {
     // 采购
     await add(['purchaser'], 'po_draft', '待审批的采购订单', c.poDraft, PATHS.poApprove);
     await add(['purchaser', 'planner'], 'po_overdue', '逾期未到货的采购订单（催货）', c.poOverdue, PATHS.poChase, 'warning');
-    await add(['purchaser'], 'mrp_purchase', 'MRP 待转采购的建议', () => c.mrpOpen('PURCHASE'), PATHS.mrp);
+    await add(['purchaser'], 'mrp_expedite', '需提前催交的在途采购（MRP 例外）', c.mrpExpedite, PATHS.poChase, 'warning');
+    await add(['purchaser'], 'mrp_purchase', 'MRP 待转采购的建议（需新下单）', c.mrpPurchaseNew, PATHS.mrp);
     await add(['purchaser'], 'supplier_qual', '资质 60 天内到期的供应商', c.supplierQualDue, PATHS.supplierQual);
     // 仓管
     await add(['warehouse'], 'po_receive', '待收货的采购订单', c.poToReceive, PATHS.poReceive);
+    await add(['warehouse'], 'putaway', '待上架的批次', c.putaway, PATHS.putaway);
     await add(['warehouse'], 'issue', '待发料的领料单', c.issueDraft, PATHS.issueDraft);
     await add(['warehouse'], 'ship', '待过账的发货单', c.shipDraft, PATHS.shipDraft);
     await add(['warehouse'], 'shippable', '已放行可发货的销售订单', async () => (await c.shippable()).length, PATHS.shipNew);
@@ -299,7 +339,7 @@ export class WorkbenchService {
   /** 工作台：主岗位 + KPI 卡（带下钻 path）+ 岗位专属区块 */
   async workbench(tx: Tx, user: CurrentUser) {
     const profile = profileOf(user);
-    const roles = new Set(roleList(user.roles));
+    const roles = new Set(profileRoles(user));
     const perms = userPermissions(user);
     const c = this.counters(tx);
     const kpis: Kpi[] = [];
@@ -326,10 +366,12 @@ export class WorkbenchService {
           kpi({ key: 'pending_release', title: '待放行批次', value: await c.pendingRelease(), hint: 'DHR 待 QA 审核', path: PATHS.release }),
           kpi({ key: 'open_ncr', title: '待处置 NCR', value: await c.openNcr(), hint: `其中超期 ${await c.overdueNcr()} 张`, level: warnIf(await c.overdueNcr(), 'error'), path: PATHS.ncrOpen }),
           kpi({ key: 'pending_iqc', title: '待检来料 IQC', value: await c.pendingIqc(), path: PATHS.iqc }),
-          kpi({ key: 'calibration_due', title: '校准到期仪器', value: await c.calibDue(), hint: '30 天内到期/已过期', level: warnIf(await c.calibOverdue(), 'error'), path: PATHS.calib }),
+          kpi({ key: 'calibration_due', title: '校准到期仪器', value: await c.calibDue(), hint: '30 天内到期/已过期，点开看清单', level: warnIf(await c.calibOverdue(), 'error'), path: PATHS.calib }),
           kpi({ key: 'expiring_lots', title: '临期批次', value: await c.expiringLots(), hint: '30 天内到期', path: PATHS.expiring }),
         );
-        sections.approvals = (await this.todos(tx, { ...user, roles: 'manager' })).filter((t) => ['so_overdue', 'po_big', 'ncr_overdue'].includes(t.key));
+        sections.approvals = (await this.todos(tx, { ...user, roles: 'manager' })).filter((t) => ['so_overdue', 'po_big', 'ncr_overdue', 'so_changed'].includes(t.key));
+        sections.big_pos = await this.bigPos(tx);
+        sections.expiry = await this.expirySection(tx, ['calibration', 'supplier', 'qualification', 'lot']);
       } else if (r === 'qa') {
         push(
           kpi({ key: 'pending_release', title: '待放行批次', value: await c.pendingRelease(), hint: 'DHR 待审核', level: warnIf(await c.pendingRelease()), path: PATHS.release }),
@@ -338,7 +380,9 @@ export class WorkbenchService {
           kpi({ key: 'eng_submitted', title: '待批准 BOM/工艺', value: (await c.bomSubmitted()) + (await c.routingSubmitted()), hint: `BOM ${await c.bomSubmitted()} · 工艺 ${await c.routingSubmitted()}`, path: (await c.bomSubmitted()) || !(await c.routingSubmitted()) ? PATHS.bomSubmitted : PATHS.routingSubmitted }),
           kpi({ key: 'open_capa', title: '进行中 CAPA', value: await c.openCapa(), hint: `超期 ${await c.overdueCapa()} 项`, level: warnIf(await c.overdueCapa(), 'error'), path: PATHS.capa }),
           kpi({ key: 'open_complaint', title: '未结客诉', value: await c.openComplaint(), path: PATHS.complaint }),
+          kpi({ key: 'closable_ncr', title: '可关闭 NCR', value: await c.closableNcr(), hint: '处置已执行完毕', level: warnIf(await c.closableNcr()), path: PATHS.ncrClosable }),
         );
+        sections.expiry ??= await this.expirySection(tx, ['calibration', 'supplier', 'qualification', 'lot']);
       } else if (r === 'qc') {
         const rate = await this.iqcPassRate(tx);
         push(
@@ -349,6 +393,7 @@ export class WorkbenchService {
         );
       } else if (r === 'planner') {
         push(
+          kpi({ key: 'so_changed', title: '订单变更待处理', value: await c.soMismatch(), hint: '订单与工单数量不符', level: warnIf(await c.soMismatch()), path: PATHS.woMismatch }),
           kpi({ key: 'wo_short', title: '缺料工单', value: await c.woShort(), hint: '未完工工单齐套检查', level: warnIf(await c.woShort()), path: PATHS.woShort }),
           kpi({ key: 'so_confirmed', title: '待排产订单', value: await c.soConfirmed(), path: PATHS.soConfirmed }),
           kpi({ key: 'wo_planned', title: '待下达工单', value: await c.woPlanned(), path: PATHS.woPlanned }),
@@ -361,10 +406,12 @@ export class WorkbenchService {
           kpi({ key: 'po_draft', title: '待审批采购单', value: await c.poDraft(), path: PATHS.poApprove }),
           kpi({ key: 'po_overdue', title: '逾期未到货', value: await c.poOverdue(), hint: '按回复交期/交期', level: warnIf(await c.poOverdue(), 'error'), path: PATHS.poChase }),
           kpi({ key: 'po_receive', title: '在途采购单', value: await c.poToReceive(), path: PATHS.poReceive }),
-          kpi({ key: 'mrp_purchase', title: 'MRP 采购建议', value: await c.mrpOpen('PURCHASE'), hint: '待转采购单', path: PATHS.mrp }),
+          kpi({ key: 'mrp_expedite', title: '需提前催交', value: await c.mrpExpedite(), hint: 'MRP 例外：在途晚于需求', level: warnIf(await c.mrpExpedite()), path: PATHS.poChase }),
+          kpi({ key: 'mrp_purchase', title: 'MRP 采购建议', value: await c.mrpPurchaseNew(), hint: '需新下单', path: PATHS.mrp }),
           kpi({ key: 'below_safety', title: '低于安全库存', value: await c.belowSafety(), level: warnIf(await c.belowSafety()), path: PATHS.belowSafety }),
-          kpi({ key: 'supplier_qual', title: '供应商资质到期', value: await c.supplierQualDue(), hint: '60 天内', path: PATHS.supplierQual }),
+          kpi({ key: 'supplier_qual', title: '供应商资质到期', value: await c.supplierQualDue(), hint: '60 天内，点开看清单', path: PATHS.supplierQual }),
         );
+        sections.expiry ??= await this.expirySection(tx, ['supplier']);
       } else if (r === 'sales') {
         const open = await c.openSo();
         push(
@@ -388,6 +435,7 @@ export class WorkbenchService {
       } else if (r === 'warehouse') {
         push(
           kpi({ key: 'po_receive', title: '待收货', value: await c.poToReceive(), path: PATHS.poReceive }),
+          kpi({ key: 'putaway', title: '待上架', value: await c.putaway(), path: PATHS.putaway }),
           kpi({ key: 'issue', title: '待发料', value: await c.issueDraft(), path: PATHS.issueDraft }),
           kpi({ key: 'shippable', title: '可发货', value: (await c.shippable()).length + (await c.shipDraft()), path: (await c.shipDraft()) ? PATHS.shipDraft : PATHS.shipNew }),
           kpi({ key: 'fg', title: '待完工入库', value: await c.woToReceive(), path: PATHS.woToReceive }),
@@ -401,6 +449,7 @@ export class WorkbenchService {
           kpi({ key: 'eng_submitted', title: '待 QA 批准', value: (await c.bomSubmitted()) + (await c.routingSubmitted()), path: PATHS.bomSubmitted }),
           kpi({ key: 'calib', title: '校准过期设备', value: await c.calibOverdue(), hint: `30 天内到期 ${await c.calibDue()} 台`, level: warnIf(await c.calibOverdue(), 'error'), path: PATHS.calib }),
         );
+        sections.expiry ??= await this.expirySection(tx, ['calibration']);
       } else if (r === 'operator') {
         sections.operator = await this.operatorSection(tx, user);
         const o = sections.operator;
@@ -479,6 +528,58 @@ export class WorkbenchService {
     const since = localStart(addDays(today(), -30));
     const done = await tx.inspection.findMany({ where: { insp_type: 'IQC', inspected_at: { gte: since } }, select: { status: true } });
     return { total: done.length, rate: done.length ? pct(done.filter((i) => i.status === 'PASSED').length, done.length) : null };
+  }
+
+  /** 厂长拍板：已提交审批的大额采购单（卡片上直接批准/退回） */
+  async bigPos(tx: Tx) {
+    const book = await RateBook.load(tx);
+    const pos = await tx.purchaseOrder.findMany({ where: { status: 'SUBMITTED' }, include: { supplier: true }, orderBy: { id: 'asc' }, take: 20 });
+    return pos.map((p) => ({
+      id: p.id, no: p.no, supplier_name: p.supplier?.name ?? null, currency: p.currency, total_amount: num(p.total_amount),
+      base_amount: book.toBase(p.total_amount, p.currency, today()), base_currency: book.base, created_by: p.created_by,
+      order_date: fmtDate(p.order_date), expected_date: fmtDate(p.expected_date), remark: p.remark,
+    }));
+  }
+
+  /**
+   * 到期预警（QA / 厂长 / 采购 / 工程）：仪器校准（30 天内）、供应商资质（60 天内）、人员上岗资质（30 天内）、临期批次（30 天内）。
+   * 每项给出到期日与剩余天数（负数 = 已过期），并带跳转链接。
+   */
+  async expirySection(tx: Tx, kinds: ('calibration' | 'supplier' | 'qualification' | 'lot')[]) {
+    const t = today();
+    const left = (d: Date | null) => (d ? daysBetween(d, t) : null);
+    const enc = encodeURIComponent;
+    const out: Record<string, any[]> = {};
+    if (kinds.includes('calibration')) {
+      const eq = await tx.equipment.findMany({ where: { calibration_required: true, next_calibration_date: { not: null, lte: addDays(t, 30) } }, orderBy: { next_calibration_date: 'asc' }, take: 50 });
+      out.calibration = eq.map((e) => ({ id: e.id, code: e.code, name: e.name, date: fmtDate(e.next_calibration_date), days_left: left(e.next_calibration_date), url: `/master/equipment?q=${enc(e.code)}` }));
+    }
+    if (kinds.includes('supplier')) {
+      const sp = await tx.supplier.findMany({ where: { status: 'QUALIFIED', qualification_expiry: { not: null, lte: addDays(t, 60) } }, orderBy: { qualification_expiry: 'asc' }, take: 50 });
+      out.supplier = sp.map((x) => ({ id: x.id, code: x.code, name: x.name, date: fmtDate(x.qualification_expiry), days_left: left(x.qualification_expiry), url: `/master/suppliers?q=${enc(x.code)}` }));
+    }
+    if (kinds.includes('qualification')) {
+      const qs = await tx.qualification.findMany({
+        where: { is_active: true, voided_at: null, expires_at: { not: null, lte: addDays(t, 30) }, user: { is_active: true } },
+        include: { user: true }, orderBy: { expires_at: 'asc' }, take: 50,
+      });
+      out.qualification = qs.map((q) => ({
+        id: q.id, code: q.op_code === '*' ? '全部工序' : q.op_code, name: `${q.user.full_name}（${q.user.badge_no || q.user.username}）`,
+        date: fmtDate(q.expires_at), days_left: left(q.expires_at), url: `/quality/qualifications?q=${enc(q.user.username)}`,
+      }));
+    }
+    if (kinds.includes('lot')) {
+      const rows = await tx.stock.findMany({ where: { qty: { gt: 1e-9 }, expiry_date: { not: null, lte: addDays(t, 30) } }, include: { material: true }, orderBy: { expiry_date: 'asc' }, take: 200 });
+      const by = new Map<string, any>();
+      for (const r of rows) {
+        const k = `${r.material_id}\u0000${r.lot_no}`;
+        const cur = by.get(k) ?? { id: r.id, code: r.lot_no || '-', name: `${r.material.code} ${r.material.name}`, qty: 0, date: fmtDate(r.expiry_date), days_left: left(r.expiry_date), url: `/wms/stock?q=${enc(r.lot_no)}&material_id=${r.material_id}&lot_no=${enc(r.lot_no)}` };
+        cur.qty = round(cur.qty + r.qty, 4);
+        by.set(k, cur);
+      }
+      out.lot = [...by.values()].slice(0, 50);
+    }
+    return out;
   }
 
   /** 财务：应收应付余额、逾期应收、7 天内到期应付、本月收付款、缺汇率 */
@@ -605,6 +706,7 @@ export class WorkbenchService {
    */
   async deliveryRisk(tx: Tx) {
     const t = today();
+    const DEFAULT_CYCLE = 7;
     const sos = await tx.salesOrder.findMany({
       where: { status: { in: OPEN_SO } }, include: { customer: true, lines: { include: { material: true } } },
       orderBy: [{ delivery_date: { sort: 'asc', nulls: 'last' } }, { id: 'asc' }],
@@ -619,6 +721,7 @@ export class WorkbenchService {
     // 成品合格库存按交期先后分给订单
     const fg = await availableFg(tx);
     const rows: any[] = [];
+    let soKits = 0;
     for (const so of sos) {
       const my = wos.filter((w) => w.so_id === so.id);
       const ordered = so.lines.reduce((s, l) => s + l.qty, 0);
@@ -638,9 +741,28 @@ export class WorkbenchService {
       const releasedQty = my.reduce((s, w) => s + w.released_qty, 0);
       const toRelease = my.filter((w) => w.dhr_status === 'OPEN').reduce((s, w) => s + Math.max(0, w.received_qty - w.released_qty), 0);
       const plannedEnd = my.map((w) => w.planned_end).filter(Boolean).sort((a, b) => b!.getTime() - a!.getTime())[0] ?? null;
-      const due = so.delivery_date ?? so.lines.map((l) => l.delivery_date).filter(Boolean).sort((a, b) => a!.getTime() - b!.getTime())[0] ?? null;
+      // 交期按“未发完的行”中最早的行交期（行交期为空用表头交期）
+      const openLines = so.lines.filter((l) => l.qty - l.shipped_qty > 1e-9);
+      const lineDues = (openLines.length ? openLines : so.lines).map((l) => l.delivery_date ?? so.delivery_date).filter((d): d is Date => !!d).sort((a, b) => a.getTime() - b.getTime());
+      const due = lineDues[0] ?? so.delivery_date ?? null;
+      const laterDue = lineDues.length > 1 && lineDues[lineDues.length - 1].getTime() !== lineDues[0].getTime() ? lineDues[lineDues.length - 1] : null;
       const daysLeft = due ? daysBetween(due, t) : null;
-      const shortage = my.reduce((s, w) => s + (short.get(w.id) ?? 0), 0);
+      // 缺料：订单齐套（关联未完工工单 + 未排产部分按 BOM 展开），按物料去重；不可用时用工单缺料数（可能重复计物料）
+      let shortage = my.reduce((s, w) => s + (short.get(w.id) ?? 0), 0);
+      let kitEta: string | null = null;
+      let kitKnown = false;
+      if (kit.source === 'kitting' && soKits < 40) {
+        soKits++;
+        try {
+          const k = await this.kitting.salesOrder(so.id);
+          shortage = k.shortage_count;
+          kitEta = k.eta ?? null;
+          kitKnown = true;
+        } catch {
+          /* 保持工单口径 */
+        }
+      }
+      if (!kitKnown) kitEta = my.map((w) => kit.eta.get(w.id)).filter((x): x is string => !!x).sort().pop() ?? null;
       const openNcr = my.reduce((s, w) => s + (ncrBy.get(w.id) ?? 0), 0);
       // 未排产 = 剩余未发 − 已备成品 − 工单中尚未放行的数量（在制/待放行都算已安排）
       const unscheduled = Math.max(0, remaining - readyQty - Math.max(0, planned - releasedQty));
@@ -649,20 +771,31 @@ export class WorkbenchService {
       if (daysLeft !== null && daysLeft < 0) reasons.push(`已逾期 ${-daysLeft} 天`);
       if (unscheduled > 1e-9) reasons.push(`未排产 ${round(unscheduled, 2)} 台`);
       if (my.some((w) => w.status === 'PLANNED')) reasons.push('工单未下达');
-      const etas = my.map((w) => kit.eta.get(w.id)).filter((x): x is string => !!x).sort();
-      if (shortage) reasons.push(`缺料 ${shortage} 项${etas.length ? `（预计 ${etas[etas.length - 1].slice(5)} 齐套）` : ''}`);
-      if (plannedEnd && due && plannedEnd.getTime() > due.getTime()) reasons.push(`计划完工 ${fmtDate(plannedEnd)!.slice(5)} 晚于交期`);
+      if (shortage) reasons.push(`缺料 ${shortage} 种物料${kitEta ? `（预计 ${kitEta.slice(5, 10)} 齐套）` : '（无在途/到货日期）'}`);
+      // 预计完工 = 预计齐套日（不缺料为今天）+ 生产周期（成品“提前期”天数，未设按 7 天）；在制且齐套的工单按计划完工
+      const cycle = Math.max(1, ...openLines.map((l) => l.material?.lead_time_days || DEFAULT_CYCLE));
+      let estFinish: Date | null = null;
+      if (remaining > 1e-9 && !ready) {
+        if (shortage > 0) estFinish = kitEta ? addDays(dateOnly(kitEta)!, cycle) : null;
+        else if (my.some((w) => w.status === 'IN_PROGRESS') && !unscheduled && plannedEnd) estFinish = plannedEnd.getTime() < t.getTime() ? t : plannedEnd;
+        else estFinish = addDays(t, my.some((w) => w.status === 'IN_PROGRESS') ? Math.ceil(cycle * (1 - Math.min(1, completed / Math.max(planned, 1)))) : cycle);
+      }
+      const lateDays = estFinish && due ? daysBetween(estFinish, due) : 0;
+      if (lateDays > 0) reasons.push(`预计晚 ${lateDays} 天（预计 ${fmtDate(estFinish)!.slice(5)} 完成，交期 ${fmtDate(due)!.slice(5)}）`);
+      else if (plannedEnd && due && plannedEnd.getTime() > due.getTime()) reasons.push(`计划完工 ${fmtDate(plannedEnd)!.slice(5)} 晚于交期`);
       if (openNcr) reasons.push(`NCR 未处置 ${openNcr} 张`);
       if (toRelease > 1e-9) reasons.push(`待 QA 放行 ${round(toRelease, 2)} 台`);
       if (ready) reasons.push('成品已备齐，可发货');
       const blocking = reasons.filter((r) => !r.startsWith('成品已备齐'));
       let level: 'red' | 'yellow' | 'green' = 'green';
-      const late = plannedEnd && due && plannedEnd.getTime() > due.getTime();
-      if ((daysLeft !== null && daysLeft < 0) || late || (daysLeft !== null && daysLeft <= 3 && !ready) || (daysLeft !== null && daysLeft <= 7 && (shortage > 0 || unscheduled > 1e-9))) level = 'red';
+      const late = lateDays > 0 || (!!plannedEnd && !!due && plannedEnd.getTime() > due.getTime());
+      const noEta = shortage > 0 && !kitEta && daysLeft !== null && daysLeft <= cycle + 3;
+      if ((daysLeft !== null && daysLeft < 0) || late || noEta || (daysLeft !== null && daysLeft <= 3 && !ready) || (daysLeft !== null && daysLeft <= 7 && (shortage > 0 || unscheduled > 1e-9))) level = 'red';
       else if (blocking.length || (daysLeft !== null && daysLeft <= 7 && !ready)) level = 'yellow';
       rows.push({
         id: so.id, no: so.no, customer_name: so.customer?.name ?? null, customer_po: so.customer_po, status: so.status,
-        delivery_date: fmtDate(due), days_left: daysLeft,
+        delivery_date: fmtDate(due), days_left: daysLeft, later_delivery_date: fmtDate(laterDue),
+        est_finish: fmtDate(estFinish), late_days: lateDays > 0 ? lateDays : 0, kit_eta: kitEta, cycle_days: cycle,
         ordered_qty: round(ordered, 4), shipped_qty: round(shipped, 4), completed_qty: round(Math.min(completed, ordered), 4),
         received_qty: round(received, 4), released_qty: round(releasedQty, 4), ready_qty: round(readyQty, 4),
         // 完工进度：已完工（含已发）与“已发 + 已备成品”取大；发货进度单列
@@ -670,7 +803,7 @@ export class WorkbenchService {
         ship_progress: ordered ? round((shipped / ordered) * 100, 0) : 0,
         planned_end: fmtDate(plannedEnd),
         work_orders: my.map((w) => ({ id: w.id, no: w.no, status: w.status, planned_end: fmtDate(w.planned_end), shortage: short.get(w.id) ?? 0 })),
-        shortage_count: shortage, shortage_source: kit.source, open_ncr: openNcr,
+        shortage_count: shortage, shortage_source: kitKnown ? 'kitting' : kit.source, open_ncr: openNcr,
         reasons: blocking.length ? blocking : reasons, level,
         products: so.lines.map((l) => `${l.material?.code ?? ''}×${l.qty}`).join('，'),
       });

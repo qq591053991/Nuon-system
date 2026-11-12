@@ -1,5 +1,6 @@
 /** 质量模块共用小组件：URL 查询参数初始筛选、日期区间筛选、期限标签。 */
-import { DatePicker, Tag, Tooltip } from 'antd';
+import { Button, DatePicker, Tag, Tooltip } from 'antd';
+import { PrinterOutlined } from '@ant-design/icons';
 import dayjs, { type Dayjs } from 'dayjs';
 import { useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
@@ -71,3 +72,59 @@ export function limitText(lower?: number | null, upper?: number | null, unit?: s
 export async function putSilent<T = any>(url: string, body?: unknown): Promise<T> {
   return (await http.put<T>(url, body, { silent: true } as any)).data;
 }
+
+/**
+ * 打印质量单据（检验单、NCR、CAPA、客诉、DHR、追溯报告）：A4、每页页脚“第 x 页 / 共 y 页”、续页页眉（单据名 + 编号）。
+ * drawer=true 时只打印当前打开的抽屉内容（不打印背后的列表页）。
+ * 与通用 PrintButton 相同的页面设置，另加续页页眉与抽屉打印。
+ */
+export function printDoc(o: { title: string; landscape?: boolean; drawer?: boolean }) {
+  const esc = (t: string) => t.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const style = document.createElement('style');
+  style.id = 'nuon-quality-print';
+  style.textContent = `@page { size: A4 ${o.landscape ? 'landscape' : 'portrait'}; margin: 14mm 10mm 14mm;
+      @top-right { content: "${esc(o.title)}"; font-size: 8pt; color: #666; }
+      @bottom-right { content: "第 " counter(page) " 页 / 共 " counter(pages) " 页"; font-size: 9pt; color: #666; }
+      @bottom-left { content: "Nuon 智造云 · 电子记录打印件"; font-size: 9pt; color: #666; } }
+    ${o.drawer ? `@media print {
+      #root { display: none !important; }
+      .ant-drawer { position: static !important; inset: auto !important; }
+      .ant-drawer-content-wrapper { position: static !important; width: auto !important; transform: none !important; box-shadow: none !important; }
+      .ant-drawer-content { overflow: visible !important; }
+      .ant-drawer-mask, .ant-drawer-header { display: none !important; }
+      .ant-drawer-body { overflow: visible !important; padding: 0 !important; }
+    }` : ''}`;
+  document.head.appendChild(style);
+  const old = document.title;
+  document.title = o.title;
+  window.print();
+  document.title = old;
+  style.remove();
+}
+
+/** 打印按钮（质量单据） */
+export function QPrintButton({ title, landscape, drawer, text = '打印 / 导出 PDF' }: { title: string; landscape?: boolean; drawer?: boolean; text?: string }) {
+  return <Button icon={<PrinterOutlined />} className="no-print" onClick={() => printDoc({ title, landscape, drawer })}>{text}</Button>;
+}
+
+/** 打印件签字栏（仅打印时显示） */
+export function QPrintSignatures({ roles }: { roles: string[] }) {
+  return (
+    <div className="print-only">
+      <div style={{ display: 'flex', gap: 24, marginTop: 24, fontSize: 12 }}>
+        {roles.map((r) => <div key={r} style={{ flex: 1, borderTop: '1px solid #000', paddingTop: 4 }}>{r}：　　　　　　日期：</div>)}
+      </div>
+    </div>
+  );
+}
+
+/** 国家/地区（统一中文；决定不良事件上报时限） */
+export const COUNTRIES = ['中国', '美国', '欧盟', '德国', '法国', '意大利', '西班牙', '荷兰', '英国', '日本', '韩国', '澳大利亚', '加拿大', '其他'];
+const COUNTRY_ALIAS: Record<string, string> = { US: '美国', USA: '美国', EU: '欧盟', CN: '中国', DE: '德国', FR: '法国', IT: '意大利', ES: '西班牙', NL: '荷兰', GB: '英国', UK: '英国', JP: '日本', KR: '韩国', AU: '澳大利亚', CA: '加拿大' };
+export const normCountry = (v?: string | null) => (v ? COUNTRY_ALIAS[String(v).trim().toUpperCase()] ?? String(v).trim() : v ?? null);
+const EU = ['欧盟', '德国', '法国', '意大利', '西班牙', '荷兰'];
+/** 上报时限（天）：美国 FDA MDR 30；欧盟 MDR 15；中国及其他 20（与后端一致） */
+export const reportDays = (country?: string | null) => {
+  const c = normCountry(country) ?? '';
+  return c === '美国' ? 30 : EU.includes(c) ? 15 : 20;
+};

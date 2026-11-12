@@ -16,7 +16,8 @@ import StatusTag from '../../components/StatusTag';
 import { usePaged } from '../../components/usePaged';
 import { dictLabel, dictOptions } from '../../utils/dict';
 import { fmtDate, fmtDateTime, toDate } from '../../utils/format';
-import { useUrlFilters } from './qshared';
+import { QPrintButton, QPrintSignatures, useUrlFilters } from './qshared';
+import { PrintHeader } from '../../components/Print';
 
 const STATUS_TABS = [
   { value: 'OPEN,IN_PROGRESS,VERIFYING', label: '未关闭' },
@@ -38,16 +39,18 @@ const TEXT_FIELDS: { name: string; label: string; placeholder: string }[] = [
 ];
 
 const overdue = (r: Rec) => r.due_date && r.status !== 'CLOSED' && dayjs(r.due_date).isBefore(dayjs(), 'day');
-/** CAPA 默认完成期限（天，与后端一致） */
+/** CAPA 默认完成期限（天，按来源，与后端一致）：客诉/NCR 30 天、审核发现 60 天、其他 30 天 */
+const DUE_BY_SOURCE: Record<string, number> = { COMPLAINT: 30, NCR: 30, AUDIT: 60, OTHER: 30 };
 const DUE_DAYS = 30;
+const dueBySource = (src?: string) => dayjs().add(DUE_BY_SOURCE[src || 'OTHER'] ?? DUE_DAYS, 'day');
 
-/** 负责人下拉（启用账号，按姓名/账号/部门搜索；保存为姓名） */
+/** 负责人下拉（启用账号，按姓名/账号/部门搜索；保存负责人账号） */
 function useOwners() {
   const [owners, setOwners] = useState<Rec[]>([]);
   useEffect(() => {
     get<Rec[]>('/capas/owners', undefined, true).then(setOwners).catch(() => setOwners([]));
   }, []);
-  return owners.map((u) => ({ value: u.full_name, label: `${u.full_name}（${u.username}）${u.department ? ` · ${u.department}` : ''}` }));
+  return owners.map((u) => ({ value: u.id as number, label: `${u.full_name}（${u.username}）${u.department ? ` · ${u.department}` : ''}` }));
 }
 
 function CapaDrawer({ open, capaId, onClose, onSaved }: { open: boolean; capaId: number | null; onClose: () => void; onSaved: (id: number) => void }) {
@@ -64,7 +67,8 @@ function CapaDrawer({ open, capaId, onClose, onSaved }: { open: boolean; capaId:
     try {
       const d = await get(`/capas/${id}`);
       setCapa(d);
-      if (can('qa') && d.status !== 'CLOSED') form.setFieldsValue({ ...d, due_date: d.due_date ? dayjs(d.due_date) : null });
+      // 旧记录没有完成期限时按来源带出默认期限（保存时写入）
+      if (can('qa') && d.status !== 'CLOSED') form.setFieldsValue({ ...d, due_date: d.due_date ? dayjs(d.due_date) : dueBySource(d.source) });
     } finally {
       setLoading(false);
     }
@@ -75,13 +79,16 @@ function CapaDrawer({ open, capaId, onClose, onSaved }: { open: boolean; capaId:
     setCapa(null);
     if (can('qa')) {
       form.resetFields();
-      if (!capaId) form.setFieldsValue({ source: 'OTHER', due_date: dayjs().add(DUE_DAYS, 'day') });
+      if (!capaId) form.setFieldsValue({ source: 'OTHER', due_date: dueBySource('OTHER') });
     }
     if (capaId) load(capaId);
   }, [open, capaId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const editable = can('qa') && (!capa || capa.status !== 'CLOSED');
-  const body = (v: Rec) => ({ ...v, due_date: toDate(v.due_date) });
+  const body = (v: Rec) => {
+    const { owner: _o, ...rest } = v;
+    return { ...rest, owner_user_id: v.owner_user_id ?? null, due_date: toDate(v.due_date) };
+  };
 
   const save = async () => {
     const v = await form.validateFields();
@@ -162,9 +169,22 @@ function CapaDrawer({ open, capaId, onClose, onSaved }: { open: boolean; capaId:
       onClose={onClose}
       destroyOnHidden
       title={capa ? <Space>{capa.no}<StatusTag dict="capa_status" value={capa.status} /></Space> : capaId ? '加载中…' : '新建 CAPA'}
-      extra={actions}
+      extra={<Space wrap>{capa && <QPrintButton drawer title={`CAPA ${capa.no}`} text="打印" />}{actions}</Space>}
     >
       {signHolder}
+      {capa && <PrintHeader title="纠正预防措施（CAPA）" no={capa.no} />}
+      {capa && editable && (
+        <div className="print-only">
+          <Descriptions size="small" column={2} bordered items={[
+            { key: 't', label: '标题', span: 2, children: capa.title },
+            { key: 's', label: '来源', children: dictLabel('capa_source', capa.source) },
+            { key: 'st', label: '状态', children: dictLabel('capa_status', capa.status) },
+            { key: 'o', label: '负责人', children: capa.owner || '-' },
+            { key: 'd', label: '完成期限', children: fmtDate(capa.due_date) },
+            ...TEXT_FIELDS.map((f) => ({ key: f.name, label: f.label, span: 2, children: <span style={{ whiteSpace: 'pre-wrap' }}>{capa[f.name] || '-'}</span> })),
+          ]} />
+        </div>
+      )}
       <Spin spinning={loading}>
         {capa && (
           <Steps size="small" style={{ marginBottom: 16 }} current={FLOW.indexOf(capa.status)} status={capa.status === 'CLOSED' ? 'finish' : 'process'} items={[
@@ -185,21 +205,26 @@ function CapaDrawer({ open, capaId, onClose, onSaved }: { open: boolean; capaId:
           } />
         )}
         {editable ? (
-          <Form form={form} layout="vertical">
+          <Form form={form} layout="vertical" className="no-print">
             <Row gutter={16}>
               <Col span={24}>
                 <Form.Item name="title" label="标题" rules={[{ required: true, message: '请填写标题' }]}><Input /></Form.Item>
               </Col>
               <Col xs={24} sm={8}>
-                <Form.Item name="source" label="来源"><Select options={dictOptions('capa_source')} /></Form.Item>
+                <Form.Item name="source" label="来源">
+                  <Select options={dictOptions('capa_source')} onChange={(src) => {
+                    // 期限未手工改过时按来源重设默认期限
+                    if (!form.isFieldTouched('due_date')) form.setFieldsValue({ due_date: dueBySource(src) });
+                  }} />
+                </Form.Item>
               </Col>
               <Col xs={24} sm={8}>
-                <Form.Item name="owner" label="负责人" rules={[{ required: true, message: '请选择负责人' }]}>
+                <Form.Item name="owner_user_id" label="负责人" rules={[{ required: true, message: '请选择负责人' }]}>
                   <Select showSearch allowClear optionFilterProp="label" options={ownerOptions} placeholder="选择负责人" />
                 </Form.Item>
               </Col>
               <Col xs={24} sm={8}>
-                <Form.Item name="due_date" label="完成期限" tooltip={`默认 ${DUE_DAYS} 天`} rules={[{ required: true, message: '请选择完成期限' }]}>
+                <Form.Item name="due_date" label="完成期限" tooltip="按来源默认：客诉/NCR 30 天、审核发现 60 天" rules={[{ required: true, message: '请选择完成期限' }]}>
                   <DatePicker style={{ width: '100%' }} presets={[30, 60, 90].map((d) => ({ label: `${d} 天`, value: dayjs().add(d, 'day') }))} />
                 </Form.Item>
               </Col>
@@ -241,6 +266,7 @@ function CapaDrawer({ open, capaId, onClose, onSaved }: { open: boolean; capaId:
             <Attachments entity="qms_capa" entityId={capa.id} bare title="附件（证据）" hint="根因分析（5Why/鱼骨图）、整改前后照片、修订后的 SOP、有效性验证数据等。" canUpload={can('qa')} />
           </div>
         )}
+        {capa && <QPrintSignatures roles={['负责人', 'QA 验证', '质量负责人批准关闭']} />}
       </Spin>
     </Drawer>
   );
@@ -278,7 +304,7 @@ export default function Capas() {
     { title: '完成期限', dataIndex: 'due_date', sorter: true, render: (v: string, r: Rec) => (overdue(r) ? <Tag color="red">{fmtDate(v)} 已逾期</Tag> : fmtDate(v)) },
     { title: '负责人', dataIndex: 'owner', sorter: true, render: (v: string) => v || <Typography.Text type="danger">未指定</Typography.Text> },
     { title: '来源', dataIndex: 'source', sorter: true, render: (v: string) => <StatusTag dict="capa_source" value={v} /> },
-    { title: '创建', dataIndex: 'created_at', sorter: true, render: (_: any, r: Rec) => <span style={{ whiteSpace: 'nowrap' }}>{r.created_by ?? ''} {fmtDate(r.created_at)}</span> },
+    { title: '创建', dataIndex: 'created_at', sorter: true, render: (_: any, r: Rec) => <span style={{ whiteSpace: 'nowrap' }}>{r.created_by_name ?? r.created_by ?? ''} {fmtDate(r.created_at)}</span> },
     { title: '关闭', dataIndex: 'closed_at', sorter: true, render: (_: any, r: Rec) => (r.closed_by ? `${r.closed_by} ${fmtDate(r.closed_at)}` : '-') },
   ];
 

@@ -470,7 +470,9 @@ export class EngineeringService implements OnModuleInit, OnModuleDestroy {
       if (!r.operations.length) throw new BizError('工艺路线没有工序');
       const reason = await requireChangeReason(tx, 'routing', r, body.change_reason);
       const base = await this.routingBase(tx, r);
-      const summary = base ? diffSummary(diffRouting(await this.routingFull(tx, base.id), await this.routingFull(tx, r.id))) : null;
+      const summary = base
+        ? diffSummary(diffRouting(await this.withAttachments(tx, base.id, await this.routingFull(tx, base.id)), await this.withAttachments(tx, r.id, await this.routingFull(tx, r.id))))
+        : null;
       await this.esign.sign(tx, user, withSummary(body, summary), DOC.routing.submit, DOC.routing.table, r.id, `${r.material.code} ${r.version}`);
       const row = await tx.routing.update({
         where: { id },
@@ -591,6 +593,14 @@ export class EngineeringService implements OnModuleInit, OnModuleDestroy {
     return ser('Routing', await tx.routing.findUniqueOrThrow({ where: { id }, include: inc('Routing', ROUTING_CHILDREN) }), ROUTING_CHILDREN);
   }
 
+  /** 工序的作业指导附件（按工序编码挂到差异对比的工序上） */
+  private async withAttachments(tx: Tx, routingId: number, doc: Record<string, any>) {
+    const ops = await tx.routingOperation.findMany({ where: { routing_id: routingId }, select: { id: true, code: true } });
+    const atts = ops.length ? await tx.attachment.findMany({ where: { entity: 'eng_routing_op', entity_id: { in: ops.map((o) => o.id) } }, orderBy: { id: 'asc' } }) : [];
+    const byCode = new Map(ops.map((o) => [o.code.trim().toUpperCase(), atts.filter((a) => a.entity_id === o.id).map((a) => ({ filename: a.filename, sha256: a.sha256 }))]));
+    return { ...doc, operations: (doc.operations || []).map((o: Record<string, any>) => ({ ...o, attachments: byCode.get(String(o.code ?? '').trim().toUpperCase()) ?? [] })) };
+  }
+
   private diffOut(base: { id: number; version: string; status: string } | null, items: DiffItem[]) {
     if (!base) return { base: null, items: [], summary: '首个版本，没有可对比的上一版本' };
     return { base: { id: base.id, version: base.version, status: base.status }, items, summary: diffSummary(items) };
@@ -644,7 +654,8 @@ export class EngineeringService implements OnModuleInit, OnModuleDestroy {
         })),
       };
     }
-    return this.diffOut(base, diffRouting(await this.routingFull(tx, base.id), cur));
+    const baseDoc = await this.withAttachments(tx, base.id, await this.routingFull(tx, base.id));
+    return this.diffOut(base, diffRouting(baseDoc, await this.withAttachments(tx, id, cur)));
   }
 
   deleteRouting(id: number) {

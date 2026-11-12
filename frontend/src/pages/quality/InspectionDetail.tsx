@@ -16,7 +16,8 @@ import { useNarrow } from '../../components/ResponsiveTable';
 import StatusTag from '../../components/StatusTag';
 import { dictLabel } from '../../utils/dict';
 import { fmtDateTime, fmtQty } from '../../utils/format';
-import { g, limitText } from './qshared';
+import { QPrintButton, QPrintSignatures, g, limitText } from './qshared';
+import { PrintHeader } from '../../components/Print';
 
 /** 定量项至少录入件数（与后端一致：min(样本量, 5)） */
 const QUANT_MIN = 5;
@@ -184,6 +185,17 @@ export default function InspectionDetail() {
       .catch(() => setFailed(true));
   }, [id]);
   useEffect(load, [load]);
+  // 打开待检单后焦点直接在第一个定量实测格（无定量项时不抢焦点）
+  const loadedId = insp?.id;
+  useEffect(() => {
+    if (!loadedId || insp?.status !== 'PENDING') return;
+    const t = setTimeout(() => {
+      const first = [...inputs.current.entries()].find(([, el]) => el)?.[1];
+      first?.focus();
+    }, 300);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadedId]);
 
   const need = insp ? Math.max(1, Math.min(insp.sample_size || 1, QUANT_MIN)) : QUANT_MIN;
   const judged = useMemo(() => rows.map((r) => ({ r, j: judge(r, need) })), [rows, need]);
@@ -195,13 +207,22 @@ export default function InspectionDetail() {
   const ac = insp.accept_num ?? 0;
   const incomplete = judged.filter((x) => !x.j.done);
   const failItems = judged.filter((x) => x.j.result === 'FAIL');
-  const autoDefects = failItems.reduce((s, x) => s + x.j.defects, 0);
-  const maxItem = Math.max(0, ...failItems.map((x) => x.j.defects));
+  // AQL 抽样不良数只计定性项；定量项是对子样逐件测量，任一件超限即判退（Ac=0），单独显示
+  const qualFails = failItems.filter((x) => x.r.item_type !== 'QUANT');
+  const quantFails = failItems.filter((x) => x.r.item_type === 'QUANT');
+  const autoDefects = qualFails.reduce((s, x) => s + x.j.defects, 0);
+  const maxItem = Math.max(0, ...qualFails.map((x) => x.j.defects));
   const defectQty = defectOverride ?? autoDefects;
   const overAc = defectQty > ac;
   const accept = !overAc && failItems.length === 0;
+  /** 判退原因（与 NCR 描述一致） */
+  const reasons = [
+    quantFails.length ? `定量项超限（逐件判定，Ac=0）：${quantFails.map((x) => `${x.r.name} ${x.j.defects}/${numsOf(x.r).length} 件超限`).join('、')}` : '',
+    qualFails.length ? `定性项不合格：${qualFails.map((x) => `${x.r.name}${x.j.defects ? `（不良 ${x.j.defects} 件）` : ''}`).join('、')}` : '',
+    overAc ? `AQL 抽样不良 ${defectQty} 件 ≥ Re ${insp.reject_num}` : '',
+  ].filter(Boolean);
   const preview = accept ? 'PASSED' : concession && can('qa') ? 'CONCESSION' : 'REJECTED';
-  const defectErr = defectQty < maxItem ? `不能少于单项最大不良数 ${maxItem}` : defectQty > 0 && !failItems.length ? '不良数须关联到判不合格的检验项目' : null;
+  const defectErr = defectQty < maxItem ? `不能少于定性项最大不良数 ${maxItem}` : defectQty > 0 && !failItems.length ? '不良数须关联到判不合格的检验项目' : null;
   const quals = rows.filter((r) => r.item_type === 'QUAL');
 
   const update = (key: string, patch: Partial<ItemRow>) => setRows((rs) => rs.map((r) => (r.key === key ? { ...r, ...patch } : r)));
@@ -244,7 +265,7 @@ export default function InspectionDetail() {
       setSubmitting(true);
       const r = await sign({
         meaning: preview === 'CONCESSION' ? 'IQC让步接收批准' : `IQC检验判定：${label}`,
-        description: `${insp.no} 判定：${label}（抽样 ${insp.sample_size}，不良 ${defectQty}，Ac=${ac}${failItems.length ? `；不合格项目：${failItems.map((x) => x.r.name).join('、')}` : ''}）。${consequence}`,
+        description: `${insp.no} 判定：${label}（AQL 抽样 n=${insp.sample_size}，不良 ${defectQty} 件，Ac=${ac}）。${reasons.length ? `判退原因：${reasons.join('；')}。` : ''}${consequence}`,
         defaultReason: remark || undefined,
         submit: (signature) => post(`/inspections/${id}/submit`, { ...body, signature }, true),
       });
@@ -358,7 +379,7 @@ export default function InspectionDetail() {
     <Card size="small" title="判定">
       <Space direction="vertical" size={12} style={{ width: '100%' }}>
         <div>
-          <div style={{ marginBottom: 4 }}>样本中不良品数量 <Typography.Text type="secondary" style={{ fontSize: 12 }}>（按检验项目自动汇总，可修改）</Typography.Text></div>
+          <div style={{ marginBottom: 4 }}>AQL 抽样不良数 <Typography.Text type="secondary" style={{ fontSize: 12 }}>（n={insp.sample_size}，按定性项自动汇总，可修改；定量抽测超限单独判定）</Typography.Text></div>
           <InputNumber min={0} max={insp.sample_size || undefined} precision={0} size="large" style={{ width: '100%' }} status={defectErr ? 'error' : undefined}
             value={defectQty} onChange={(v) => setDefectOverride(v === null ? null : Number(v))} suffix={`/ ${insp.sample_size ?? '-'} 件`} />
           {defectErr && <Typography.Text type="danger" style={{ fontSize: 12 }}>{defectErr}</Typography.Text>}
@@ -371,8 +392,8 @@ export default function InspectionDetail() {
             incomplete.length
               ? `未完成：${incomplete.map((x) => `${x.r.name}（${x.j.missing}）`).join('、')}`
               : accept
-                ? `不良数 ${defectQty} ≤ Ac ${ac}，且所有检验项目合格。`
-                : [overAc ? `不良数 ${defectQty} ≥ Re ${insp.reject_num}` : '', failItems.length ? `不合格项目：${failItems.map((x) => `${x.r.name}（${x.j.defects} 件）`).join('、')}` : ''].filter(Boolean).join('；')
+                ? `AQL 抽样不良 ${defectQty} 件 ≤ Ac ${ac}，且所有检验项目合格。`
+                : <span>判退原因：{reasons.map((t, i) => <div key={i}>{i + 1}. {t}</div>)}</span>
           }
         />
         {!accept && !incomplete.length && can('qa') && (
@@ -398,11 +419,14 @@ export default function InspectionDetail() {
   return (
     <>
       {signHolder}
+      <PrintHeader title="来料检验记录（IQC）" no={insp.no} extra={<div>{insp.material_code} {insp.material_name} · 批号 {insp.lot_no || '-'} · {dictLabel('insp_status', insp.status)}</div>} />
+      <div className="no-print">
       <PageHeader
         title={<Space wrap>检验单 {insp.no}<StatusTag dict="insp_type" value={insp.insp_type} /><StatusTag dict="insp_status" value={insp.status} /></Space>}
         sub={`${insp.material_code} ${insp.material_name}${insp.material_spec ? ` | ${insp.material_spec}` : ''}`}
-        extra={<Button icon={<ArrowLeftOutlined />} onClick={() => nav('/quality/inspections')}>返回列表</Button>}
+        extra={<Space><QPrintButton title={`来料检验单 ${insp.no}`} /><Button icon={<ArrowLeftOutlined />} className="no-print" onClick={() => nav('/quality/inspections')}>返回列表</Button></Space>}
       />
+      </div>
       {done && <Card style={{ marginBottom: 16 }}><SubmitResult insp={insp} next={done.next} pending={done.pending} /></Card>}
       <Row gutter={[16, 16]}>
         <Col xs={24} xl={16}>
@@ -489,6 +513,7 @@ export default function InspectionDetail() {
         </Col>
       </Row>
       {narrow && editable && <div style={{ marginTop: 16 }}>{judgePanel}</div>}
+      <QPrintSignatures roles={['检验员', 'QA 审核']} />
       {narrow && editable && (
         <div className="no-print" style={{
           position: 'sticky', bottom: 0, zIndex: 10, marginTop: 12, padding: '10px 12px', background: '#fff', borderTop: '1px solid #f0f0f0',
@@ -498,7 +523,10 @@ export default function InspectionDetail() {
             {incomplete.length
               ? <Tag color="gold">已完成 {rows.length - incomplete.length}/{rows.length} 项</Tag>
               : <Tag color={accept ? 'green' : 'red'} style={{ fontSize: 14, padding: '2px 8px' }}>预判：{accept ? '合格' : '不合格'}</Tag>}
-            <Typography.Text type="secondary">不良 {defectQty} / Ac {ac}</Typography.Text>
+            <Typography.Text type="secondary">
+              {!incomplete.length && !accept ? `判退：${reasons.map((t) => t.split('：')[0]).join('、')}` : `AQL 不良 ${defectQty} / Ac ${ac}`}
+              {quantFails.length > 0 && ` · 定量超限 ${quantFails.reduce((s2, x) => s2 + x.j.defects, 0)} 件`}
+            </Typography.Text>
           </span>
           <Button type="primary" size="large" icon={<SafetyCertificateOutlined />} loading={submitting} disabled={incomplete.length > 0 || !!defectErr} danger={preview === 'REJECTED'} onClick={submit}>
             签名提交：{dictLabel('insp_status', preview)}

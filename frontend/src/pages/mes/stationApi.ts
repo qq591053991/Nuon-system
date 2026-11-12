@@ -29,6 +29,8 @@ export interface StationOperator {
   roles?: string[];
   role_names?: string[];
   permissions: string[];
+  /** PIN 由管理员生成 / 重置：首次使用须本人重设 */
+  must_change_pin?: boolean;
 }
 
 export interface StationSession {

@@ -13,6 +13,7 @@ import { dec, money, MoneySum, subMoney } from '../common/money';
 import { inList, like, paginate, sortArg } from '../common/paginate';
 import { inc, ser } from '../common/presenter';
 import { PrismaService, type Tx } from '../common/prisma.service';
+import { config } from '../config';
 import { NumberingService } from '../core/numbering.service';
 import { atRate, bookingOf, CurrencyTotals, normCurrency, RateBook, settleBase } from './currency';
 import type { PaymentDto } from './erp.dto';
@@ -33,7 +34,9 @@ const TEXT = {
 };
 
 /**
- * 金蝶凭证引出的科目映射（假设：中国企业会计准则科目表；金额为价税合计，未拆分增值税）。
+ * 金蝶凭证引出的科目映射（假设：中国企业会计准则科目表）。应收/应付单按往来单位税率拆分增值税：
+ *   应收 借 应收账款（价税合计）/ 贷 主营业务收入（不含税）+ 应交税费-应交增值税（销项税额）；
+ *   应付 借 原材料（不含税）+ 应交税费-应交增值税（进项税额）/ 贷 应付账款（价税合计）。
  * 可用环境变量 KINGDEE_ACCOUNTS（JSON，如 {"FEE":{"code":"6603.01","name":"财务费用-手续费"}}）按企业科目表覆盖。
  */
 export const ACCOUNTS: Record<string, { code: string; name: string; aux?: string }> = {
@@ -43,6 +46,8 @@ export const ACCOUNTS: Record<string, { code: string; name: string; aux?: string
   PP: { code: '1123', name: '预付账款', aux: '供应商' },
   REVENUE: { code: '6001', name: '主营业务收入' },
   MATERIAL: { code: '1403', name: '原材料' },
+  VAT_OUT: { code: '2221.01.05', name: '应交税费-应交增值税（销项税额）' },
+  VAT_IN: { code: '2221.01.01', name: '应交税费-应交增值税（进项税额）' },
   BANK: { code: '1002', name: '银行存款' },
   FEE: { code: '6603.02', name: '财务费用-手续费' },
   FX: { code: '6603.03', name: '财务费用-汇兑损益' },
@@ -75,6 +80,22 @@ function periodRange(q: Record<string, string>): { from: Date | null; to: Date |
   return { from: dateOnly(q.date_from), to: dateOnly(q.date_to) };
 }
 
+/**
+ * 往来单位税率：取客户/供应商主数据的税率；未设时，外币结算的客户视为出口（零税率），其余用默认税率 DEFAULT_VAT_RATE（0.13）。
+ */
+export const taxRateOf = (p: { tax_rate?: Prisma.Decimal | number | null; currency?: string | null } | null | undefined, kind: 'AR' | 'AP' = 'AR'): number => {
+  if (p && p.tax_rate !== null && p.tax_rate !== undefined) return Number(p.tax_rate);
+  if (kind === 'AR' && p?.currency && p.currency.toUpperCase() !== config.baseCurrency) return 0;
+  return config.defaultVatRate;
+};
+
+/** 价税合计拆分：不含税 = 合计 ÷ (1 + 税率)（四舍五入到分），税额 = 合计 − 不含税 */
+export function splitTax(gross: number | null, rate: number): { net: number | null; tax: number | null } {
+  if (gross === null) return { net: null, tax: null };
+  const net = money(dec(gross).div(dec(1).plus(rate)));
+  return { net, tax: subMoney(gross, net) };
+}
+
 const partnerOf = (d: { customer?: { name: string; code: string } | null; supplier?: { name: string; code: string } | null }) =>
   d.customer ? { name: d.customer.name, code: d.customer.code } : d.supplier ? { name: d.supplier.name, code: d.supplier.code } : { name: null, code: null };
 
@@ -91,6 +112,8 @@ interface SettleInput {
   method?: string | null;
   reference?: string | null;
   remark?: string | null;
+  /** 收付款银行账户（如 中国银行 6217…1234） */
+  bank_account?: string | null;
   allocations?: Allocation[] | null;
   as_advance?: boolean;
 }
@@ -250,14 +273,43 @@ export class FinanceService {
         include: { doc: { include: { customer: true, supplier: true } } },
       }),
     ]);
+    // 银行到账金额：应收 = 核销 − 手续费，应付 = 核销 + 手续费；冲抵记录不经银行为 0。同一收付款单号超额转入的预收/预付单一并列出
+    const receiptNos = [...new Set(rows.map((r) => r.receipt_no).filter((x): x is string => !!x))];
+    const advs = receiptNos.length
+      ? await c.financeDoc.findMany({ where: { doc_type: { in: ['PR', 'PP'] }, ref_type: 'PAYMENT', ref_no: { in: receiptNos } }, select: { no: true, ref_no: true, amount: true, status: true } })
+      : [];
+    const firstOf = new Map<string, number>();
+    rows.forEach((r) => r.receipt_no && !firstOf.has(r.receipt_no) && firstOf.set(r.receipt_no, r.id));
     const items = rows.map(({ doc: d, ...p }) => {
       const pt = partnerOf(d);
+      const kind = KIND_OF[d.doc_type];
+      const offset = Object.values(OFFSET_METHOD).includes(p.method as any) || d.doc_type === 'PR' || d.doc_type === 'PP';
+      const amount = money(p.amount);
+      const fee = money(p.fee_amount);
+      const adv = p.receipt_no && firstOf.get(p.receipt_no) === p.id ? advs.find((a) => a.ref_no === p.receipt_no) : undefined;
+      const bank = offset ? 0 : kind === 'AR' ? subMoney(amount, fee) : money(amount + fee);
       return {
-        ...ser('Payment', p), doc_no: d.no, doc_type: d.doc_type, kind: KIND_OF[d.doc_type], currency: d.currency, booking_rate: d.exchange_rate,
+        ...ser('Payment', p), doc_no: d.no, doc_type: d.doc_type, kind, currency: d.currency, booking_rate: d.exchange_rate,
         partner_name: pt.name, partner_code: pt.code, ref_no: d.ref_no,
+        bank_amount: adv && adv.status !== 'VOID' ? money(bank + money(adv.amount)) : bank,
+        advance_no: adv?.no ?? null, advance_amount: adv ? money(adv.amount) : null,
       };
     });
     return { items, total, page, page_size: size };
+  }
+
+  /** 应收单登记发票号/开票日期（金蝶凭证摘要带发票号） */
+  setInvoice(id: number, b: { invoice_no?: string | null; invoice_date?: string | null }) {
+    return this.db.tx(async (tx) => {
+      const d = await tx.financeDoc.findUnique({ where: { id } });
+      if (!d) throw new NotFound('单据');
+      if (d.status === 'VOID') throw new BizError(`${d.no} 已作废`);
+      const no = (b.invoice_no ?? '').trim() || null;
+      const row = await tx.financeDoc.update({
+        where: { id }, data: { invoice_no: no, invoice_date: no ? (dateOnly(b.invoice_date) ?? today()) : null }, include: inc('FinanceDoc', CH),
+      });
+      return (await this.decorate([ser('FinanceDoc', row, CH)]))[0];
+    });
   }
 
   // ======================= 收付款 =======================
@@ -280,7 +332,7 @@ export class FinanceService {
       const apply = Math.min(amount, Math.max(balance, 0));
       await this.post(tx, user, {
         kind, partner_id: (kind === 'AR' ? d.customer_id : d.supplier_id)!, currency: d.currency, amount, fee_amount: b.fee_amount, exchange_rate: b.exchange_rate,
-        pay_date: b.pay_date, method: b.method, reference: b.reference, remark: b.remark, as_advance: !!b.as_advance,
+        pay_date: b.pay_date, method: b.method, reference: b.reference, remark: b.remark, bank_account: b.bank_account, as_advance: !!b.as_advance,
         allocations: apply > 0 ? [{ doc_id: d.id, amount: apply }] : [],
       });
       const row = await tx.financeDoc.findUnique({ where: { id }, include: inc('FinanceDoc', CH) });
@@ -388,6 +440,7 @@ export class FinanceService {
           data: {
             doc_id: a.doc.id, pay_date: payDate, amount: a.amount, exchange_rate: rate, base_amount: s.base_amount, fee_amount: f, fx_diff: s.fx_diff,
             receipt_no: receiptNo, status: 'VALID', method: b.method === undefined ? '银行转账' : b.method, reference: b.reference ?? null, remark: b.remark ?? null, created_by: user.username,
+            bank_account: b.bank_account?.trim() || null,
           },
         }),
       );
@@ -635,7 +688,7 @@ export class FinanceService {
    *   预收/预付冲抵：借 预收账款 / 贷 应收账款（应付反之）；
    *   本期作废的以前期间收付款：生成红字冲销凭证（金额取负）。
    */
-  async voucher(q: Record<string, string>) {
+  async voucher(q: Record<string, string>, user?: CurrentUser) {
     await this.bookPending();
     const { from, to } = periodRange(q);
     if (!from || !to) throw new BizError('请选择会计期间（如 2026-11）或起止日期');
@@ -657,17 +710,24 @@ export class FinanceService {
       const base = d.base_amount !== null ? money(d.base_amount) : null;
       if (base === null) warnings.push(`${d.no} 缺少 ${d.currency} 在 ${fmtDate(d.doc_date)} 的汇率，本位币金额为空，请先维护汇率`);
       const fc = money(d.amount);
-      const summary = d.doc_type === 'AR' ? `应收 ${d.no} ${pt.name ?? ''} ${d.remark ?? ''}`.trim() : `应付 ${d.no} ${pt.name ?? ''} ${d.remark ?? ''}`.trim();
+      const taxRate = d.doc_type === 'AR' ? taxRateOf((d as any).customer, 'AR') : taxRateOf((d as any).supplier, 'AP');
+      const pct = `${Math.round(taxRate * 10000) / 100}%`;
+      const summary = (d.doc_type === 'AR' ? `应收 ${d.no} ${pt.name ?? ''} 税率${pct} ${d.invoice_no ? `发票${d.invoice_no} ` : ''}${d.remark ?? ''}` : `应付 ${d.no} ${pt.name ?? ''} 税率${pct} ${d.remark ?? ''}`).trim();
+      const b = splitTax(base, taxRate);
+      const f = splitTax(fc, taxRate);
+      const taxLine = (account: 'VAT_OUT' | 'VAT_IN', side: 'debit' | 'credit'): Line[] => (f.tax ? [{ account, currency: d.currency, rate, fc: f.tax, [side]: b.tax, summary }] : []);
       vouchers.push({
-        date: d.doc_date, key: `1-${d.no}`, biz_no: d.no, maker: d.created_by,
+        date: d.doc_date, key: `1-${d.no}`, biz_no: d.no, maker: user?.full_name ?? d.created_by,
         lines:
           d.doc_type === 'AR'
             ? [
                 { account: 'AR', partner: pt, currency: d.currency, rate, fc, debit: base, summary },
-                { account: 'REVENUE', currency: d.currency, rate, fc, credit: base, summary },
+                { account: 'REVENUE', currency: d.currency, rate, fc: f.net!, credit: b.net, summary },
+                ...taxLine('VAT_OUT', 'credit'),
               ]
             : [
-                { account: 'MATERIAL', currency: d.currency, rate, fc, debit: base, summary },
+                { account: 'MATERIAL', currency: d.currency, rate, fc: f.net!, debit: b.net, summary },
+                ...taxLine('VAT_IN', 'debit'),
                 { account: 'AP', partner: pt, currency: d.currency, rate, fc, credit: base, summary },
               ],
       });
@@ -754,7 +814,7 @@ export class FinanceService {
       if (diff !== 0) lines.push({ account: 'FX', currency: book.base, rate: 1, fc: Math.abs(diff), ...(diff > 0 ? { credit: diff } : { debit: -diff }), summary });
       vouchers.push({
         date: reversal ? dateOnly(first.voided_at!)! : first.pay_date, key: `2-${first.receipt_no ?? first.id}${reversal ? '-R' : ''}`, biz_no: first.receipt_no ?? `#${first.id}`,
-        method: first.method, reference: first.reference, maker: reversal ? first.voided_by : first.created_by, lines,
+        method: first.method, reference: first.reference, maker: user?.full_name ?? (reversal ? first.voided_by : first.created_by), lines,
       });
     }
 

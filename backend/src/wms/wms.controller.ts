@@ -45,6 +45,8 @@ class ReceiptDto {
   @IsOptional() @IsString() delivery_note?: string | null;
   @IsOptional() @IsString() remark?: string | null;
   @IsArray() @ValidateNested({ each: true }) @Type(() => ReceiptLineDto) lines: ReceiptLineDto[];
+  /** 已确认湿敏物料放非防潮柜（未确认时返回 400【需确认】） */
+  @IsOptional() @IsBoolean() confirm_placement?: boolean;
 }
 
 class TransferDto {
@@ -202,6 +204,7 @@ export class WmsController {
           mfg_date: dateOnly(l.mfg_date), expiry_date: dateOnly(l.expiry_date),
         })),
         supplier_id: b.supplier_id, customer_id: b.customer_id, delivery_note: b.delivery_note, remark: b.remark,
+        confirm_placement: !!b.confirm_placement,
       });
       return ser('Receipt', rc, ['lines']);
     });
@@ -366,16 +369,7 @@ export class WmsController {
   @Put('stock-counts/:id/lines')
   @Perms('wms')
   updateCountLines(@Param('id', ParseIntPipe) id: number, @Body(new ParseArrayPipe({ items: CountLineDto, whitelist: true })) body: CountLineDto[]) {
-    return this.db.tx(async (tx) => {
-      const c = await tx.stockCount.findUnique({ where: { id }, include: { lines: true } });
-      if (!c) throw new NotFound('盘点单');
-      if (c.status !== 'OPEN') throw new BizError(c.status === 'CANCELLED' ? '盘点单已作废，不能录入' : '盘点单已过账，不能再录入实盘');
-      const ids = new Set(c.lines.map((l) => l.id));
-      for (const ln of body) {
-        if (ids.has(ln.id)) await tx.stockCountLine.update({ where: { id: ln.id }, data: { counted_qty: ln.counted_qty } });
-      }
-      return this.ops.enrichCount(tx, id);
-    });
+    return this.db.tx((tx) => this.ops.saveCountLines(tx, id, body));
   }
 
   /** 盘点过账（生成差异调整） */

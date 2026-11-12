@@ -13,6 +13,7 @@ import { HttpException, Injectable } from '@nestjs/common';
 import type { User } from '@prisma/client';
 import { config } from '../config';
 import type { CurrentUser } from '../common/context';
+import { BizError } from '../common/errors';
 import { PrismaService } from '../common/prisma.service';
 import { kingdeeValidateUser } from './kingdee.client';
 import { verifyPassword } from './password';
@@ -131,6 +132,52 @@ export class AuthService {
     if (!user.is_active) return this.fail(badgeNo, user, '账号已停用', extra);
     if (!userPermissions(user).has('mes')) return this.fail(badgeNo, user, '该账号没有车间报工权限，不能在工位终端登录', extra);
     return this.succeed(user, 'BADGE');
+  }
+
+  /**
+   * 空闲锁屏后解锁（同一账号）：输入本人登录密码，或刷本人工牌 + PIN。
+   * 失败计入连续失败次数（达到上限锁定账号，与登录共用计数）；失败返回 400（BizError），不会把页面踢回登录页，
+   * 以便保留锁屏前未提交的内容。工牌不是本人的直接拒绝（请“换人登录”）。
+   */
+  async unlock(userId: number, body: { password?: string | null; badge_no?: string | null; pin?: string | null }): Promise<User> {
+    const user = await this.db.base.user.findUnique({ where: { id: userId } });
+    if (!user || !user.is_active) throw new HttpException({ detail: '账号不存在或已停用' }, 401);
+    if (user.locked_until && user.locked_until.getTime() > Date.now()) {
+      const min = Math.ceil((user.locked_until.getTime() - Date.now()) / 60000);
+      throw new BizError(`连续错误次数过多，账号已锁定，请 ${min} 分钟后再试，或联系管理员解锁；也可点“换人登录”`);
+    }
+    const badge = (body.badge_no || '').trim();
+    let ok = false;
+    let reason = '密码错误';
+    let source = 'PASSWORD';
+    if (badge) {
+      source = 'BADGE';
+      if (!user.badge_no || user.badge_no !== badge) {
+        throw new BizError(`工牌 ${badge} 不是当前登录用户 ${user.full_name} 的工牌。如需换人使用，请点“换人登录”`);
+      }
+      ok = !!user.pin_hash && verifyPassword(body.pin || '', user.pin_hash);
+      reason = 'PIN 错误';
+    } else if (body.password) {
+      ok = (await this.verifyUserPassword(user as unknown as CurrentUser, body.password)).ok;
+    } else {
+      throw new BizError('请输入登录密码，或刷工牌并输入 PIN');
+    }
+    if (!ok) {
+      const u = await this.db.base.user.update({ where: { id: user.id }, data: { failed_login_count: { increment: 1 } } });
+      const locked = u.failed_login_count >= config.loginMaxFailures;
+      if (locked) {
+        await this.db.base.user.update({
+          where: { id: user.id }, data: { failed_login_count: 0, locked_until: new Date(Date.now() + config.loginLockMinutes * 60000) },
+        });
+      }
+      await this.audit(user.username, user.full_name, user.id, 'LOGIN_FAILED', { reason: `解锁屏幕：${reason}`, source, ...(locked ? { locked: true } : {}) });
+      throw new BizError(locked
+        ? `${reason}：已连续错误 ${config.loginMaxFailures} 次，账号已锁定 ${config.loginLockMinutes} 分钟，请稍后再试或联系管理员解锁`
+        : `${reason}，还可尝试 ${config.loginMaxFailures - u.failed_login_count} 次`);
+    }
+    const u = await this.db.base.user.update({ where: { id: user.id }, data: { failed_login_count: 0, locked_until: null } });
+    await this.audit(u.username, u.full_name, u.id, 'UNLOCK', { source });
+    return u;
   }
 
   /** 校验当前用户的密码（电子签名用）：本地用户校验本地密码，金蝶用户向金蝶校验 */

@@ -27,6 +27,12 @@ interface Summary {
 /** 一次性显示的临时密码 */
 interface IssuedPassword { username: string; full_name: string; temp_password?: string | null; temp_pin?: string | null; badge_no?: string | null; roles?: string; department?: string | null }
 
+/**
+ * 最近一次批量导入的初始密码清单：只保存在本页内存中（不落盘、刷新即清除），
+ * 关闭导入弹窗后仍可再次查看/下载（E-N9：导入中途关掉弹窗也能拿到清单）。
+ */
+let lastImported: { at: string; list: IssuedPassword[] } | null = null;
+
 const ROLE_COLORS = ['magenta', 'volcano', 'orange', 'gold', 'green', 'cyan', 'blue', 'geekblue', 'purple', 'lime', 'red'];
 
 /** 权限名称较长（含括号说明），矩阵表头用简称（悬停看全称） */
@@ -39,10 +45,13 @@ const shortPerm = (code: string, name: string) => PERM_SHORT[code] ?? name.split
 /** 临时密码只显示这一次：可复制、可下载 Excel 分发清单 */
 function IssuedModal({ list, onClose }: { list: IssuedPassword[] | null; onClose: () => void }) {
   const one = list?.length === 1 ? list[0] : null;
+  const pinOnly = !!list?.length && list.every((x) => !x.temp_password && x.temp_pin);
   return (
     <Modal
       open={!!list}
-      title={<Space><KeyOutlined style={{ color: '#fa8c16' }} />{one ? `已为 ${one.full_name}（${one.username}）设置临时密码` : `初始密码分发清单（${list?.length ?? 0} 人）`}</Space>}
+      title={<Space><KeyOutlined style={{ color: '#fa8c16' }} />{one
+        ? `已为 ${one.full_name}（${one.username}）设置${one.temp_password ? '临时密码' : ''}${one.temp_password && one.temp_pin ? '和' : ''}${one.temp_pin ? '工位 PIN' : ''}`
+        : `${pinOnly ? '工位 PIN' : '初始密码'}分发清单（${list?.length ?? 0} 人）`}</Space>}
       onCancel={onClose}
       maskClosable={false}
       width={one ? 520 : 820}
@@ -69,7 +78,9 @@ function IssuedModal({ list, onClose }: { list: IssuedPassword[] | null; onClose
         type="warning"
         showIcon
         style={{ marginBottom: 12 }}
-        message="临时密码只显示这一次，关闭后无法再查看（可重新“重置密码”）。员工首次登录时系统会要求本人修改密码，管理员不再知道其密码。"
+        message={pinOnly
+          ? '工位 PIN 只显示这一次。员工首次刷卡后系统会要求本人设置自己的 PIN，管理员不再知道。'
+          : '临时密码 / PIN 只显示这一次，关闭后无法再查看（可重新“重置”）。员工首次登录（刷卡）时系统会要求本人修改，管理员不再知道。'}
       />
       {one ? (
         <Space direction="vertical" size={8} style={{ width: '100%' }}>
@@ -96,7 +107,7 @@ function IssuedModal({ list, onClose }: { list: IssuedPassword[] | null; onClose
             { title: '账号', dataIndex: 'username', render: (v) => <b className="mono">{v}</b> },
             { title: '姓名', dataIndex: 'full_name' },
             { title: '角色', dataIndex: 'roles' },
-            { title: '临时密码', dataIndex: 'temp_password', render: (v) => (v ? <Typography.Text copyable className="mono">{v}</Typography.Text> : <Typography.Text type="secondary">金蝶账号/文件指定</Typography.Text>) },
+            ...(pinOnly ? [] : [{ title: '临时密码', dataIndex: 'temp_password', render: (v: string) => (v ? <Typography.Text copyable className="mono">{v}</Typography.Text> : <Typography.Text type="secondary">金蝶账号/文件指定</Typography.Text>) }]),
             { title: '工牌 / PIN', key: 'pin', render: (_, r) => (r.badge_no ? <span className="mono">{r.badge_no}{r.temp_pin ? ` / ${r.temp_pin}` : ''}</span> : '-') },
           ]}
         />
@@ -141,6 +152,7 @@ function UserModal({ user, open, roles, policy, kingdee, departments, onClose, o
       is_active: user ? !!v.is_active : true, auth_source: v.auth_source,
       password: !isKingdee && v.pw_mode === 'manual' ? v.password : null, generate_password: generate,
       badge_no: (v.badge_no || '').trim(), pin: v.pin || null, release_badge: deactivating ? !!v.release_badge : undefined,
+      generate_pin: v.generate_pin && !v.pin ? true : undefined,
     };
     if (user && user.username === me?.username && (!body.is_active || !body.roles.includes('admin'))) {
       const ok = await new Promise<boolean>((resolve) => Modal.confirm({
@@ -157,7 +169,9 @@ function UserModal({ user, open, roles, policy, kingdee, departments, onClose, o
     try {
       const saved: Rec = user ? await put(`/system/users/${user.id}`, body) : await post('/system/users', body);
       message.success(user ? `${saved.full_name} 已保存` : `用户 ${saved.username} 已创建`);
-      onDone(saved, saved.temp_password || (!user && v.pin) ? { username: saved.username, full_name: saved.full_name, temp_password: saved.temp_password, badge_no: saved.badge_no } : null);
+      onDone(saved, saved.temp_password || saved.temp_pin
+        ? { username: saved.username, full_name: saved.full_name, temp_password: saved.temp_password, temp_pin: saved.temp_pin, badge_no: saved.badge_no }
+        : null);
     } finally {
       setSaving(false);
     }
@@ -219,9 +233,15 @@ function UserModal({ user, open, roles, policy, kingdee, departments, onClose, o
             </Form.Item>
           </Col>
           <Col span={12}>
-            <Form.Item name="pin" label={user?.has_pin ? '重置工位 PIN（留空不改）' : '工位 PIN（4–8 位数字）'} style={{ marginBottom: 12 }} rules={[{ pattern: /^\d{4,8}$/, message: 'PIN 须为 4–8 位数字' }]}>
-              <Input.Password inputMode="numeric" maxLength={8} autoComplete="new-password" placeholder={user?.has_pin ? '已设置' : '4–8 位数字'} />
+            <Form.Item name="pin" label={user?.has_pin ? '重置工位 PIN（留空不改）' : '工位 PIN（4–8 位数字）'} style={{ marginBottom: 4 }} rules={[{ pattern: /^\d{4,8}$/, message: 'PIN 须为 4–8 位数字' }]}
+              extra={<span style={{ fontSize: 12 }}>{user?.has_pin ? '' : '留空：填了工牌号时系统自动生成 4 位 PIN，保存后显示一次；'}本人首次刷卡后须改成自己的 PIN</span>}>
+              <Input.Password inputMode="numeric" maxLength={8} autoComplete="new-password" placeholder={user?.has_pin ? '已设置' : '留空自动生成'} />
             </Form.Item>
+            {user?.has_pin && user?.badge_no && (
+              <Form.Item name="generate_pin" valuePropName="checked" style={{ marginBottom: 12 }}>
+                <Checkbox>由系统重新生成 PIN（保存后显示一次）</Checkbox>
+              </Form.Item>
+            )}
           </Col>
           <Col span={12}>
             <Form.Item name="auth_source" label="登录方式" style={{ marginBottom: 12 }}>
@@ -321,6 +341,8 @@ function UsersAdmin() {
   const [selected, setSelected] = useState<number[]>([]);
   const [issued, setIssued] = useState<IssuedPassword[] | null>(null);
   const [importOpen, setImportOpen] = useState(sp.get('import') === '1');
+  const [importBusy, setImportBusy] = useState<'check' | 'import' | null>(null);
+  const [lastImport, setLastImport] = useState(lastImported);
   const [busy, setBusy] = useState(false);
   const [rolePop, setRolePop] = useState(false);
   const [q, setQ] = useState(init.q || '');
@@ -351,13 +373,28 @@ function UsersAdmin() {
   };
 
   const batch = async (action: string, extra: Rec = {}, okText = '已完成') => {
+    // 勾选中包含自己：改密/重置会立即影响本人当前登录，二次确认
+    if (['force_change', 'reset_password', 'reset_pin'].includes(action) && me && selected.includes(me.id)) {
+      const ok = await new Promise<boolean>((resolve) => Modal.confirm({
+        title: '勾选中包含您自己的账号',
+        content: action === 'reset_pin'
+          ? `将同时重置您自己（${me.username}）的工位 PIN。确定继续？`
+          : `将同时${action === 'reset_password' ? '重置' : '要求修改'}您自己（${me.username}）的密码，您会被要求立即改密。建议取消勾选自己，之后在右上角“修改密码”单独修改。`,
+        okText: '包括我自己，继续',
+        cancelText: '取消',
+        onOk: () => resolve(true),
+        onCancel: () => resolve(false),
+      }));
+      if (!ok) return;
+      extra = { ...extra, confirm_self: true };
+    }
     setBusy(true);
     try {
       const r = await post('/system/users/batch', { ids: selected, action, ...extra });
       message.success(`${okText}：${r.changed} 个账号${r.skipped?.length ? `（${r.skipped.length} 个无需处理）` : ''}`);
       if (r.passwords?.length) {
         const byId = new Map(rows.map((u) => [u.id, u]));
-        setIssued(r.passwords.map((p: Rec) => ({ ...p, roles: roleNames(byId.get(p.id)?.role_list), department: byId.get(p.id)?.department })));
+        setIssued(r.passwords.map((p: Rec) => ({ ...p, badge_no: p.badge_no ?? byId.get(p.id)?.badge_no, roles: roleNames(byId.get(p.id)?.role_list), department: byId.get(p.id)?.department })));
       }
       setSelected([]);
       refresh();
@@ -371,6 +408,11 @@ function UsersAdmin() {
     setIssued([{ username: r.username, full_name: r.full_name, temp_password: res.temp_password }]);
     refresh();
   };
+  const resetPin = async (r: Rec) => {
+    const res = await post(`/system/users/${r.id}/reset-pin`, {});
+    setIssued([{ username: r.username, full_name: r.full_name, temp_pin: res.temp_pin, badge_no: r.badge_no }]);
+    refresh();
+  };
 
   const statusCell = (r: Rec) => (
     <Space size={4} wrap={false}>
@@ -380,7 +422,7 @@ function UsersAdmin() {
           <Tag color="red" icon={<LockOutlined />}>已锁定</Tag>
         </Tooltip>
       )}
-      {r.is_active && r.demo_password && <Tooltip title="仍在使用公开的演示密码，正式上线前请停用或要求改密"><Tag color="volcano" icon={<WarningOutlined />}>演示密码</Tag></Tooltip>}
+      {r.is_active && r.demo_password && <Tooltip title="仍在使用公开的演示密码：上线前请“重置密码”（生成随机临时密码，当面发给本人）或“停用”"><Tag color="volcano" icon={<WarningOutlined />}>演示密码</Tag></Tooltip>}
       {r.is_active && !r.demo_password && r.initial_password && <Tooltip title="管理员设置的密码，本人首次登录时须修改"><Tag color="gold">初始密码未改</Tag></Tooltip>}
       {!r.locked && r.failed_login_count > 0 && <Tooltip title="连续登录失败次数（成功登录后清零）"><Tag color="volcano">失败 {r.failed_login_count} 次</Tag></Tooltip>}
     </Space>
@@ -416,7 +458,7 @@ function UsersAdmin() {
     },
     { title: '创建时间', dataIndex: 'created_at', width: 140, sorter: true, render: (v) => fmtDateTime(v) },
     {
-      title: '操作', key: '_op', width: 250, fixed: 'right',
+      title: '操作', key: '_op', width: 320, fixed: 'right',
       render: (_, r) => (
         <Space size={0}>
           <Button size="small" type="link" icon={<EditOutlined />} onClick={() => { setEditing(r); setOpen(true); }}>编辑</Button>
@@ -424,6 +466,11 @@ function UsersAdmin() {
           {r.auth_source !== 'KINGDEE' && r.is_active && (
             <Popconfirm title={`为 ${r.full_name} 生成临时密码？`} description="原密码立即失效（同时解锁）；本人首次登录须修改。" okText="生成" onConfirm={() => resetPwd(r)}>
               <Button size="small" type="link" icon={<KeyOutlined />}>重置密码</Button>
+            </Popconfirm>
+          )}
+          {r.badge_no && r.is_active && (
+            <Popconfirm title={`为 ${r.full_name} 重新生成工位 PIN？`} description="原 PIN 立即失效；本人首次刷卡后须改成自己的 PIN。" okText="生成" onConfirm={() => resetPin(r)}>
+              <Button size="small" type="link" icon={<IdcardOutlined />}>重置 PIN</Button>
             </Popconfirm>
           )}
           {r.is_active ? (
@@ -472,6 +519,7 @@ function UsersAdmin() {
   ];
 
   const demo = summary?.demo_password ?? [];
+  const selectedDemo = demo.filter((u) => selected.includes(u.id));
   const status = (query.status as string) || '';
   const changeStatus = (v: string) => {
     setQuery({ status: v || undefined });
@@ -487,6 +535,11 @@ function UsersAdmin() {
           <Space>
             <Button type="primary" icon={<UserAddOutlined />} onClick={() => { setEditing(null); setOpen(true); }}>新增用户</Button>
             <Button icon={<FileExcelOutlined />} onClick={() => setImportOpen(true)}>批量导入用户</Button>
+            {lastImport && (
+              <Tooltip title={`导入时间 ${lastImport.at}；仅保存在本页，刷新后清除`}>
+                <Button icon={<KeyOutlined />} onClick={() => setIssued(lastImport.list)}>最近一次导入的密码清单（{lastImport.list.length} 人）</Button>
+              </Tooltip>
+            )}
           </Space>
         )}
       />
@@ -497,10 +550,16 @@ function UsersAdmin() {
             showIcon
             icon={<WarningOutlined />}
             message={`有 ${demo.length} 个预置演示账号仍使用公开密码 ${summary?.demo_password_text ?? ''}（${demo.slice(0, 6).map((u) => u.username).join('、')}${demo.length > 6 ? ' 等' : ''}）`}
-            description="知道演示密码的人都能用这些账号登录、电子签名。上线前请勾选后停用，或要求下次登录改密；全部处理后登录页的“演示账号”下拉自动隐藏。"
+            description={(
+              <>
+                知道演示密码的人都能用这些账号登录、电子签名。上线前请勾选后点<b>“重置密码”</b>（生成随机临时密码，当面发给本人）或<b>“停用”</b>；
+                不能用“要求下次登录改密”——任何知道演示密码的人都能抢先登录并改成自己的密码，冒用该账号的电子签名。全部处理后登录页的“演示账号”下拉自动隐藏。
+                {demo.some((u) => u.id === me?.id) && <div style={{ marginTop: 4 }}>您自己的账号（{me?.username}）不会被勾选，请之后在右上角“修改密码”单独修改。</div>}
+              </>
+            )}
             action={(
               <Space direction="vertical">
-                <Button size="small" onClick={() => { setSelected(demo.map((u) => u.id)); changeStatus('initial_password'); }}>勾选这些账号</Button>
+                <Button size="small" onClick={() => { setSelected(demo.filter((u) => u.id !== me?.id).map((u) => u.id)); changeStatus('initial_password'); }}>勾选这些账号（不含自己）</Button>
               </Space>
             )}
           />
@@ -560,11 +619,20 @@ function UsersAdmin() {
                   </Popconfirm>
                   <Button size="small" onClick={() => batch('activate', {}, '已启用')}>启用</Button>
                   <Button size="small" onClick={() => batch('unlock', {}, '已解锁')}>解锁</Button>
-                  <Popconfirm title="要求所选账号下次登录时修改密码？" okText="确定" onConfirm={() => batch('force_change', {}, '已设置下次登录须改密')}>
-                    <Button size="small">要求下次登录改密</Button>
+                  {selectedDemo.length > 0 ? (
+                    <Tooltip title={`所选中 ${selectedDemo.map((u) => u.username).join('、')} 仍在使用公开演示密码，“要求下次登录改密”会被知道演示密码的人抢先占用。请用“重置密码”或“停用”。`}>
+                      <Button size="small" disabled>要求下次登录改密</Button>
+                    </Tooltip>
+                  ) : (
+                    <Popconfirm title="要求所选账号下次登录时修改密码？" description="仅适用于密码只有本人知道的账号。" okText="确定" onConfirm={() => batch('force_change', {}, '已设置下次登录须改密')}>
+                      <Button size="small">要求下次登录改密</Button>
+                    </Popconfirm>
+                  )}
+                  <Popconfirm title={`为所选 ${selected.length} 个账号生成随机临时密码？`} description="原密码立即失效；生成后显示分发清单（只显示一次），本人首次登录须修改。" okText="生成" onConfirm={() => batch('reset_password', {}, '已重置密码')}>
+                    <Button size="small" type={selectedDemo.length ? 'primary' : 'default'}>重置密码</Button>
                   </Popconfirm>
-                  <Popconfirm title={`为所选 ${selected.length} 个账号生成临时密码？`} description="原密码立即失效；生成后显示分发清单（只显示一次）。" okText="生成" onConfirm={() => batch('reset_password', {}, '已重置密码')}>
-                    <Button size="small">重置密码</Button>
+                  <Popconfirm title="为所选账号中有工牌的人重新生成工位 PIN？" description="原 PIN 立即失效；生成后显示 PIN 分发清单（只显示一次），本人首次刷卡后须改成自己的 PIN。" okText="生成" onConfirm={() => batch('reset_pin', {}, '已重置工位 PIN')}>
+                    <Button size="small">重置工位 PIN</Button>
                   </Popconfirm>
                   <Button size="small" type="link" onClick={() => setSelected([])}>取消选择</Button>
                 </Space>
@@ -601,7 +669,7 @@ function UsersAdmin() {
         kingdee={kingdee}
         departments={(summary?.departments ?? []).map((d) => d.name)}
         onClose={() => setOpen(false)}
-        onDone={(_, iss) => { setOpen(false); refresh(); if (iss?.temp_password) setIssued([iss]); }}
+        onDone={(_, iss) => { setOpen(false); refresh(); if (iss?.temp_password || iss?.temp_pin) setIssued([iss]); }}
       />
       <IssuedModal list={issued} onClose={() => setIssued(null)} />
       <Modal
@@ -611,7 +679,10 @@ function UsersAdmin() {
         style={{ top: 24 }}
         footer={null}
         destroyOnHidden
-        onCancel={() => { setImportOpen(false); if (sp.get('import')) { sp.delete('import'); setSp(sp, { replace: true }); } }}
+        closable={importBusy !== 'import'}
+        maskClosable={false}
+        keyboard={importBusy !== 'import'}
+        onCancel={() => { if (importBusy === 'import') return; setImportOpen(false); if (sp.get('import')) { sp.delete('import'); setSp(sp, { replace: true }); } }}
       >
         <Space direction="vertical" size={12} style={{ width: '100%' }}>
           <Alert
@@ -624,7 +695,16 @@ function UsersAdmin() {
           <ImportFlow
             entity="users"
             title="用户"
-            onImported={(r: ImportResult) => { refresh(); if (r.passwords?.length) setIssued(r.passwords as IssuedPassword[]); }}
+            onBusyChange={setImportBusy}
+            busyHint={<span>正在创建账号并生成初始密码（每人约 0.3–0.5 秒，40 人约 20 秒），<b>请勿关闭此窗口</b>；完成后自动弹出密码清单。</span>}
+            onImported={(r: ImportResult) => {
+              refresh();
+              if (r.passwords?.length) {
+                lastImported = { at: new Date().toLocaleString('zh-CN'), list: r.passwords as IssuedPassword[] };
+                setLastImport(lastImported);
+                setIssued(r.passwords as IssuedPassword[]);
+              }
+            }}
             renderSuccess={(r) => (
               <Button type="primary" icon={<KeyOutlined />} onClick={() => setIssued((r.passwords ?? []) as IssuedPassword[])}>查看 / 下载初始密码清单（{r.passwords?.length ?? 0} 人）</Button>
             )}

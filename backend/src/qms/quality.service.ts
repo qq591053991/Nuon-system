@@ -30,12 +30,12 @@ import { samplingPlan } from '../core/aql';
 import { EsignService, type SignatureDto } from '../core/esign.service';
 import { InventoryService, type Ref } from '../core/inventory.service';
 import { NumberingService } from '../core/numbering.service';
-import { itemDefects, ncrDueDate, outOf } from './qms-rules';
+import { itemDefects, ncrCloseBlocker, ncrDueDate, outOf, parseSamples } from './qms-rules';
 
 type IdRef = number | { id: number };
 const idOf = (x: IdRef) => (typeof x === 'number' ? x : x.id);
 
-export { NCR_DUE_DAYS, ncrDueDate, effectiveDue, overdueWhere, parseSamples, itemDefects } from './qms-rules';
+export { NCR_DUE_DAYS, ncrDueDate, effectiveDue, overdueWhere, parseSamples, itemDefects, closableNcrIds, ncrCloseBlocker } from './qms-rules';
 
 // ---------------------------------------------------------------- 检验项目
 export type ItemType = 'QUAL' | 'QUANT';
@@ -142,6 +142,28 @@ export interface SubmitInspectionArgs {
   sig: SignatureDto | null | undefined;
 }
 
+/**
+ * IQC 判退原因（写入 NCR 描述，与界面一致）：
+ *   定量项：对子样逐件测量，任一件超限即判退（Ac=0）；定性项：判不合格的项目；AQL：抽样不良数 ≥ Re。
+ */
+export function rejectReasons(
+  insp: Pick<Inspection, 'sample_size' | 'accept_num' | 'reject_num'>, items: InspectionItem[], defect: number,
+): string[] {
+  const out: string[] = [];
+  const quant = items.filter((i) => i.item_type === 'QUANT' && i.result === 'FAIL');
+  if (quant.length) {
+    out.push(`定量项超限（逐件判定，Ac=0）：${quant.map((i) => {
+      const vals = parseSamples(i).values;
+      const bad = vals.filter((v) => outOf(v, i.lower, i.upper));
+      return `${i.name} ${bad.length}/${vals.length} 件超限（${bad.map((v) => g(v)).join('、')}${i.unit ?? ''}）`;
+    }).join('；')}`);
+  }
+  const qual = items.filter((i) => i.item_type !== 'QUANT' && i.result === 'FAIL');
+  if (qual.length) out.push(`定性项不合格：${qual.map((i) => `${i.name}${itemDefects(i) ? `（不良 ${itemDefects(i)} 件${i.value ? `，${i.value}` : ''}）` : i.value ? `（${i.value}）` : ''}`).join('、')}`);
+  if (defect > (insp.accept_num ?? 0)) out.push(`AQL 抽样不良 ${defect} 件 ≥ Re ${insp.reject_num}`);
+  return out;
+}
+
 @Injectable()
 export class QualityService {
   constructor(
@@ -206,7 +228,7 @@ export class QualityService {
         const bad = vals.filter((v) => outOf(v, lower, upper));
         return {
           item_type: 'QUANT', sample_values: JSON.stringify(vals.map((v) => round(v, 6))), checked: true,
-          result: bad.length ? 'FAIL' : 'PASS', defects: bad.length,
+          result: bad.length ? 'FAIL' : 'PASS', defects: bad.length, measured: vals.length,
           value: (it.value ?? '').trim() || `${vals.length} 件 ${g(Math.min(...vals))}~${g(Math.max(...vals))}${bad.length ? `，${bad.length} 件超限` : ''}`,
         };
       }
@@ -215,13 +237,13 @@ export class QualityService {
       const d = fail ? Math.trunc(Number(it.defect_qty ?? 0)) : 0;
       if (!Number.isFinite(d) || d < 0) throw new BizError(`检验项目“${name}”的不良数无效`);
       if (n && d > n) throw new BizError(`检验项目“${name}”的不良数 ${d} 超过样本量 ${n}`);
-      return { item_type: 'QUAL', sample_values: fail && d ? JSON.stringify({ defects: d }) : null, checked: true, result: it.result!, defects: d, value: (it.value ?? '').trim() || null };
+      return { item_type: 'QUAL', sample_values: null, checked: true, result: it.result!, defects: d, measured: 0, value: (it.value ?? '').trim() || null };
     };
-    const results: { name: string; result: string; defects: number; values?: string }[] = [];
+    const results: { name: string; type: string; result: string; defects: number; measured: number }[] = [];
     for (const obj of insp.items) {
       const r = check(obj.name, obj.item_type, obj.lower, obj.upper, byId.get(obj.id));
-      results.push({ name: obj.name, result: r.result, defects: r.defects });
-      rows.push({ id: obj.id, data: { value: r.value?.slice(0, 128) ?? null, result: r.result, checked: true, sample_values: r.sample_values } });
+      results.push({ name: obj.name, type: r.item_type, result: r.result, defects: r.defects, measured: r.measured });
+      rows.push({ id: obj.id, data: { value: r.value?.slice(0, 128) ?? null, result: r.result, checked: true, sample_values: r.sample_values, defect_qty: r.defects } });
     }
     // 检验员临时增加的项目
     for (const it of input.filter((x) => !x.id)) {
@@ -232,11 +254,12 @@ export class QualityService {
       const upper = it.upper ?? null;
       if (type === 'QUANT' && lower === null && upper === null) throw new BizError(`检验项目“${name}”是定量项，请填写下限或上限`);
       const r = check(name, type, lower, upper, it);
-      results.push({ name, result: r.result, defects: r.defects });
+      results.push({ name, type, result: r.result, defects: r.defects, measured: r.measured });
       rows.push({
         data: {
           inspection_id: insp.id, name: name.slice(0, 64), standard: it.standard?.trim() || null, item_type: type, lower, upper,
           unit: it.unit?.trim() || null, value: r.value?.slice(0, 128) ?? null, result: r.result, checked: true, sample_values: r.sample_values,
+          defect_qty: r.defects,
         },
       });
     }
@@ -263,10 +286,12 @@ export class QualityService {
       if (defect > 0 && !fails.length) {
         throw new BizError(`不良数 ${defect} 件未关联检验项目：请在出现不良的检验项目上判定“不合格”并填写不良数`);
       }
-      const maxItem = Math.max(0, ...fails.map((f) => f.defects));
+      // AQL 抽样不良数按定性项计（定量项是对子样逐件测量，任一件超限即判退，单独统计）
+      const qualFails = fails.filter((f) => f.type !== 'QUANT');
+      const maxItem = Math.max(0, ...qualFails.map((f) => f.defects));
       if (defect < maxItem) {
-        const f = fails.find((x) => x.defects === maxItem)!;
-        throw new BizError(`样本不良数（${defect}）少于检验项目“${f.name}”的不良数（${maxItem}），请核对`);
+        const f = qualFails.find((x) => x.defects === maxItem)!;
+        throw new BizError(`AQL 抽样不良数（${defect}）少于检验项目“${f.name}”的不良数（${maxItem}），请核对`);
       }
     }
     const items = await tx.inspectionItem.findMany({ where: { inspection_id: insp.id }, orderBy: { id: 'asc' } });
@@ -292,16 +317,10 @@ export class QualityService {
       await this.inv.changeLotStatus(tx, { ...kw, to_status: 'REJECTED', move_type: 'IQC_REJECT' });
     }
     if (status !== 'PASSED') {
-      const fails = items
-        .filter((i) => i.result === 'FAIL')
-        .map((i) => {
-          const d = itemDefects(i);
-          return d ? `${i.name}（${d} 件${i.item_type === 'QUANT' ? '超限' : ''}）` : i.name;
-        })
-        .join('、');
+      const reasons = rejectReasons(insp, items, defect);
       const description =
-        `来料检验 ${insp.no}：抽样 ${insp.sample_size}，不良 ${defect}（Ac=${insp.accept_num}）` +
-        (fails ? `；不合格项目：${fails}` : '') + (a.remark ? `；${a.remark}` : '');
+        `来料检验 ${insp.no} 判退原因：${reasons.join('；') || '-'}。` +
+        `AQL 抽样 n=${insp.sample_size}，不良 ${defect} 件（Ac=${insp.accept_num} / Re=${insp.reject_num}）` + (a.remark ? `；备注：${a.remark}` : '');
       await tx.ncr.create({
         data: {
           no: await this.numbering.nextNo(tx, 'NCR'), source: 'IQC', severity: 'MAJOR', material_id: insp.material_id,
@@ -316,8 +335,14 @@ export class QualityService {
     return (await tx.inspection.findUnique({ where: { id }, include: inc('Inspection', ['items']) })) as any;
   }
 
-  /** NCR 评审处置（QA 电子签名）。过程不合格只能返工/报废；来料不合格可让步、返工（重新检验）、退货、报废 */
-  async dispositionNcr(tx: Tx, user: CurrentUser, ncrRef: IdRef, disposition: string, remark: string | null | undefined, sig: SignatureDto | null | undefined): Promise<Ncr> {
+  /**
+   * NCR 评审处置（QA 电子签名）。过程不合格只能返工/报废；来料不合格可让步、返工（重新检验）、退货、报废。
+   * opts.require_part_change：返工时要求更换零件（写入 Ncr.require_part_change，工位重测前必须先登记返工换件）。
+   */
+  async dispositionNcr(
+    tx: Tx, user: CurrentUser, ncrRef: IdRef, disposition: string, remark: string | null | undefined, sig: SignatureDto | null | undefined,
+    opts: { require_part_change?: boolean | null } = {},
+  ): Promise<Ncr> {
     const id = idOf(ncrRef);
     const ncr = await tx.ncr.findUnique({ where: { id } });
     if (!ncr) throw new NotFound('NCR');
@@ -399,50 +424,23 @@ export class QualityService {
         }
       }
     }
-    await this.esign.sign(tx, user, sig, `不合格品评审处置：${DISPOSITION_TEXT[disposition]}`, 'qms_ncr', ncr.id, ncr.no);
+    const partChange = disposition === 'REWORK' && !!opts.require_part_change;
+    await this.esign.sign(
+      tx, user, sig, `不合格品评审处置：${DISPOSITION_TEXT[disposition]}${partChange ? '（需换件）' : ''}`, 'qms_ncr', ncr.id, ncr.no,
+    );
     return tx.ncr.update({
       where: { id },
-      data: { status: 'DISPOSITIONED', disposition, disposition_remark: remark ?? null, disposition_by: user.full_name, disposition_at: new Date() },
+      data: {
+        status: 'DISPOSITIONED', disposition, disposition_remark: remark ?? null, disposition_by: user.full_name, disposition_at: new Date(),
+        require_part_change: partChange,
+      },
       include: inc('Ncr'),
     });
   }
 
-  /**
-   * NCR 关闭前检查：返回不能关闭的原因（可关闭时返回 null）
-   *   制程返工：该序列号须在不合格工序复测合格（批量报工：复测合格数量 ≥ NCR 数量）；
-   *   来料挑选重检：重新检验单须已判定；来料退货：退供应商单须已出库；客户来源：关联客户退货单须已关闭。
-   */
-  async closeBlocker(tx: Tx, ncr: Ncr): Promise<string | null> {
-    if (ncr.status !== 'DISPOSITIONED') return ncr.status === 'OPEN' ? '尚未评审处置' : '已关闭';
-    const after = ncr.disposition_at ?? ncr.created_at;
-    if (ncr.source === 'PROCESS' && ncr.disposition === 'REWORK' && ncr.wo_id && ncr.op_seq !== null) {
-      const op = `工序 ${ncr.op_seq}${ncr.op_name ? ` ${ncr.op_name}` : ''}`;
-      if (ncr.sn) {
-        const sn = await tx.serialNumber.findUnique({ where: { sn: ncr.sn } });
-        if (!sn) return null;
-        const ok = await tx.operationRecord.findFirst({ where: { sn_id: sn.id, seq: ncr.op_seq, result: 'PASS', ts: { gt: after } } });
-        if (!ok) return `返工后尚未复测合格（序列号 ${ncr.sn} 需重新通过${op}）`;
-      } else {
-        const r = await tx.operationRecord.aggregate({ where: { wo_id: ncr.wo_id, sn_id: null, seq: ncr.op_seq, result: 'PASS', ts: { gt: after } }, _sum: { qty: true } });
-        const done = r._sum.qty ?? 0;
-        if (done + EPS < ncr.qty) return `返工数量 ${g(ncr.qty)} 尚未全部复测合格（${op}已复测合格 ${g(done)}）`;
-      }
-    }
-    if (ncr.source === 'IQC' && ncr.disposition === 'REWORK' && ncr.material_id) {
-      const re = await tx.inspection.findFirst({
-        where: { material_id: ncr.material_id, lot_no: ncr.lot_no || '', id: { gt: ncr.inspection_id ?? 0 } }, orderBy: { id: 'desc' },
-      });
-      if (re && re.status === 'PENDING') return `挑选后重新检验尚未完成（检验单 ${re.no} 待检验）`;
-    }
-    if (ncr.disposition === 'RETURN') {
-      const sr = await tx.supplierReturn.findFirst({ where: { ncr_id: ncr.id, status: { not: 'CANCELLED' } }, orderBy: { id: 'desc' } });
-      if (sr && sr.status === 'PENDING') return `退供应商单 ${sr.no} 尚未出库（仓管出库确认后才能关闭）`;
-    }
-    if (ncr.source === 'CUSTOMER') {
-      const rma = await tx.customerReturn.findFirst({ where: { ncr_id: ncr.id, status: { not: 'CLOSED' } } });
-      if (rma) return `关联客户退货单 ${rma.no} 尚未关闭`;
-    }
-    return null;
+  /** NCR 关闭前检查：返回不能关闭的原因（可关闭时返回 null），规则见 qms-rules.ncrCloseBlocker */
+  closeBlocker(tx: Tx, ncr: Ncr): Promise<string | null> {
+    return ncrCloseBlocker(tx, ncr);
   }
 
   /** 关闭 NCR（QA 电子签名“NCR关闭”）：先检查处置已执行完毕 */

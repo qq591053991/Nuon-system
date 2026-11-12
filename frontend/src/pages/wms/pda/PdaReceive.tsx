@@ -13,7 +13,14 @@ import { CustomerSelect } from '../../../components/RemoteSelect';
 import ScanInput, { type ScanInputHandle } from '../../../components/ScanInput';
 import { fmtDate, fmtQty } from '../../../utils/format';
 import { parseScan, type ScanResult } from '../../../utils/scan';
-import { BigButton, checkPlace, confirmEnter, errText, FeedbackBar, focusLater, gs1Date, numText, parseDateText, PdaField, PdaPage, useFeedback } from './kit';
+import { useAuth } from '../../../auth';
+import {
+  BigButton, checkPlace, clearDraft, confirmEnter, errText, FeedbackBar, focusLater, gs1Date, loadDraft, numText, parseDateText, PdaField, PdaPage, savedAgo, saveDraft, useFeedback, useLeaveGuard,
+  type Draft,
+} from './kit';
+
+/** 本机暂存的未提交收货 */
+interface ReceiveDraft { mode: Mode; po_no?: string | null; customer?: Rec | null; dn: string; cart: Batch[] }
 
 type Mode = 'PO' | 'CS';
 type Step = 'item' | 'lot' | 'mfg' | 'qty' | 'loc';
@@ -52,6 +59,11 @@ let seq = 1;
 
 export default function PdaReceive() {
   const nav = useNavigate();
+  const { user } = useAuth();
+  const [restore, setRestore] = useState<Draft<ReceiveDraft> | null>(() => {
+    const d = loadDraft<ReceiveDraft>('receive', user?.username);
+    return d?.data?.cart?.length ? d : null;
+  });
   const [sp, setSp] = useSearchParams();
   const [mode, setMode] = useState<Mode>(sp.get('mode') === 'cs' ? 'CS' : 'PO');
   const [po, setPo] = useState<Rec | null>(null);
@@ -76,6 +88,14 @@ export default function PdaReceive() {
   const mfgRef = useRef<InputRef>(null);
   const qtyRef = useRef<InputRef>(null);
   const locRef = useRef<InputRef>(null);
+
+  // 未提交的批次随时暂存本机（刷新、锁屏、换页后可恢复）；有待恢复的草稿时先不覆盖
+  useEffect(() => {
+    if (restore) return;
+    if (cart.length) saveDraft<ReceiveDraft>('receive', user?.username, { mode, po_no: po?.no ?? null, customer, dn, cart });
+    else clearDraft('receive', user?.username);
+  }, [cart, dn, mode, po, customer, restore, user?.username]);
+  useLeaveGuard(cart.length > 0);
 
   const inCart = (l: Line) => cart.filter((b) => b.line.key === l.key).reduce((s, b) => s + b.qty, 0);
   const left = (l: Line) => (l.remaining === undefined ? undefined : Math.max(0, Math.round((l.remaining - inCart(l)) * 10000) / 10000));
@@ -103,17 +123,18 @@ export default function PdaReceive() {
     setTimeout(() => scanRef.current?.focus(), 30);
   };
 
-  const loadPo = async (key: string) => {
+  const loadPo = async (key: string, restoreCart?: Batch[]) => {
     setLoading(true);
     try {
       const ctx = await get('/wms/receive-context', { po: key }, true);
       setPo(ctx.po);
       setLines((ctx.lines as Rec[]).map((l) => ({ ...l, key: `po${l.po_line_id}` }) as Line));
-      setCart([]);
+      setCart(restoreCart ?? []);
       setDone(null);
       resetItem();
       const open = (ctx.lines as Rec[]).filter((l) => l.remaining > 0);
-      show('ok', <>采购订单 <b>{ctx.po.no}</b>（{ctx.po.supplier_name}）：{open.length} 行待收。请扫物料或料盘标签</>);
+      if (restoreCart?.length) show('ok', <>已恢复 <b>{ctx.po.no}</b> 未提交的 {restoreCart.length} 批，核对后点“提交收货”</>);
+      else show('ok', <>采购订单 <b>{ctx.po.no}</b>（{ctx.po.supplier_name}）：{open.length} 行待收。请扫物料或料盘标签</>);
       const next = new URLSearchParams(sp);
       next.set('po', ctx.po.no);
       setSp(next, { replace: true });
@@ -122,6 +143,26 @@ export default function PdaReceive() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const doRestore = async () => {
+    const d = restore?.data;
+    setRestore(null);
+    if (!d) return;
+    setMode(d.mode);
+    setDn(d.dn || '');
+    if (d.mode === 'PO' && d.po_no) await loadPo(d.po_no, d.cart);
+    else {
+      setCustomer(d.customer ?? null);
+      setCart(d.cart);
+      show('ok', <>已恢复未提交的客供料收货 {d.cart.length} 批（{d.customer?.name}），核对后点“提交收货”</>);
+    }
+  };
+  const dropRestore = async () => {
+    if (!(await confirmEnter('丢弃未提交的收货？', `将丢弃暂存的 ${restore?.data.cart.length ?? 0} 批（未生成入库单，不影响库存）。`, '丢弃', true, 'cancel'))) return;
+    clearDraft('receive', user?.username);
+    setRestore(null);
+    setTimeout(() => scanRef.current?.focus(), 30);
   };
 
   /** 选中某行开始录入一个批次 */
@@ -155,6 +196,7 @@ export default function PdaReceive() {
 
   // ---------- 扫码 ----------
   const onScanTop = async (code: string, parsed: ScanResult) => {
+    if (restore) return show('warn', '有未提交的收货：请先点“恢复”或“丢弃”');
     if (mode === 'PO' && !po) return loadPo(code);
     if (mode === 'CS' && !customer) {
       // 客供料：先扫/输入客户编码
@@ -208,16 +250,25 @@ export default function PdaReceive() {
   };
   const enterMfg = () => {
     const d = parseDateText(mfg);
-    if (d === undefined) return show('err', `生产日期“${mfg}”看不懂，请按 261020 或 2026-10-20 输入；不知道可留空`);
+    if (d === undefined) {
+      show('err', `生产日期“${mfg}”看不懂，请按 261020 或 2026-10-20 输入；不知道可留空`);
+      return focusLater(mfgRef, true); // 全选原内容，下一枪直接覆盖
+    }
     setMfg(d ?? '');
     go('qty');
   };
   const enterQty = () => {
     const n = numText(qty);
-    if (n === null || !(n > 0)) return show('err', '请输入本批数量（大于 0）');
+    if (n === null || !(n > 0)) {
+      show('err', '请输入本批数量（大于 0）');
+      return focusLater(qtyRef, true);
+    }
     if (cur?.max_qty !== undefined) {
       const room = Math.round((cur.max_qty - inCart(cur)) * 10000) / 10000;
-      if (n > room + 1e-9) return show('err', `超收：${cur.material_code} 订单未收 ${fmtQty(left(cur))}，本批 ${fmtQty(n)}（最多允许超收 5%）`);
+      if (n > room + 1e-9) {
+        show('err', `超收：${cur.material_code} 订单未收 ${fmtQty(left(cur))}，本批 ${fmtQty(n)}（最多允许超收 5%）`);
+        return focusLater(qtyRef, true);
+      }
     }
     go('loc');
   };
@@ -230,9 +281,10 @@ export default function PdaReceive() {
     try {
       const r = await checkPlace(cur.material_id, code, cur.owner_customer_id ?? null);
       if (!r.ok || !r.location) {
-        show('err', r.errors.join('；'));
-        setLoc('');
-        return focusLater(locRef);
+        // 被拒：填回建议库位并全选（回车 = 用建议库位，扫码 = 直接覆盖）
+        show('err', <>{r.errors.join('；')}{cur.suggest_location ? <>。已填回建议库位 <b>{cur.suggest_location.code}</b>，回车确认或重扫</> : ''}</>);
+        setLoc(cur.suggest_location?.code ?? '');
+        return focusLater(locRef, true);
       }
       let warned = false;
       if (r.warnings.length) {
@@ -256,11 +308,13 @@ export default function PdaReceive() {
     }
   };
 
-  const submit = async () => {
+  const submit = async (confirmAll = false) => {
     if (!cart.length) return show('err', '还没有收货明细：请先扫物料');
     setSaving(true);
     try {
       const body = {
+        // 湿敏物料放非防潮柜：录入时已逐批确认
+        confirm_placement: confirmAll || cart.some((b) => b.warned),
         delivery_note: dn.trim() || null,
         lines: cart.map((b) => ({
           ...(mode === 'PO' ? { po_line_id: b.line.po_line_id } : { material_id: b.line.material_id }),
@@ -272,9 +326,16 @@ export default function PdaReceive() {
         : await post('/receipts', { ...body, receipt_type: 'CUSTOMER_SUPPLIED', customer_id: customer!.id }, true);
       setDone(rc);
       setCart([]);
+      clearDraft('receive', user?.username);
       show('ok', <>入库单 <b>{rc.no}</b> 已生成（{rc.lines.length} 批）</>);
     } catch (e) {
-      show('err', errText(e));
+      const msg = errText(e);
+      if (msg.startsWith('【需确认】') && !confirmAll) {
+        setSaving(false);
+        if (await confirmEnter('库位确认', <div style={{ fontSize: 16 }}>{msg.replace('【需确认】', '')}</div>, '仍放入并提交')) return submit(true);
+        return show('warn', '已返回，可删除该批重新录入库位');
+      }
+      show('err', msg);
     } finally {
       setSaving(false);
     }
@@ -357,12 +418,27 @@ export default function PdaReceive() {
     <PdaPage
       title={mode === 'PO' ? '采购收货' : '客供料收货'}
       sub="扫码 = 键入 + 回车；回车自动跳下一项"
+      dirtyText={cart.length ? `还有 ${cart.length} 批未提交收货` : null}
       extra={<Segmented value={mode} onChange={(v) => { if (cart.length) return show('err', '有未提交的批次'); setMode(v as Mode); setPo(null); setCustomer(null); resetItem(); }} options={[{ value: 'PO', label: '采购' }, { value: 'CS', label: '客供' }]} />}
       footer={cart.length > 0 ? (
-        <BigButton loading={saving} icon={<InboxOutlined />} onClick={submit}>提交收货（{cart.length} 批）</BigButton>
+        <BigButton loading={saving} icon={<InboxOutlined />} onClick={() => submit()}>提交收货（{cart.length} 批）</BigButton>
       ) : undefined}
     >
       <Spin spinning={loading}>
+        {restore && (
+          <Alert type="warning" showIcon style={{ marginBottom: 8 }}
+            message={<b>有未提交的收货 {restore.data.cart.length} 批</b>}
+            description={(
+              <div>
+                <div>{restore.data.mode === 'PO' ? `采购订单 ${restore.data.po_no}` : `客供料 ${restore.data.customer?.name ?? ''}`} · 暂存于 {savedAgo(restore.saved_at)}</div>
+                <div style={{ color: '#666' }}>{restore.data.cart.map((b) => `${b.line.material_code} ${fmtQty(b.qty)}→${b.location_code}`).join('；')}</div>
+                <Space style={{ marginTop: 8 }}>
+                  <Button type="primary" size="large" onClick={doRestore}>恢复 {restore.data.cart.length} 批</Button>
+                  <Button size="large" onClick={dropRestore}>丢弃</Button>
+                </Space>
+              </div>
+            )} />
+        )}
         {header}
         <ScanInput ref={scanRef} onScan={onScanTop} placeholder={scanPlaceholder} captureGlobal={!cur} style={{ height: 52, fontSize: 18 }} />
         <FeedbackBar fb={fb} />

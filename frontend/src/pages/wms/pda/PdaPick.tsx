@@ -18,13 +18,29 @@ import { BigButton, confirmEnter, errText, FeedbackBar, focusLater, numText, Pda
 const route = (ls: Rec[]) => [...ls].sort((a, b) => String(a.location_code).localeCompare(String(b.location_code)) || String(a.material_code).localeCompare(String(b.material_code)) || a.id - b.id);
 const picked = (l: Rec) => l.picked_qty !== null && l.picked_qty !== undefined;
 
-/** 待拣领料单列表 */
+/** 待拣领料单列表；下方列出“已下达、待领料的工单”，可一键生成领料单 */
 export function PdaPickList() {
   const nav = useNavigate();
   const [rows, setRows] = useState<Rec[]>([]);
+  const [wos, setWos] = useState<Rec[]>([]);
+  const [busy, setBusy] = useState<number | null>(null);
+  const { fb, show } = useFeedback();
   useEffect(() => {
     get('/issues', { status: 'DRAFT', issue_type: 'ISSUE', page_size: 50 }).then((d) => setRows(d.items || []));
+    get('/wms/issue-candidates', undefined, true).then((d) => setWos(Array.isArray(d) ? d : [])).catch(() => setWos([]));
   }, []);
+  const generate = async (w: Rec) => {
+    setBusy(w.id);
+    try {
+      const r = await post(`/work-orders/${w.id}/issues`, {}, true);
+      if (r.shortages?.length) show('warn', `已生成 ${r.no}；缺料：${r.shortages.map((x: Rec) => `${x.material_code} 缺 ${fmtQty(x.shortage)}`).join('、')}`);
+      nav(`/wms/pda/pick/${r.id}`);
+    } catch (e) {
+      show('err', errText(e));
+    } finally {
+      setBusy(null);
+    }
+  };
   return (
     <PdaPage title="拣料" sub="选择待过账的领料单，按库位路线扫码拣料">
       <Space direction="vertical" style={{ width: '100%' }} size={8}>
@@ -39,6 +55,22 @@ export function PdaPickList() {
         })}
         {!rows.length && <Empty description="没有待拣的领料单" />}
       </Space>
+      <FeedbackBar fb={fb} />
+      {wos.length > 0 && (
+        <>
+          <div style={{ fontWeight: 600, margin: '14px 0 6px' }}>已下达、待领料的工单（{wos.length}）</div>
+          <Space direction="vertical" style={{ width: '100%' }} size={8}>
+            {wos.map((w) => (
+              <Card key={w.id} size="small" styles={{ body: { padding: 12 } }}>
+                <div style={{ fontSize: 16, fontWeight: 700 }} className="mono">{w.no}</div>
+                <div>{w.material_code} {w.material_name} · 计划 {fmtQty(w.planned_qty)}{w.planned_start ? ` · 开工 ${w.planned_start}` : ''}</div>
+                <div style={{ color: '#888', fontSize: 13 }}>未领 {w.lines} 种：{w.materials.join('、')}{w.lines > w.materials.length ? ' 等' : ''}{w.has_draft ? '（部分已在待拣单上）' : ''}</div>
+                <div style={{ marginTop: 8 }}><BigButton loading={busy === w.id} onClick={() => generate(w)}>生成领料单并拣料</BigButton></div>
+              </Card>
+            ))}
+          </Space>
+        </>
+      )}
     </PdaPage>
   );
 }
@@ -161,7 +193,8 @@ export default function PdaPick() {
   const confirmPost = async () => {
     const left = lines.filter((l) => !picked(l));
     if (!done) {
-      const ok = await confirmEnter('还没有扫码拣料', <div>直接按拣料单全部数量过账？（不核对实物）</div>, '全部过账');
+      // 默认焦点在“返回”：误触后扫码枪的回车不会把未核对的单据过账
+      const ok = await confirmEnter('还没有扫码拣料', <div>不核对实物，按拣料单全部数量过账？<br />建议先逐行扫批号核对。</div>, '不核对，全部过账', true, 'cancel');
       if (!ok) return;
     } else if (left.length) {
       const ok = await confirmEnter(`还有 ${left.length} 行未拣`, <div>部分过账：已拣 {done} 行扣库存；未拣 {left.length} 行转入新的领料单，稍后再拣。</div>, '部分过账（回车）');
@@ -187,7 +220,11 @@ export default function PdaPick() {
       sub={<>工单 {d.wo_no} · <StatusTag dict="doc_status" value={d.status} /></>}
       back="/wms/pda/pick"
       extra={<Space><Button size="large" icon={<PrinterOutlined />} onClick={() => window.open(`/wms/print/issue/${d.id}`, '_blank')} aria-label="打印拣料单" /><Button size="large" icon={<ReloadOutlined />} onClick={load} aria-label="刷新" /></Space>}
-      footer={draft ? <BigButton icon={<CheckOutlined />} onClick={confirmPost}>{done && done < lines.length ? `部分过账（已拣 ${done}/${lines.length}）` : `过账（已拣 ${done}/${lines.length}）`}</BigButton> : undefined}
+      footer={draft ? (
+        <BigButton icon={<CheckOutlined />} type={done ? 'primary' : 'default'} onClick={confirmPost}>
+          {!done ? '不核对，全部过账' : done < lines.length ? `部分过账（已拣 ${done}/${lines.length}）` : `过账（已拣 ${done}/${lines.length}）`}
+        </BigButton>
+      ) : undefined}
     >
       <Progress percent={lines.length ? Math.round((done / lines.length) * 100) : 0} format={() => `${done}/${lines.length}`} />
       {draft && <ScanInput ref={scanRef} onScan={onScan} captureGlobal placeholder="扫库位 / 批号核对" style={{ height: 52, fontSize: 18, marginTop: 6 }} />}

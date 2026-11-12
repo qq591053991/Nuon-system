@@ -61,6 +61,10 @@ function withValid(q: Record<string, any>) {
 
 const out = (row: any) => withValid(ser('Qualification', row));
 
+/** 签名台账中的单据号：姓名（工牌）+ 工序代码 */
+const docNo = (u: { full_name?: string | null; username?: string | null; badge_no?: string | null } | null | undefined, op: string) =>
+  `${u?.full_name ?? u?.username ?? ''}${u?.badge_no ? `（${u.badge_no}）` : ''} ${op}`.trim().slice(0, 64);
+
 @Controller('qualifications')
 export class QualificationController {
   constructor(private readonly db: PrismaService, private readonly esign: EsignService) {}
@@ -84,7 +88,9 @@ export class QualificationController {
       Object.assign(where, { is_active: true, level: { not: 'TRAINEE' }, certified_at: { lte: t }, AND: [{ OR: [{ expires_at: null }, { expires_at: { gte: t } }] }] });
     }
     const page = await paginate(this.db.client.qualification, 'Qualification', { where, orderBy: [{ user_id: 'asc' }, { op_code: 'asc' }, { id: 'asc' }] }, q, 50);
-    return { ...page, items: page.items.map(withValid) };
+    const creators = [...new Set(page.items.map((r: any) => r.created_by).filter(Boolean))] as string[];
+    const names = new Map((await this.db.client.user.findMany({ where: { username: { in: creators } }, select: { username: true, full_name: true } })).map((u) => [u.username, u.full_name]));
+    return { ...page, items: page.items.map((r: any) => ({ ...withValid(r), created_by_name: r.created_by ? names.get(r.created_by) ?? r.created_by : null })) };
   }
 
   /**
@@ -159,7 +165,7 @@ export class QualificationController {
       const data = this.data(b);
       await this.check(tx, { user_id: data.user_id, op_code: data.op_code, certified_at: data.certified_at, expires_at: data.expires_at ?? null });
       const row = await tx.qualification.create({ data: { level: 'QUALIFIED', ...data, created_by: user.username } as any, include: inc('Qualification') });
-      await this.esign.sign(tx, user, b.signature, '上岗资质登记', 'hr_qualification', row.id, `${(row as any).user?.username ?? ''} ${row.op_code}`.trim());
+      await this.esign.sign(tx, user, b.signature, '上岗资质登记', 'hr_qualification', row.id, docNo((row as any).user, row.op_code));
       return out(row);
     });
   }
@@ -177,7 +183,7 @@ export class QualificationController {
       delete data.user_id;
       await this.check(tx, { ...cur, ...data });
       const row = await tx.qualification.update({ where: { id }, data, include: inc('Qualification') });
-      await this.esign.sign(tx, user, b.signature, '上岗资质变更', 'hr_qualification', id, `${cur.user.username} ${row.op_code}`);
+      await this.esign.sign(tx, user, b.signature, '上岗资质变更', 'hr_qualification', id, docNo(cur.user, row.op_code));
       return out(row);
     });
   }
@@ -192,9 +198,10 @@ export class QualificationController {
       if (!cur.is_active) throw new BizError('该资质已停用/作废');
       const why = (b.reason || '').trim();
       if (!why) throw new BizError('请填写作废原因（如：选错人员、考核不合格撤销）');
-      await this.esign.sign(tx, user, { ...(b.signature as SignatureDto), reason: (b.signature?.reason || why).slice(0, 250) }, '上岗资质作废', 'hr_qualification', id, `${cur.user.username} ${cur.op_code}`);
-      const remark = [cur.remark, `作废：${why}（${user.full_name}）`].filter(Boolean).join('；').slice(0, 256);
-      return out(await tx.qualification.update({ where: { id }, data: { is_active: false, remark }, include: inc('Qualification') }));
+      await this.esign.sign(tx, user, { ...(b.signature as SignatureDto), reason: (b.signature?.reason || why).slice(0, 250) }, '上岗资质作废', 'hr_qualification', id, docNo(cur.user, cur.op_code));
+      return out(await tx.qualification.update({
+        where: { id }, data: { is_active: false, voided_by: user.full_name, voided_at: new Date(), void_reason: why.slice(0, 256) }, include: inc('Qualification'),
+      }));
     });
   }
 

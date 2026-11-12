@@ -8,6 +8,8 @@ import { MrpService } from './mrp.service';
 import { PurchaseService } from './purchase.service';
 import { PO_READ } from './purchase-extra.controller';
 import { maskMoney, SalesService } from './sales.service';
+import { PrismaService } from '../common/prisma.service';
+import { PoApproveDto, PoRejectDto } from './erp.dto';
 import { ReasonDto, SoChangeDto, SoWorkOrdersDto } from './erp.dto';
 import { userPermissions } from '../auth';
 
@@ -114,12 +116,19 @@ export class SalesOrderController {
 
 @Controller('purchase-orders')
 export class PurchaseOrderController {
-  constructor(private readonly svc: PurchaseService) {}
+  constructor(private readonly svc: PurchaseService, private readonly db: PrismaService) {}
 
   @Get()
   @Perms(...PO_READ)
   list(@Query() q: Record<string, string>) {
     return this.svc.list(q);
+  }
+
+  /** 大额审批标准（新建采购单时判断按钮显示“审批”还是“提交审批”） */
+  @Get('approval-rule')
+  @Perms(...PO_READ)
+  approvalRule(@Query('amount') amount?: string, @Query('currency') currency?: string) {
+    return this.svc.bigness(this.db.client, { total_amount: Number(amount) || 0, currency: currency || 'CNY' });
   }
 
   @Get(':id')
@@ -140,10 +149,25 @@ export class PurchaseOrderController {
     return this.svc.update(id, body);
   }
 
+  /** 审批：大额采购单（≥ PO_APPROVAL_THRESHOLD，本位币）须厂长 po_big_approve + 电子签名 */
   @Post(':id/approve')
+  @Perms('purchase', 'po_big_approve')
+  approve(@Param('id', ParseIntPipe) id: number, @Body() body: PoApproveDto, @User() user: CurrentUser) {
+    return this.svc.approve(id, user, body?.signature);
+  }
+
+  /** 采购员提交大额采购单给厂长审批（DRAFT → SUBMITTED） */
+  @Post(':id/submit')
   @Perms('purchase')
-  approve(@Param('id', ParseIntPipe) id: number, @User() user: CurrentUser) {
-    return this.svc.approve(id, user);
+  submit(@Param('id', ParseIntPipe) id: number, @User() user: CurrentUser) {
+    return this.svc.submit(id, user);
+  }
+
+  /** 厂长退回大额采购单（SUBMITTED → DRAFT，原因 + 电子签名） */
+  @Post(':id/reject')
+  @Perms('po_big_approve')
+  reject(@Param('id', ParseIntPipe) id: number, @Body() body: PoRejectDto, @User() user: CurrentUser) {
+    return this.svc.reject(id, user, body.reason, body.signature);
   }
 
   @Post(':id/cancel')
@@ -195,6 +219,13 @@ export class MrpController {
   @Perms('plan', 'purchase')
   convert(@Body() body: ConvertDto, @User() user: CurrentUser) {
     return this.svc.convert(body.suggestion_ids, user, !!body.force);
+  }
+
+  /** 客供料建议：生成客户供料通知并标记“已通知”（记录通知人、时间） */
+  @Post('suggestions/notify')
+  @Perms('plan', 'purchase')
+  notify(@Body() body: ConvertDto, @User() user: CurrentUser) {
+    return this.svc.notify(body.suggestion_ids, user);
   }
 
   @Post('suggestions/:id/ignore')

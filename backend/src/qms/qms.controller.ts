@@ -12,7 +12,7 @@ import { PrismaService, type Tx } from '../common/prisma.service';
 import { samplingPlan } from '../core/aql';
 import { EsignService, SignatureDto } from '../core/esign.service';
 import { NumberingService } from '../core/numbering.service';
-import { ncrDueDate, overdueWhere } from './qms-rules';
+import { capaDueDate, closableNcrIds, fullNames, ncrDueDate, overdueWhere } from './qms-rules';
 import { QualityService } from './quality.service';
 
 const int = (v?: string): number | undefined => {
@@ -76,6 +76,8 @@ class NcrDto {
 class DispositionDto {
   @IsString() disposition: string; // REWORK/SCRAP/USE_AS_IS/RETURN
   @IsOptional() @IsString() remark?: string | null;
+  /** 返工时要求更换零件（工位重测前必须先登记返工换件） */
+  @IsOptional() @IsBoolean() require_part_change?: boolean | null;
   @IsOptional() @ValidateNested() @Type(() => SignatureDto) signature?: SignatureDto | null;
 }
 
@@ -95,9 +97,7 @@ class NcrDueDto {
 }
 
 /** CAPA 字段（PUT 时只更新请求中出现的字段） */
-const CAPA_FIELDS = ['title', 'source', 'description', 'root_cause', 'correction', 'corrective_action', 'preventive_action', 'owner', 'due_date', 'effectiveness'] as const;
-/** CAPA 默认完成期限（天） */
-const CAPA_DUE_DAYS = 30;
+const CAPA_FIELDS = ['title', 'source', 'description', 'root_cause', 'correction', 'corrective_action', 'preventive_action', 'owner', 'owner_user_id', 'due_date', 'effectiveness'] as const;
 
 class CapaDto {
   @IsString() title: string;
@@ -109,6 +109,8 @@ class CapaDto {
   @IsOptional() @IsString() corrective_action?: string | null;
   @IsOptional() @IsString() preventive_action?: string | null;
   @IsOptional() @IsString() owner?: string | null;
+  /** 负责人账号（优先；姓名自动带出） */
+  @IsOptional() @Type(() => Number) @IsInt() owner_user_id?: number | null;
   @IsOptional() @IsString() due_date?: string | null;
   @IsOptional() @IsString() effectiveness?: string | null;
 }
@@ -201,12 +203,14 @@ export class QmsController {
     if (!ids.length) return rows;
     const srs = await tx.supplierReturn.findMany({ where: { ncr_id: { in: ids } }, orderBy: { id: 'asc' } });
     const srBy = new Map(srs.map((s) => [s.ncr_id!, s]));
+    const names = await fullNames(tx, rows.map((r) => r.created_by));
     const out = [];
     for (const r of rows) {
       const sr = srBy.get(r.id);
       const block = r.status === 'DISPOSITIONED' ? await this.svc.closeBlocker(tx, r as Ncr) : null;
       out.push({
         ...r,
+        created_by_name: r.created_by ? names.get(r.created_by) ?? r.created_by : null,
         close_block: block,
         supplier_return_id: sr?.id ?? null, supplier_return_no: sr?.no ?? null, supplier_return_status: sr?.status ?? null,
       });
@@ -228,6 +232,8 @@ export class QmsController {
     const created = dateRange(q.date_from, q.date_to);
     if (created) AND.push({ created_at: created });
     if (yes(q.overdue)) AND.push(overdueWhere());
+    // 可关闭：处置已执行完毕、仍未关闭（QA 待办“可关闭的 NCR”）
+    if (yes(q.closable)) AND.push({ id: { in: await closableNcrIds(this.db.client) } });
     const page = await paginate(this.db.client.ncr, 'Ncr', { where: AND.length ? { AND } : {} }, q);
     return { ...page, items: await this.enrichNcrs(this.db.client, page.items) };
   }
@@ -287,7 +293,7 @@ export class QmsController {
   disposition(@Param('id', ParseIntPipe) id: number, @Body() b: DispositionDto, @User() user: CurrentUser) {
     return this.db.tx(async (tx) => {
       if (!(await tx.ncr.findUnique({ where: { id } }))) throw new NotFound('NCR');
-      return ser('Ncr', await this.svc.dispositionNcr(tx, user, id, b.disposition, b.remark, b.signature));
+      return ser('Ncr', await this.svc.dispositionNcr(tx, user, id, b.disposition, b.remark, b.signature, { require_part_change: b.require_part_change }));
     });
   }
 
@@ -323,15 +329,37 @@ export class QmsController {
   }
 
   // ---------- CAPA ----------
+  /** 负责人：按账号带出姓名（owner_user_id 优先；只传姓名时按姓名匹配账号） */
+  private async ownerOf(tx: Tx, b: { owner?: string | null; owner_user_id?: number | null }) {
+    if (b.owner_user_id) {
+      const u = await tx.user.findUnique({ where: { id: b.owner_user_id } });
+      if (!u) throw new NotFound('负责人账号');
+      return { owner_user_id: u.id, owner: u.full_name };
+    }
+    if (b.owner_user_id === null && !b.owner) return { owner_user_id: null, owner: null };
+    const name = (b.owner ?? '').trim();
+    if (!name) return { owner_user_id: null, owner: null };
+    const u = await tx.user.findFirst({ where: { full_name: name, is_active: true } });
+    return { owner_user_id: u?.id ?? null, owner: name };
+  }
+
+  /** CAPA 列表/详情补充创建人姓名 */
+  private async enrichCapas(tx: Tx, rows: Record<string, any>[]) {
+    const names = await fullNames(tx, rows.map((r) => r.created_by));
+    return rows.map((r) => ({ ...r, created_by_name: r.created_by ? names.get(r.created_by) ?? r.created_by : null }));
+  }
+
   @Get('capas')
-  listCapas(@Query() q: Record<string, string>) {
+  async listCapas(@Query() q: Record<string, string>) {
     const where: any = {};
     if (q.q) where.OR = [{ no: like(q.q) }, { title: like(q.q) }, { owner: like(q.q) }];
     if (q.status) where.status = { in: q.status.split(',') };
     if (q.source) where.source = { in: q.source.split(',') };
     if (q.owner) where.owner = q.owner;
+    if (int(q.owner_user_id)) where.owner_user_id = int(q.owner_user_id);
     if (yes(q.overdue)) Object.assign(where, { status: { not: 'CLOSED' }, due_date: { lt: today() } });
-    return paginate(this.db.client.capa, 'Capa', { where }, q);
+    const page = await paginate(this.db.client.capa, 'Capa', { where }, q);
+    return { ...page, items: await this.enrichCapas(this.db.client, page.items) };
   }
 
   /** 可选负责人（启用的账号） */
@@ -348,7 +376,8 @@ export class QmsController {
     const c = await this.db.client.capa.findUnique({ where: { id } });
     if (!c) throw new NotFound('CAPA');
     const ncrs = await this.db.client.ncr.findMany({ where: { capa_id: id }, orderBy: { id: 'asc' }, include: inc('Ncr') });
-    return { ...ser('Capa', c), ncrs: serList('Ncr', ncrs) };
+    const [row] = await this.enrichCapas(this.db.client, [ser('Capa', c)]);
+    return { ...row, ncrs: serList('Ncr', ncrs) };
   }
 
   @Post('capas')
@@ -360,7 +389,7 @@ export class QmsController {
           no: await this.numbering.nextNo(tx, 'CAPA'), status: 'OPEN', created_by: user.username,
           title: b.title, source: b.source ?? 'NCR', description: b.description ?? null, root_cause: b.root_cause ?? null,
           correction: b.correction ?? null, corrective_action: b.corrective_action ?? null, preventive_action: b.preventive_action ?? null,
-          owner: b.owner ?? null, due_date: b.due_date ? dateOnly(b.due_date) : addDays(today(), CAPA_DUE_DAYS), effectiveness: b.effectiveness ?? null,
+          ...(await this.ownerOf(tx, b)), due_date: b.due_date ? dateOnly(b.due_date) : capaDueDate(b.source ?? 'NCR'), effectiveness: b.effectiveness ?? null,
         },
       });
       if (b.ncr_id && (await tx.ncr.findUnique({ where: { id: b.ncr_id } }))) {
@@ -378,7 +407,9 @@ export class QmsController {
       if (!c) throw new NotFound('CAPA');
       if (c.status === 'CLOSED') throw new BizError('CAPA 已关闭');
       const data: Record<string, any> = {};
+      if (b.owner_user_id !== undefined || b.owner !== undefined) Object.assign(data, await this.ownerOf(tx, b));
       for (const f of CAPA_FIELDS) {
+        if (f === 'owner' || f === 'owner_user_id') continue;
         const v = (b as any)[f];
         if (v === undefined) continue; // 只更新请求中出现的字段
         if (f === 'title' || f === 'source') {

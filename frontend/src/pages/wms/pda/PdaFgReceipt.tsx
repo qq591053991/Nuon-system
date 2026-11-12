@@ -3,15 +3,20 @@
  * 不逐台扫码时可“全部入库”（按完工数量）。
  */
 import { Alert, Button, Card, Empty, Space, Tag } from 'antd';
-import { DeleteOutlined, InboxOutlined } from '@ant-design/icons';
+import { CheckCircleFilled, DeleteOutlined, InboxOutlined } from '@ant-design/icons';
 import { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import type { InputRef } from 'antd';
 import { get, post, type Rec } from '../../../api/http';
 import ScanInput, { type ScanInputHandle } from '../../../components/ScanInput';
+import { useAuth } from '../../../auth';
+import { dictLabel } from '../../../utils/dict';
 import { fmtQty } from '../../../utils/format';
 import type { ScanResult } from '../../../utils/scan';
-import { BigButton, checkPlace, confirmEnter, errText, FeedbackBar, PdaField, PdaPage, useFeedback } from './kit';
+import { BigButton, checkPlace, clearDraft, confirmEnter, errText, FeedbackBar, loadDraft, PdaField, PdaPage, saveDraft, useFeedback, useLeaveGuard } from './kit';
+
+/** 本机暂存的已扫未入库 SN */
+interface FgDraft { wo_id: number; wo_no: string; serials: string[] }
 
 export default function PdaFgReceipt() {
   const [wo, setWo] = useState<Rec | null>(null);
@@ -23,24 +28,49 @@ export default function PdaFgReceipt() {
   const scanRef = useRef<ScanInputHandle>(null);
   const locRef = useRef<InputRef>(null);
   const [sp] = useSearchParams();
+  const { user } = useAuth();
+  /** 最近一次入库结果：一直显示到下一次入库（不被“待入库 N 台”提示覆盖） */
+  const asked = useRef(false);
+  const [lastDone, setLastDone] = useState<{ no: string; qty: number; loc: string; status: string } | null>(null);
 
-  // 从工单详情跳转过来（?wo=<工单id>）时直接带出工单
+  // 从工单详情跳转过来（?wo=<工单id>）时直接带出工单；否则检查本机是否有未入库的扫码
   useEffect(() => {
     const id = sp.get('wo');
-    if (id) get(`/work-orders/${id}`).then((w) => loadWo(w)).catch((e) => show('err', errText(e)));
+    if (id) {
+      get(`/work-orders/${id}`).then((w) => loadWo(w)).catch((e) => show('err', errText(e)));
+      return;
+    }
+    const d = loadDraft<FgDraft>('fg', user?.username);
+    if (!d?.data?.serials?.length || asked.current) return;
+    asked.current = true; // 只询问一次（开发模式下副作用会执行两次）
+    confirmEnter('恢复未入库的扫码？', `工单 ${d.data.wo_no} 已扫 ${d.data.serials.length} 台尚未入库。恢复后可继续扫或直接入库。`, `恢复 ${d.data.serials.length} 台`).then(async (ok) => {
+      if (!ok) return clearDraft('fg', user?.username);
+      const w = await get(`/work-orders/${d.data.wo_id}`, undefined, true).catch(() => null);
+      if (w) await loadWo(w, undefined, d.data.serials);
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const loadWo = async (w: Rec, firstSn?: string) => {
+  // 已扫未入库的 SN 暂存本机（刷新、锁屏后可恢复）
+  useEffect(() => {
+    if (wo && scanned.length) saveDraft<FgDraft>('fg', user?.username, { wo_id: wo.id, wo_no: wo.no, serials: scanned });
+    else if (wo) clearDraft('fg', user?.username);
+  }, [wo, scanned, user?.username]);
+  useLeaveGuard(scanned.length > 0);
+
+  const loadWo = async (w: Rec, firstSn?: string, restoreSns?: string[], quiet = false) => {
     if (!['IN_PROGRESS', 'COMPLETED'].includes(w.status)) return show('err', `工单 ${w.no} 状态不允许完工入库（需生产中或已完工）`);
     const sns: Rec[] = w.serial_control ? await get(`/work-orders/${w.id}/serials`, { status: 'COMPLETED' }, true) : [];
     const sug = await get('/wms/suggest-location', { material_id: w.material_id }, true).catch(() => null);
     setWo(w);
     setReady(sns);
-    setScanned(firstSn && sns.some((s) => s.sn === firstSn) ? [firstSn] : []);
+    const keep = (restoreSns ?? []).filter((x) => sns.some((s) => s.sn === x));
+    setScanned(keep.length ? keep : firstSn && sns.some((s) => s.sn === firstSn) ? [firstSn] : []);
     setLoc(sug?.code ?? '');
     const avail = w.serial_control ? sns.length : Math.max(0, (w.completed_qty || 0) - (w.received_qty || 0));
-    show(avail ? 'ok' : 'warn', <>工单 <b>{w.no}</b> {w.material_code}：完工待入库 <b>{fmtQty(avail)}</b>{w.serial_control ? ' 台，请逐台扫 SN（可选）' : ''}</>);
+    if (restoreSns?.length) show('ok', <>已恢复工单 <b>{w.no}</b> 已扫 {keep.length} 台{restoreSns.length > keep.length ? `（${restoreSns.length - keep.length} 台已不在待入库清单，已移除）` : ''}</>);
+    else if (quiet) clear();
+    else show(avail ? 'ok' : 'warn', <>工单 <b>{w.no}</b> {w.material_code}：完工待入库 <b>{fmtQty(avail)}</b>{w.serial_control ? ' 台，请逐台扫 SN（可选）' : ''}</>);
   };
 
   const onScan = async (code: string, p: ScanResult) => {
@@ -65,7 +95,7 @@ export default function PdaFgReceipt() {
       const s = await get('/wms/scan', { code: sn }, true).catch(() => null);
       if (s?.kind === 'SN') {
         const st = s.sn.status;
-        return show('err', st === 'IN_STOCK' ? `${sn} 已入库，请放到成品区` : st === 'COMPLETED' ? `${sn} 不是工单 ${wo.no} 的产品` : `${sn} 尚未完成全部工序（当前：${st}），不能入库`);
+        return show('err', st === 'IN_STOCK' ? `${sn} 已入库，请放到成品区` : st === 'COMPLETED' ? `${sn} 不是工单 ${wo.no} 的产品` : `${sn} 尚未完成全部工序（当前：${dictLabel('sn_status', st)}），不能入库`);
       }
       return show('err', `${sn} 不是本工单完工待入库的序列号`);
     }
@@ -90,9 +120,12 @@ export default function PdaFgReceipt() {
       const rc = all
         ? await post(`/work-orders/${wo.id}/fg-receipt`, { location_id: r.location.id }, true)
         : await post('/wms/fg-receipt', { wo_id: wo.id, location_id: r.location.id, serials: scanned }, true);
-      show('ok', <>入库单 <b>{rc.no}</b>：{fmtQty(rc.lines?.[0]?.qty)} 台入 <b>{r.location.code}</b>（{rc.lines?.[0]?.status === 'QUARANTINE' ? '待放行' : '合格'}）</>);
+      const result = { no: rc.no, qty: rc.lines?.[0]?.qty ?? 0, loc: r.location.code, status: rc.lines?.[0]?.status === 'QUARANTINE' ? '待放行' : '合格' };
+      setLastDone(result);
+      clearDraft('fg', user?.username);
       const w = await get(`/work-orders/${wo.id}`);
-      await loadWo(w);
+      await loadWo(w, undefined, undefined, true); // 不覆盖入库结果
+      show('ok', <>入库单 <b>{result.no}</b>：{fmtQty(result.qty)} 台入 <b>{result.loc}</b>（{result.status}）</>);
     } catch (e) {
       show('err', errText(e));
     } finally {
@@ -110,6 +143,11 @@ export default function PdaFgReceipt() {
         </>
       ) : undefined}
     >
+      {lastDone && (
+        <div role="status" className="pda-last-done" style={{ background: '#f6ffed', border: '2px solid #52c41a', borderRadius: 8, padding: '10px 12px', marginBottom: 8, fontSize: 16, color: '#237804' }}>
+          <CheckCircleFilled /> 已入库：入库单 <b>{lastDone.no}</b>，{fmtQty(lastDone.qty)} 台 → 库位 <b style={{ fontSize: 18 }}>{lastDone.loc}</b>（{lastDone.status}）
+        </div>
+      )}
       <ScanInput ref={scanRef} onScan={onScan} captureGlobal placeholder={wo ? '逐台扫 SN 核对' : '扫工单号 / SN'} style={{ height: 52, fontSize: 18 }} />
       <FeedbackBar fb={fb} />
       {wo && (

@@ -29,7 +29,8 @@ function regDates(b: Record<string, any>): ComplaintInput {
 }
 
 class ComplaintCreateDto {
-  @Type(() => Number) @IsInt() customer_id: number;
+  /** 不填时按序列号带出发货客户 */
+  @IsOptional() @Type(() => Number) @IsInt() customer_id?: number;
   @IsOptional() @IsString() received_date?: string | null;
   @IsOptional() @Type(() => Number) @IsInt() material_id?: number | null;
   @IsOptional() @IsString() sn?: string | null;
@@ -120,6 +121,12 @@ export class ComplaintController {
       this.db.client.complaint.findMany({ where, orderBy: sortArg('Complaint', q, { id: 'desc' }), skip, take }),
     ]);
     return { items: await this.svc.enrich(this.db.client, rows), total, page, page_size };
+  }
+
+  /** 按序列号带出产品、批号、发货客户与国家（查无返回 {found:false}） */
+  @Get('lookup')
+  lookup(@Query('sn') sn: string) {
+    return this.svc.lookupSn(this.db.client, sn);
   }
 
   @Get(':id')

@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type Reac
 import { Link, useNavigate } from 'react-router-dom';
 import { get, type Rec } from '../../api/http';
 import { MaterialSelect } from '../../components/RemoteSelect';
+import StatusTag from '../../components/StatusTag';
 import { fmtDate, fmtMoney, fmtQty } from '../../utils/format';
 
 export const CURRENCY_OPTIONS = ['CNY', 'USD', 'EUR'].map((v) => ({ value: v, label: v }));
@@ -148,11 +149,13 @@ interface LinesEditorProps {
   /** 采购订单：物料设置了采购单位时，允许按采购单位录入数量与单价 */
   purchaseUnit?: boolean;
   /** 单价参考（如该客户上次成交价）：选物料时没填单价则自动带入，单价下方显示提示，可点击带入 */
-  priceHint?: (materialId: number) => { price: number; text: string } | undefined;
+  priceHint?: (materialId: number) => { price: number; text: string; tip?: ReactNode } | undefined;
   /** 行级锁定（订单变更：已排产/已发货的行不能换物料、不能删、数量不得少于已发货） */
   lockedRow?: (r: LineRow) => LineLock | null;
   /** 物料下拉无结果时的提示 */
   materialEmpty?: ReactNode;
+  /** 扫码/回车查无时提示里的对象名（默认“物料”） */
+  materialNoun?: string;
 }
 
 export interface LineLock {
@@ -224,7 +227,7 @@ const NAV_LAST = 4;
 
 export function OrderLinesEditor({
   value, onChange, dateField, dateLabel, currency, materialParams, materialLabel = '物料', defaultDate, defaultPrice, purchaseUnit, priceHint,
-  lockedRow, materialEmpty,
+  lockedRow, materialEmpty, materialNoun,
 }: LinesEditorProps) {
   const wrap = useRef<HTMLDivElement>(null);
   const latest = useRef(value);
@@ -251,6 +254,19 @@ export function OrderLinesEditor({
     const [key, col] = pending.split('|');
     if (focusCell(key, Number(col))) setPending(null);
   }, [pending, value, focusCell]);
+
+  // 表头日期变化：行日期为空或仍等于旧表头日期的行跟着改（行单独改过日期的不动）
+  const prevDefault = useRef(defaultDate ?? null);
+  useEffect(() => {
+    const prev = prevDefault.current;
+    prevDefault.current = defaultDate ?? null;
+    if ((defaultDate ?? null) === prev || !defaultDate) return;
+    const rows = latest.current;
+    if (rows.some((r) => !r[dateField] || r[dateField] === prev)) {
+      onChange(rows.map((r) => (!r[dateField] || r[dateField] === prev ? { ...r, [dateField]: defaultDate } : r)));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [defaultDate]);
 
   /** 回车跳到下一个输入框；最后一行的备注回车 = 新增一行并聚焦其物料（不会落到删除按钮上） */
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
@@ -333,6 +349,7 @@ export function OrderLinesEditor({
             params={materialParams}
             value={r.material_id}
             notFoundContent={materialEmpty}
+            {...(materialNoun ? { noun: materialNoun } : {})}
             onPick={(m) => {
               replace(r._key, (old) => {
                 const hint = m ? priceHint?.(m.id) : undefined;
@@ -428,7 +445,7 @@ export function OrderLinesEditor({
             <div>
               <InputNumber min={0} style={{ width: 130 }} value={r.unit_price} onChange={(v) => patch(r._key, { unit_price: v })} />
               {hint && (
-                <Tooltip title="该客户上次成交价（点击带入）">
+                <Tooltip title={hint.tip ?? '该客户上次成交价（点击带入）'}>
                   <Typography.Link style={{ display: 'block', fontSize: 12 }} tabIndex={-1} onClick={() => patch(r._key, { unit_price: hint.price })}>
                     {hint.text}
                   </Typography.Link>
@@ -667,4 +684,27 @@ export function DocLink({ kind, id, no }: { kind: 'po' | 'wo' | 'so'; id?: numbe
   if (!id) return <DocNoLink kind={kind} no={no} />;
   const path = kind === 'po' ? '/purchase/orders' : kind === 'wo' ? '/mes/work-orders' : '/sales/orders';
   return <Link to={`${path}/${id}`} className="mono">{no}</Link>;
+}
+
+/** 销售订单状态：生产中但工单都还是计划状态时显示“已排产”（工单未下达），避免过早显示“生产中” */
+export function SoStatusTag({ so }: { so: Rec }) {
+  if (so.status === 'IN_PRODUCTION' && so.production_state === 'SCHEDULED') {
+    return (
+      <Tooltip title="已生成工单，工单尚未下达开工">
+        <Tag color="cyan">已排产</Tag>
+      </Tooltip>
+    );
+  }
+  return <StatusTag dict="so_status" value={so.status} />;
+}
+
+/** 订单交期：多个行交期时显示“最早 12-05（另有 1 个交期）” */
+export function SoDelivery({ so, overdue }: { so: Rec; overdue?: boolean }) {
+  const d = so.earliest_delivery ?? so.delivery_date;
+  return (
+    <span>
+      <DueDate value={d} overdue={overdue} hint="最早的交期已过，订单尚未发完" />
+      {so.delivery_count > 1 && <Typography.Text type="secondary" style={{ fontSize: 12 }}>（最早，另有 {so.delivery_count - 1} 个交期）</Typography.Text>}
+    </span>
+  );
 }

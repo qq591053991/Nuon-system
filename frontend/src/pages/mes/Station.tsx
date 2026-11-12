@@ -6,8 +6,12 @@
  *   数字框逐键过滤（一个小数点、小数位、合理范围），错误贴在框下且不前进；
  * - C-F03 无测试项工序：扫码后回车（或再扫一次）确认，或由班组长设为“扫码即过站”；
  * - C-F04 已过站 / 工序不符：整块红色大字说明谁何时测过、应送往哪道工序，不显示录入表；
- * - C-F05 焦点不在输入框时扫码枪输入自动转给扫码框（ScanInput captureGlobal）；测量框里出现字母（扫进条码）自动转回扫码框；
- * - C-F06/F07/F08 全屏工位、退出与设置需终端账号密码、本工位工序由班组长设定后锁定、设备按适用工序校验；
+ * - C-F05 / C-N2 焦点不在输入框时：含字母的输入转给扫码框，纯数字转给第一个未录的测量框（本页自己的全局键盘监听，读取最新状态）；
+ *   测量框里出现字母（扫进条码）自动转回扫码框；任何弹窗关闭后焦点回到第一个未录的测量框；
+ * - C-N1 “再扫一次本序列号 = 合格提交”在任何焦点下生效；“上一台未提交”全屏警告 + 提示音；
+ * - C-N3 设定 / 设置 / 退出由班组长刷本人工牌 + PIN 授权（须 mes_lead）；
+ * - N6 本人刷卡恢复后 1.5 秒内的纯数字（习惯性按的 PIN）被吞掉并大字提示；
+ * - C-F06/F07/F08 全屏工位、退出与设置需班组长刷工牌 + PIN 授权、本工位工序由班组长设定后锁定、设备按适用工序校验；
  * - C-F12–F18 PIN、空闲锁定保留数据、解锁校验资质、关键件即时校验、不良代码、返工换件引导、整屏闪色 + 提示音。
  */
 import { Alert, App, Button, Empty, Modal, Spin, Tag, Timeline } from 'antd';
@@ -34,7 +38,7 @@ import {
 } from './stationApi';
 
 /** 作业指导附件：图片 / PDF 在工位上直接打开（用操作员令牌下载） */
-function InstrFiles({ files, token }: { files: Rec[]; token: string }) {
+function InstrFiles({ files, token, onClosed }: { files: Rec[]; token: string; onClosed?: () => void }) {
   const [view, setView] = useState<{ url: string; name: string; type: string } | null>(null);
   const openFile = async (f: Rec) => {
     try {
@@ -53,7 +57,7 @@ function InstrFiles({ files, token }: { files: Rec[]; token: string }) {
           </Button>
         ))}
       </div>
-      <Modal open={!!view} title={view?.name} width="90vw" footer={null} centered destroyOnHidden
+      <Modal open={!!view} title={view?.name} width="90vw" footer={null} centered destroyOnHidden afterClose={onClosed}
         onCancel={() => {
           if (view) URL.revokeObjectURL(view.url);
           setView(null);
@@ -154,20 +158,31 @@ const STATION_CSS = `
 .station-defect .k { display: inline-block; width: 28px; height: 28px; line-height: 28px; text-align: center; border-radius: 50%; background: #f0f0f5; margin-right: 8px; font-size: 16px; }
 .station-defect.on { background: #cf1322; border-color: #cf1322; color: #fff; }
 .station-defect.on .k { background: rgba(255,255,255,.3); }
-.station-rework { border: 2px solid #fa8c16 !important; border-radius: 10px !important; }
-.rw-cands { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; margin: 4px 0 8px; }
-.rw-cand { min-height: 48px; text-align: left; padding: 3px 8px; border-radius: 8px; border: 2px solid #ffd591; background: #fff; cursor: pointer; font-size: 14px; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.station-rework .ant-card-body { padding: 8px 12px; }
-.station-rework .ant-alert { padding: 6px 12px; }
+.station-rework { background: #fff; border: 2px solid #fa8c16; border-radius: 10px; padding: 8px 12px 0; }
+.rw-head { font-size: 16px; }
+.rw-qa { font-size: 16px; margin-top: 4px; padding: 4px 10px; border-radius: 6px; background: #fffbe6; border: 1px solid #ffe58f; }
+.rw-qa.must { background: #fff1f0; border-color: #ffa39e; color: #a8071a; }
+.rw-done { font-size: 14px; margin-top: 6px; }
+.rw-step { display: flex; align-items: center; gap: 8px; margin: 6px 0 4px; font-size: 15px; }
+.rw-cands { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.rw-cand { min-height: 46px; text-align: left; padding: 3px 8px; border-radius: 8px; border: 2px solid #ffd591; background: #fff; cursor: pointer; font-size: 14px; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rw-cand.sug { border-color: #fa541c; }
 .rw-cand.on { background: #fa8c16; border-color: #fa8c16; color: #fff; }
-.rw-cand .rw-sub { font-size: 12px; opacity: .8; }
-.rw-list { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
-.rw-row { display: flex; align-items: center; gap: 10px; font-size: 16px; background: #fafafc; border-radius: 8px; padding: 2px 4px 2px 10px; }
-.rw-row .rw-del { margin-left: auto; width: 48px; height: 48px; }
+.rw-cand .rw-sub { font-size: 12px; opacity: .8; overflow: hidden; text-overflow: ellipsis; }
+.rw-list { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+.rw-row { display: flex; align-items: center; gap: 8px; font-size: 15px; background: #fafafc; border-radius: 8px; padding: 2px 4px 2px 8px; }
+.rw-row .rw-mat { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rw-row .rw-del { width: 44px; height: 44px; }
+.rw-bar { position: sticky; bottom: 0; display: flex; gap: 12px; padding: 8px 0 10px; margin-top: 8px; background: #fff; border-top: 1px solid #f0f0f0; z-index: 2; }
 .station-idle { position: fixed; inset: 0; z-index: 1400; background: rgba(20,17,43,.78); color: #fff; display: flex; align-items: center; justify-content: center; text-align: center; }
 .station-idle-num { font-size: 120px; font-weight: 900; line-height: 1; margin-top: 8px; }
 .station-idle-title { font-size: 34px; font-weight: 800; }
 .station-idle-sub { font-size: 18px; opacity: .85; margin-top: 10px; max-width: 640px; }
+.st-notice { position: fixed; inset: 0; z-index: 1300; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; pointer-events: none; padding: 24px; }
+.st-notice.warn { background: rgba(212,107,8,.9); color: #fff; }
+.st-notice.ok { background: rgba(56,158,13,.88); color: #fff; }
+.st-notice .t { font-size: 40px; font-weight: 900; line-height: 1.3; }
+.st-notice .s { font-size: 22px; margin-top: 12px; opacity: .95; }
 .st-setup { position: fixed; inset: 0; z-index: 950; display: flex; align-items: center; justify-content: center; background: radial-gradient(circle at 50% 30%, #2b2357 0%, #14112b 70%); color: #fff; text-align: center; }
 `;
 
@@ -209,6 +224,12 @@ export default function Station() {
   const keyLot = useRef('');
   const fields = useRef(new Map<string, FieldApi>());
   const busy = useRef({ scan: false, submit: false });
+  /** 本人刷卡恢复的时间（随后 1.5 秒内的纯数字视为习惯性按的 PIN，吞掉） */
+  const resumedAt = useRef(0);
+  /** 全屏提示（“上一台未提交”警告 / 已恢复作业） */
+  const [notice, setNotice] = useState<{ kind: 'warn' | 'ok'; title: string; sub?: string } | null>(null);
+  /** 最新的处理函数（全局键盘监听 / 定时器里调用，保证读到最新状态，C-N1） */
+  const latest = useRef<{ runScan: (c: string) => void; focusStart: () => void }>({ runScan: () => undefined, focusStart: () => undefined });
 
   const locked = !session || !!session.locked;
   const token = session?.token ?? '';
@@ -280,7 +301,7 @@ export default function Station() {
 
   /** 当前屏幕上未提交的内容（锁屏提示 / 切换产品提示） */
   const pending = (): string | null => {
-    if (!scan) return null;
+    if (!scan || (scan.station && !scan.station.ok) || !scan.next_operation) return null;
     const n = Object.values(values.current).filter((v) => v !== null && v !== undefined).length + (keyLot.current ? 1 : 0);
     return n ? `${scan.sn}（已录 ${n} 项）` : scan.sn;
   };
@@ -289,6 +310,12 @@ export default function Station() {
     const st = scan?.station;
     if (!scan || (st && !st.ok)) {
       scanRef.current?.focus();
+      return;
+    }
+    // 返工中：焦点到②“扫描新零件批号”（N5）
+    const rw = document.querySelector<HTMLInputElement>('[data-rework-lot]');
+    if (rw) {
+      rw.focus();
       return;
     }
     const all = Array.from(formRef.current?.querySelectorAll<HTMLInputElement>('[data-sfield]') ?? []);
@@ -337,7 +364,10 @@ export default function Station() {
     saveSession(n);
     setSession(n);
     setLockReason(null);
-    message.success(`${session.user.full_name}，欢迎回来${scan ? '：已保留的数据可继续录入' : ''}`);
+    // 习惯性接着按的 PIN 数字在 1.5 秒内吞掉，并大字提示（N6）
+    resumedAt.current = Date.now();
+    setNotice({ kind: 'ok', title: `${session.user.full_name}，已恢复作业`, sub: `无需输入 PIN${scan ? '，已保留的数据可继续录入' : ''}` });
+    setTimeout(() => setNotice((x) => (x?.kind === 'ok' ? null : x)), 1800);
     setTimeout(focusStart, 150);
     return null;
   };
@@ -471,7 +501,7 @@ export default function Station() {
           </div>
         ),
         onOk: () => doSubmit('PASS'),
-        onCancel: () => setTimeout(() => fields.current.get(out[0].code!)?.focus(), 50),
+        onCancel: () => setTimeout(() => fields.current.get(out[0].code!)?.focus(), 400),
       });
       return;
     }
@@ -503,8 +533,15 @@ export default function Station() {
       return;
     }
     // 同一序列号再扫一次 = 确认过站（无录入项的工序）
-    if (scan && scan.sn === code && noInput(scan) && scan.station?.ok !== false) {
+    if (scan && scan.sn.toUpperCase() === code.toUpperCase() && noInput(scan) && scan.station?.ok !== false) {
       submitPass();
+      return;
+    }
+    // 纯数字的短串不是序列号（多半是测量值打到了扫码框）：不清掉当前产品（C-N2）
+    if (!/[A-Za-z(\]]/.test(code) && code.length < 13) {
+      setBanner({ kind: 'warn', title: `“${code}” 不是序列号（纯数字），已忽略`, body: scan ? '测量值请录在测量框里；当前产品保持不变' : '请扫描产品序列号' });
+      feedback('warn', sound);
+      setTimeout(() => latest.current.focusStart(), 0);
       return;
     }
     if (!configured) {
@@ -525,11 +562,18 @@ export default function Station() {
       setEquipmentId(eqId);
       setScan(d);
       setFormKey((k) => k + 1);
+      const switched = !!prev && prev !== d.sn && !prev.startsWith(`${d.sn}（`);
+      if (switched) {
+        // 上一台还没提交（未过站）：全屏警告 + 提示音（C-N1），并留一行黄条
+        setNotice({ kind: 'warn', title: `上一台 ${prev} 还没有提交（未过站）`, sub: `已切换到 ${d.sn}。如上一台已完成本工序，请重新扫码提交` });
+        setTimeout(() => setNotice((x) => (x?.kind === 'warn' ? null : x)), 2600);
+      }
       if (d.station && !d.station.ok) {
-        setBanner(null);
+        setBanner(switched ? { kind: 'warn', title: `上一台 ${prev} 未提交` } : null);
         feedback('error', sound);
       } else {
-        setBanner(prev && prev !== d.sn && !prev.startsWith(`${d.sn}（`) ? { kind: 'warn', title: `上一台 ${prev} 未提交，已切换到 ${d.sn}` } : null);
+        setBanner(switched ? { kind: 'warn', title: `上一台 ${prev} 未提交，已切换到 ${d.sn}` } : null);
+        if (switched) feedback('error', sound);
         if (cfg.pass_mode === 'scan' && noInput(d) && !d.rework && canMes && (!d.next_operation.requires_equipment || eqId)) {
           await doSubmit('PASS', undefined, d, eqId);
         }
@@ -555,6 +599,36 @@ export default function Station() {
       authFailed(e);
     }
   };
+
+  // 全局键盘（C-N1 / C-N2 / N6）：焦点不在输入框（如在按钮上、弹窗刚关闭）时，
+  // 纯数字 / 小数点 / 负号 → 交给第一个未录的测量框；其他字符（条码）→ 交给扫码框。按键随焦点进入目标框，不会丢。
+  latest.current = { runScan: (c: string) => void runScan(c), focusStart };
+  const blockedKeys = useRef(false);
+  blockedKeys.current = locked || !configured || !!dialog || failOpen;
+  useEffect(() => {
+    const editable = (el: Element | null) =>
+      !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || (el as HTMLElement).isContentEditable);
+    const modalOpen = () => Array.from(document.querySelectorAll<HTMLElement>('.ant-modal-wrap')).some((m) => getComputedStyle(m).display !== 'none');
+    const onKey = (e: KeyboardEvent) => {
+      if (Date.now() - resumedAt.current < 1500 && /^[0-9]$/.test(e.key)) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        return;
+      }
+      if (blockedKeys.current || e.ctrlKey || e.metaKey || e.altKey || e.key.length !== 1) return;
+      if (editable(document.activeElement) || modalOpen()) return;
+      if (/^[0-9.\-]$/.test(e.key)) {
+        const f = Array.from(document.querySelectorAll<HTMLInputElement>('.st-form input.sp-num[data-sfield]')).find((x) => !x.value);
+        if (f) {
+          f.focus();
+          return;
+        }
+      }
+      scanRef.current?.focus();
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, []);
 
   // ---------------- 渲染 ----------------
   const next: Rec | null = scan?.next_operation || null;
@@ -616,12 +690,11 @@ export default function Station() {
           <div className="st-scan">
             <ScanInput
               ref={scanRef}
-              captureGlobal
               disabled={locked || !configured || !!dialog || failOpen}
               placeholder="扫描产品序列号（也可直接扫 UDI 条码）"
               prefix={<ScanOutlined style={{ fontSize: 26, color: '#5b3cc4' }} />}
               onScan={(c) => {
-                void runScan(c);
+                void latest.current.runScan(c);
               }}
             />
           </div>
@@ -715,7 +788,11 @@ export default function Station() {
                   <span style={{ whiteSpace: 'nowrap', fontSize: 16 }}>
                     {next.requires_equipment && <span style={{ color: '#cf1322' }}>* </span>}设备/仪器
                   </span>
-                  <EquipmentPicker list={eqList} value={equipmentId} onChange={setEquipmentId} style={{ flex: 1, minWidth: 0 }} />
+                  <EquipmentPicker list={eqList} value={equipmentId} style={{ flex: 1, minWidth: 0 }}
+                    onChange={(v) => {
+                      setEquipmentId(v);
+                      setTimeout(() => latest.current.focusStart(), 50);
+                    }} />
                 </div>
               )}
               <div className="st-buttons">
@@ -727,7 +804,7 @@ export default function Station() {
                   判不合格
                 </Button>
               </div>
-              {fieldCount > 0 && <div className="st-hint">回车跳到下一项，最后一项回车 = 合格提交；超出规格自动判不合格并开 NCR；录错了按 Esc 回扫码框重扫。</div>}
+              {fieldCount > 0 && fieldCount <= 4 && <div className="st-hint">回车跳到下一项，最后一项回车 = 合格提交；超出规格自动判不合格并开 NCR；录错了按 Esc 回扫码框重扫。</div>}
               {!canMes && <Alert type="warning" showIcon message="当前操作员没有生产报工权限" />}
             </div>
           )}
@@ -745,7 +822,7 @@ export default function Station() {
             <div className="st-card">
               <h4>作业指导{next.sop_no ? ` · ${next.sop_no}` : ''}</h4>
               <div className="st-instr">{next.instructions || (next.attachments?.length ? '' : '见作业指导书')}</div>
-              {next.attachments?.length > 0 && <InstrFiles files={next.attachments} token={token} />}
+              {next.attachments?.length > 0 && <InstrFiles files={next.attachments} token={token} onClosed={() => setTimeout(focusStart, 30)} />}
             </div>
           )}
           {scan ? (
@@ -802,6 +879,13 @@ export default function Station() {
         </aside>
       </main>
 
+      {notice && (
+        <div className={`st-notice ${notice.kind}`} role="alert">
+          <div className="t">{notice.kind === 'warn' ? <WarningOutlined /> : <CheckOutlined />} {notice.title}</div>
+          {notice.sub && <div className="s">{notice.sub}</div>}
+        </div>
+      )}
+
       <IdleGuard active={!!session && !session.locked} minutes={cfg.idle_minutes} sound={sound} initialLast={session?.last}
         onLock={lockIdle}
         onPersist={(last) => {
@@ -826,12 +910,12 @@ export default function Station() {
             <SettingOutlined style={{ fontSize: 64, color: '#b7a6ff' }} />
             <div style={{ fontSize: 32, fontWeight: 800, marginTop: 8 }}>本工位尚未设定工序</div>
             <div style={{ fontSize: 17, opacity: 0.8, margin: '8px 0 24px' }}>
-              首次使用请由班组长设定本工位负责的工序和默认仪器（需输入终端账号密码）。设定后操作员不能更改，扫到其他工序的产品会被拦截。
+              首次使用请由班组长设定本工位负责的工序和默认仪器（班组长刷本人工牌 + PIN 授权）。设定后操作员不能更改，扫到其他工序的产品会被拦截。
             </div>
             <Button type="primary" size="large" style={{ height: 60, fontSize: 20, padding: '0 36px' }} icon={<LockOutlined />} onClick={openSettings}>班组长设定</Button>
             <div style={{ marginTop: 18 }}>
               <Button type="link" style={{ color: 'rgba(255,255,255,.8)', fontSize: 16, height: 44 }} icon={<LogoutOutlined />} onClick={() => setDialog('auth-exit')}>
-                退出工位终端（需密码）
+                退出工位终端（需班组长授权）
               </Button>
             </div>
           </div>
@@ -840,14 +924,14 @@ export default function Station() {
 
       <AuthModal
         open={dialog === 'auth-settings' || dialog === 'auth-exit'}
-        title={dialog === 'auth-exit' ? '退出工位终端' : '班组长授权'}
+        onClosed={() => latest.current.focusStart()}
+        title={dialog === 'auth-exit' ? '退出工位终端（班组长授权）' : '班组长授权'}
         hint={dialog === 'auth-exit'
-          ? '退出后本终端将回到办公界面。请输入本终端登录账号的密码（班组长 / 管理员掌握），防止操作员进入办公功能。'
-          : '设定本工位工序、默认仪器与锁定时间需班组长授权：请输入本终端登录账号的密码。'}
-        terminalUser={terminalText}
+          ? '退出后本终端回到办公界面。请班组长刷本人工牌并输入 PIN 授权，防止操作员进入办公功能。'
+          : '设定本工位工序、默认仪器、锁定时间与过站方式需班组长授权：请班组长刷本人工牌并输入 PIN。'}
         onCancel={() => {
           setDialog(null);
-          focusScan();
+          setTimeout(() => latest.current.focusStart(), 50);
         }}
         onOk={(who) => {
           if (dialog === 'auth-exit') {
@@ -862,12 +946,13 @@ export default function Station() {
       />
       <SetupModal
         open={dialog === 'settings'}
+        onClosed={() => latest.current.focusStart()}
         config={cfg}
         by={authedBy}
         first={!configured}
         onCancel={() => {
           setDialog(null);
-          focusScan();
+          setTimeout(() => latest.current.focusStart(), 50);
         }}
         onSave={(c) => {
           const changed = c.op_code !== cfg.op_code;
@@ -876,7 +961,7 @@ export default function Station() {
           setDialog(null);
           if (changed) clearWork();
           message.success(`本工位已设定为【${c.op_code} ${c.op_name}】（${authedBy}）`);
-          focusScan();
+          setTimeout(() => latest.current.focusStart(), 50);
         }}
       />
       <FailDialog
@@ -885,10 +970,8 @@ export default function Station() {
         opName={next?.name}
         codes={scan?.defect_codes || [{ code: 'OTHER', name: '其他（请说明）' }]}
         busy={submitting}
-        onCancel={() => {
-          setFailOpen(false);
-          setTimeout(focusStart, 50);
-        }}
+        onCancel={() => setFailOpen(false)}
+        onClosed={() => latest.current.focusStart()}
         onConfirm={(code, remark) => doSubmit('FAIL', { code, remark })}
       />
     </div>

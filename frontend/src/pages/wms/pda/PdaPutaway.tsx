@@ -12,7 +12,7 @@ import ScanInput, { type ScanInputHandle } from '../../../components/ScanInput';
 import StatusTag from '../../../components/StatusTag';
 import { fmtDate, fmtQty } from '../../../utils/format';
 import type { ScanResult } from '../../../utils/scan';
-import { BigButton, checkPlace, confirmEnter, errText, FeedbackBar, numText, PdaField, PdaPage, useFeedback } from './kit';
+import { BigButton, checkPlace, confirmEnter, errText, FeedbackBar, focusLater, numText, PdaField, PdaPage, useFeedback } from './kit';
 
 function StockCard({ r, onPick, active }: { r: Rec; onPick?: () => void; active?: boolean }) {
   return (
@@ -79,7 +79,7 @@ export default function PdaPutaway() {
     const n = numText(qty);
     if (n === null || !(n > 0) || n > sel.qty + 1e-9) {
       show('err', `数量不对：本批在 ${sel.location_code} 共 ${fmtQty(sel.qty)}，请输入 0 ~ ${fmtQty(sel.qty)}`);
-      return qtyRef.current?.focus();
+      return focusLater(qtyRef, true); // 全选原内容，直接重输
     }
     setBusy(true);
     try {

@@ -51,9 +51,12 @@ export interface DiffItem {
   label?: string;
   before?: unknown;
   after?: unknown;
-  /** 判定规格变化（上下限 / 测试项类型 / 新增删除测试项）：界面醒目显示 */
+  /** 判定规格变化（上下限 / 测试项类型 / 新增删除测试项）或 BOM 用量变化：界面醒目显示 */
   limit?: boolean;
   text: string;
+  /** 摘要分组（工序名称；BOM 为空）与组内短句，用于生成精简的变更摘要 */
+  group?: string;
+  short?: string;
 }
 
 type Row = Record<string, any>;
@@ -98,6 +101,14 @@ const opView = (o: Row): Row => ({
   key_part_material_code: o.key_part_material_code ?? o.key_part_material?.code ?? null,
 });
 const opTitle = (o: Row) => `工序 ${o.seq} ${o.name}`;
+/** 作业指导等长文本的变化只写“已修改（+N 行 / -M 行）”，不贴全文 */
+const linesDelta = (a: unknown, b: unknown) => {
+  const la = String(a ?? '').split(/\n+/).map((x) => x.trim()).filter(Boolean);
+  const lb = String(b ?? '').split(/\n+/).map((x) => x.trim()).filter(Boolean);
+  const add = lb.filter((x) => !la.includes(x)).length;
+  const del = la.filter((x) => !lb.includes(x)).length;
+  return [add ? `+${add} 行` : '', del ? `-${del} 行` : ''].filter(Boolean).join(' / ') || '改动';
+};
 const paramTitle = (o: Row, p: Row) => `${o.name} · 测试项 ${p.code} ${p.name}`;
 const specOf = (p: Row) => {
   if (p.param_type === 'OKNG') return 'OK/NG 判定';
@@ -118,7 +129,8 @@ export function diffRouting(base: Row | null, cur: Row): DiffItem[] {
   for (const [k, o] of cOps) {
     const b = bOps.get(k);
     if (!b) {
-      out.push({ kind: 'added', scope: 'operation', key: `op:${k}`, title: opTitle(o), limit: (o.params || []).length > 0, text: `新增${opTitle(o)}${(o.params || []).length ? `（含 ${(o.params || []).length} 个测试项）` : ''}` });
+      const t = `新增${opTitle(o)}${(o.params || []).length ? `（含 ${(o.params || []).length} 个测试项）` : ''}`;
+      out.push({ kind: 'added', scope: 'operation', key: `op:${k}`, title: opTitle(o), limit: (o.params || []).length > 0, text: t, group: '', short: t });
       continue;
     }
     const bv = opView(b);
@@ -128,7 +140,8 @@ export function diffRouting(base: Row | null, cur: Row): DiffItem[] {
         const d = disp ?? f;
         const before = bv[d] ?? bv[f] ?? null;
         const after = cv[d] ?? cv[f] ?? null;
-        out.push({ kind: 'changed', scope: 'operation', key: `op:${k}`, title: opTitle(o), field: f, label, before, after, text: `${opTitle(o)}：${label} ${show(before)} → ${show(after)}` });
+        const short = f === 'instructions' ? `作业指导已修改（${linesDelta(before, after)}）` : `${label} ${show(before)} → ${show(after)}`;
+        out.push({ kind: 'changed', scope: 'operation', key: `op:${k}`, title: opTitle(o), field: f, label, before, after, text: `${opTitle(o)}：${short}`, group: o.name, short });
       }
     }
     const pk = (p: Row) => String(p.code ?? '').trim().toUpperCase();
@@ -137,7 +150,8 @@ export function diffRouting(base: Row | null, cur: Row): DiffItem[] {
     for (const [pc, p] of cPs) {
       const bp = bPs.get(pc);
       if (!bp) {
-        out.push({ kind: 'added', scope: 'param', key: `param:${k}/${pc}`, title: paramTitle(o, p), limit: true, after: specOf(p), text: `${o.name}：新增测试项 ${p.code} ${p.name}（${specOf(p)}）` });
+        const short = `新增测试项 ${p.code} ${p.name}（${specOf(p)}）`;
+        out.push({ kind: 'added', scope: 'param', key: `param:${k}/${pc}`, title: paramTitle(o, p), limit: true, after: specOf(p), text: `${o.name}：${short}`, group: o.name, short });
         continue;
       }
       const norm = (x: Row): Row => ({ ...x, param_type: x.param_type || 'NUMBER' });
@@ -148,16 +162,37 @@ export function diffRouting(base: Row | null, cur: Row): DiffItem[] {
           out.push({
             kind: 'changed', scope: 'param', key: `param:${k}/${pc}`, title: paramTitle(o, p), field: f, label, before: nb[f] ?? null, after: nc[f] ?? null,
             limit: LIMIT_FIELDS.has(f), text: `${o.name}：${p.name} ${label} ${show(nb[f], f)} → ${show(nc[f], f)}`,
+            group: o.name, short: `${p.name} ${label} ${show(nb[f], f)}→${show(nc[f], f)}`,
           });
         }
       }
     }
     for (const [pc, p] of bPs) {
-      if (!cPs.has(pc)) out.push({ kind: 'removed', scope: 'param', key: `param:${k}/${pc}`, title: paramTitle(b, p), limit: true, before: specOf(p), text: `${b.name}：删除测试项 ${p.code} ${p.name}（原规格 ${specOf(p)}）` });
+      if (!cPs.has(pc)) {
+        const short = `删除测试项 ${p.code} ${p.name}（原规格 ${specOf(p)}）`;
+        out.push({ kind: 'removed', scope: 'param', key: `param:${k}/${pc}`, title: paramTitle(b, p), limit: true, before: specOf(p), text: `${b.name}：${short}`, group: o.name, short });
+      }
+    }
+    // 测试项顺序（决定工位上的录入顺序，N8）
+    const bOrder = (b.params || []).map(pk).filter((x: string) => cPs.has(x));
+    const cOrder = (o.params || []).map(pk).filter((x: string) => bPs.has(x));
+    if (bOrder.join(',') !== cOrder.join(',')) {
+      const short = `测试项顺序 ${bOrder.join('→')} 改为 ${cOrder.join('→')}`;
+      out.push({ kind: 'changed', scope: 'param', key: `op:${k}`, title: opTitle(o), field: 'param_order', label: '测试项顺序（工位录入顺序）', before: bOrder.join(' → '), after: cOrder.join(' → '), text: `${o.name}：${short}`, group: o.name, short });
+    }
+    // 作业指导附件增删（N8：附件随版本审批）
+    const att = (x: Row) => new Map<string, string>(((x.attachments || []) as Row[]).map((a) => [`${a.sha256 ?? ''}/${a.filename}`, String(a.filename)]));
+    const bA = att(b);
+    const cA = att(o);
+    for (const [ak, fn] of cA) {
+      if (!bA.has(ak)) out.push({ kind: 'added', scope: 'operation', key: `op:${k}`, title: `${opTitle(o)} · 附件`, field: 'attachment', after: fn, text: `${o.name}：新增作业指导附件 ${fn}`, group: o.name, short: `新增附件 ${fn}` });
+    }
+    for (const [ak, fn] of bA) {
+      if (!cA.has(ak)) out.push({ kind: 'removed', scope: 'operation', key: `op:${k}`, title: `${opTitle(o)} · 附件`, field: 'attachment', before: fn, text: `${o.name}：删除作业指导附件 ${fn}`, group: o.name, short: `删除附件 ${fn}` });
     }
   }
   for (const [k, b] of bOps) {
-    if (!cOps.has(k)) out.push({ kind: 'removed', scope: 'operation', key: `op:${k}`, title: opTitle(b), limit: (b.params || []).length > 0, text: `删除${opTitle(b)}` });
+    if (!cOps.has(k)) out.push({ kind: 'removed', scope: 'operation', key: `op:${k}`, title: opTitle(b), limit: (b.params || []).length > 0, text: `删除${opTitle(b)}`, group: '', short: `删除${opTitle(b)}` });
   }
   return out;
 }
@@ -172,27 +207,43 @@ export function diffBom(base: Row | null, cur: Row): DiffItem[] {
   for (const [id, l] of cL) {
     const b = bL.get(id);
     if (!b) {
-      out.push({ kind: 'added', scope: 'line', key: `line:${id}`, title: `组件 ${name(l)}`, after: l.qty_per, text: `新增组件 ${name(l)} × ${l.qty_per}` });
+      out.push({ kind: 'added', scope: 'line', key: `line:${id}`, title: `组件 ${name(l)}`, after: l.qty_per, text: `新增组件 ${name(l)} × ${l.qty_per}`, group: '', short: `新增 ${name(l)} × ${l.qty_per}` });
       continue;
     }
     for (const [f, label] of LINE_FIELDS) {
       if (!same(b[f], l[f])) {
         out.push({
           kind: 'changed', scope: 'line', key: `line:${id}`, title: `组件 ${name(l)}`, field: f, label, before: b[f] ?? null, after: l[f] ?? null,
-          limit: f === 'qty_per', text: `${name(l)}：${label} ${show(b[f], f)} → ${show(l[f], f)}`,
+          limit: f === 'qty_per', text: `${name(l)}：${label} ${show(b[f], f)} → ${show(l[f], f)}`, group: '', short: `${name(l)} ${label} ${show(b[f], f)}→${show(l[f], f)}`,
         });
       }
     }
   }
   for (const [id, b] of bL) {
-    if (!cL.has(id)) out.push({ kind: 'removed', scope: 'line', key: `line:${id}`, title: `组件 ${name(b)}`, before: b.qty_per, text: `删除组件 ${name(b)}（原用量 ${b.qty_per}）` });
+    if (!cL.has(id)) out.push({ kind: 'removed', scope: 'line', key: `line:${id}`, title: `组件 ${name(b)}`, before: b.qty_per, text: `删除组件 ${name(b)}（原用量 ${b.qty_per}）`, group: '', short: `删除 ${name(b)}（原用量 ${b.qty_per}）` });
   }
   return out;
 }
 
-/** 变更摘要（提交签名、审批页显示）：最多 maxLen 字 */
+/**
+ * 变更摘要（提交签名、审批页显示，N10 精简）：按工序归并，同一测试项的多处修改合成一句；
+ * 例：“【光学性能测试】红光峰值波长 小数位 空→1、合理范围下限 空→600；新增测试项 UNI 均匀度（≥80 %）。【老化测试】…”。最多 maxLen 字。
+ */
 export function diffSummary(items: DiffItem[], maxLen = 600): string {
   if (!items.length) return '与上一版本相比无内容变化';
-  const s = items.map((i) => i.text).join('；');
+  const groups = new Map<string, string[]>();
+  let lastKey = '';
+  for (const i of items) {
+    const g = i.group ?? '';
+    const list = groups.get(g) ?? [];
+    const short = i.short ?? i.text;
+    // 同一测试项连续的字段修改：“名称 字段a a→b、字段b c→d”
+    if (i.kind === 'changed' && i.scope === 'param' && i.field !== 'param_order' && lastKey === `${g}|${i.key}` && list.length) {
+      list[list.length - 1] += `、${short.replace(/^\S+\s/, '')}`;
+    } else list.push(short);
+    lastKey = `${g}|${i.key}`;
+    groups.set(g, list);
+  }
+  const s = [...groups].map(([g, l]) => `${g ? `【${g}】` : ''}${l.join('；')}`).join('。');
   return s.length > maxLen ? `${s.slice(0, maxLen - 12)}…（共 ${items.length} 处）` : s;
 }

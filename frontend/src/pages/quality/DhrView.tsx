@@ -8,7 +8,8 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { get, post, type Rec } from '../../api/http';
 import { useAuth } from '../../auth';
 import { isCancel, useESign } from '../../components/ESign';
-import { PrintButton, PrintHeader, PrintSignatures } from '../../components/Print';
+import { PrintHeader } from '../../components/Print';
+import { QPrintButton, QPrintSignatures } from './qshared';
 import StatusTag from '../../components/StatusTag';
 import { dictLabel } from '../../utils/dict';
 import { fmtDate, fmtDateTime, fmtQty } from '../../utils/format';
@@ -78,7 +79,9 @@ function Mark({ c }: { c?: Rec }) {
 }
 
 /** 放行结论卡：按序列号逐项检查 */
-function VerdictCard({ rc, onRelease, canBatch }: { rc: Rec; onRelease: (sns: string[]) => void; canBatch: boolean }) {
+function VerdictCard({ rc, onRelease, canBatch, onCloseNcr }: {
+  rc: Rec; onRelease: (sns: string[]) => void; canBatch: boolean; onCloseNcr?: (n: Rec) => void;
+}) {
   const [showAll, setShowAll] = useState(false);
   const defs: Rec[] = rc.checks_def || [];
   const s: Rec = rc.summary || {};
@@ -134,7 +137,16 @@ function VerdictCard({ rc, onRelease, canBatch }: { rc: Rec; onRelease: (sns: st
             title: '问题说明', key: 'why',
             render: (_, u) => {
               const bad = defs.map((d) => [d.label, u.checks?.[d.key]] as [string, Rec]).filter(([, c]) => c && c.level !== 'ok');
-              return bad.length ? <Space direction="vertical" size={0}>{bad.map(([l, c]) => <Typography.Text key={l} type={c.level === 'fail' ? 'danger' : 'warning'} style={{ fontSize: 12 }}>{l}：{c.text}</Typography.Text>)}</Space> : <Typography.Text type="secondary" style={{ fontSize: 12 }}>全部通过</Typography.Text>;
+              const closable: Rec[] = (u.ncrs || []).filter((n: Rec) => n.closable);
+              if (!bad.length) return <Typography.Text type="secondary" style={{ fontSize: 12 }}>全部通过</Typography.Text>;
+              return (
+                <Space direction="vertical" size={2}>
+                  {bad.map(([l, c]) => <Typography.Text key={l} type={c.level === 'fail' ? 'danger' : 'warning'} style={{ fontSize: 12 }}>{l}：{c.text}</Typography.Text>)}
+                  {onCloseNcr && closable.map((n) => (
+                    <Button key={n.id} size="small" className="no-print" icon={<CheckCircleFilled />} onClick={() => onCloseNcr(n)}>关闭 {n.no}（处置已完成）</Button>
+                  ))}
+                </Space>
+              );
             },
           },
         ]}
@@ -264,12 +276,21 @@ export default function DhrView() {
 
   /** 放行结论中全部检查通过的产品：一次签名直接放行（无需再选） */
   const releaseReady = async (sns: string[]) => {
+    // 如实写明有“提示”的产品与提示内容（提示不阻止放行，但须审核并记入签名说明）
+    const warned: Rec[] = (rc?.units || []).filter((u: Rec) => sns.includes(u.sn) && u.warn);
+    const defs: Rec[] = rc?.checks_def || [];
+    const hintText = warned.map((u) => `${u.sn}：${defs.map((d) => u.checks?.[d.key]).filter((c: Rec) => c?.level === 'warn').map((c: Rec) => c.text).join('；')}`).join('；');
+    const summary = warned.length
+      ? `本批 ${sns.length} 台，其中 ${warned.length} 台有提示（已审核）：${hintText}`
+      : `本批 ${sns.length} 台，放行结论六项检查全部通过`;
     setBusy(true);
     try {
       const r = await sign({
         meaning: '产品放行（分批）',
-        description: `批准工单 ${wo.no}（批号 ${wo.lot_no}）本批 ${sns.length} 台放行（放行结论六项检查全部通过）：成品由“待放行”转为“合格”，可以发货。序列号：${snText([...sns].sort())}。`,
-        defaultReason: `放行检查全部通过，批准放行${sns.length <= 6 ? `（${[...sns].sort().join('、')}）` : ''}`,
+        description: `批准工单 ${wo.no}（批号 ${wo.lot_no}）放行：${summary}。成品由“待放行”转为“合格”，可以发货。序列号：${snText([...sns].sort())}。`,
+        defaultReason: (warned.length
+          ? `${sns.length} 台批准放行，其中 ${warned.length} 台有提示已审核：${hintText}`
+          : `放行检查全部通过，批准放行${sns.length <= 6 ? `（${[...sns].sort().join('、')}）` : ''}`).slice(0, 250),
         submit: (signature) => post(`/work-orders/${id}/releases`, { serials: sns, approve: true, reason: signature.reason, signature }, true),
       });
       message.success(`放行批 ${r.release.no} 已放行 ${sns.length} 台${r.dhr_status === 'RELEASED' ? '；该工单已全部放行并关闭' : ''}`);
@@ -278,6 +299,22 @@ export default function DhrView() {
       if (!isCancel(e)) throw e;
     } finally {
       setBusy(false);
+    }
+  };
+
+  /** 结论卡上直接关闭已具备条件的 NCR（电子签名“NCR关闭”） */
+  const closeNcr = async (n: Rec) => {
+    try {
+      await sign({
+        meaning: 'NCR关闭',
+        description: `${n.no}：处置（${dictLabel('disposition', n.disposition)}）已执行完毕，批准关闭。关闭后该台的“无未关 NCR”检查即为通过。`,
+        defaultReason: '处置已完成，验证有效',
+        submit: (signature) => post(`/ncrs/${n.id}/close`, { signature }, true),
+      });
+      message.success(`${n.no} 已关闭`);
+      load();
+    } catch (e) {
+      if (!isCancel(e)) throw e;
     }
   };
 
@@ -304,13 +341,17 @@ export default function DhrView() {
   return (
     <div className="dhr-doc">
       <style>{DHR_CSS}</style>
+      <style>{`@page { margin: 14mm 10mm 14mm;
+        @top-right { content: "DHR ${wo.no} · 批号 ${wo.lot_no || '-'}"; font-size: 8pt; color: #666; }
+        @bottom-right { content: "第 " counter(page) " 页 / 共 " counter(pages) " 页"; font-size: 9pt; color: #666; }
+        @bottom-left { content: "Nuon 智造云 · 电子记录打印件"; font-size: 9pt; color: #666; } }`}</style>
       {signHolder}
       <ReleaseBatchModal wo={wo} open={batch.open} preselect={batch.preselect} onClose={() => setBatch({ open: false, preselect: null })} onDone={load} />
       <div className="no-print" style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
         <Space wrap>
           <Button icon={<ArrowLeftOutlined />} onClick={() => nav(-1)}>返回</Button>
           <Button onClick={() => nav(`/mes/work-orders/${wo.id}`)}>打开工单</Button>
-          <PrintButton landscape title={`DHR ${wo.no}`} />
+          <QPrintButton landscape title={`DHR ${wo.no} · 批号 ${wo.lot_no || '-'}`} />
         </Space>
         {(canDecide || canBatch) && (
           <Space wrap>
@@ -352,7 +393,7 @@ export default function DhrView() {
         <Section id="verdict" index={sec++} title={wo.serial_control ? `放行结论（按序列号逐项检查）` : '放行结论'}
           extra={rc && <Typography.Text type={rc.summary?.blocked ? 'danger' : 'success'}>{wo.serial_control ? `待放行 ${rc.summary?.candidates ?? 0} 台：可放行 ${rc.summary?.ready ?? 0} 台${rc.summary?.blocked ? `，有问题 ${rc.summary.blocked} 台` : ''}` : ''}</Typography.Text>}>
           {wo.dhr_status === 'RELEASED' && <Alert type="success" showIcon style={{ marginBottom: 8 }} message="本批已全部放行。" />}
-          {rc ? <VerdictCard rc={rc} canBatch={canBatch} onRelease={releaseReady} /> : <Spin />}
+          {rc ? <VerdictCard rc={rc} canBatch={canBatch} onRelease={releaseReady} onCloseNcr={can('qa') ? closeNcr : undefined} /> : <Spin />}
         </Section>
 
         <Section id="product" index={sec++} title="产品与生产批信息">
@@ -517,7 +558,7 @@ export default function DhrView() {
           ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未审核放行" />}
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>含本批 NCR 的评审处置与关闭签名、DHR 放行签名。</Typography.Text>
         </Section>
-        <div className="print-only"><PrintSignatures roles={['生产负责人', 'QA 审核', '质量负责人批准']} /></div>
+        <QPrintSignatures roles={['生产负责人', 'QA 审核', '质量负责人批准']} />
       </Card>
     </div>
   );

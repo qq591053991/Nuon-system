@@ -147,3 +147,51 @@ export function backSchedule(delivery: Date | null | undefined, leadDays: number
   const start = tight ? t : ideal;
   return { start, end: delivery.getTime() < start.getTime() ? start : delivery, tight };
 }
+
+export interface WoMismatch {
+  so_id: number;
+  so_no: string;
+  line_id: number;
+  line_no: number;
+  material_code: string;
+  /** 订单行数量 */
+  so_qty: number;
+  /** 关联本行的未取消工单计划数量合计 */
+  wo_qty: number;
+  /** 关联本行的未取消工单（含已完工），adjustable_ids 为其中还能调整的（计划/已下达/生产中） */
+  wo_ids: number[];
+  adjustable_ids: number[];
+  /** 订单变更时间（最近一次订单行数量变化），无则 null */
+  changed_at: string | null;
+}
+
+/**
+ * 订单与工单不符（订单变更后计划员待处理）：进行中订单的行，已有关联工单，但
+ * 订单数量 ≠ 关联未取消工单计划数量合计（订单加量 → 需补排；减量 → 需调减工单）。
+ */
+export async function woMismatches(db: Tx): Promise<WoMismatch[]> {
+  const lines = await db.salesOrderLine.findMany({
+    where: { order: { status: { in: ACTIVE_SO } }, work_orders: { some: { status: { not: 'CANCELLED' } } } },
+    include: { order: true, material: true, work_orders: { where: { status: { not: 'CANCELLED' } }, orderBy: { id: 'asc' } } },
+    orderBy: [{ order_id: 'asc' }, { line_no: 'asc' }],
+  });
+  const out: WoMismatch[] = [];
+  for (const l of lines) {
+    const woQty = round(l.work_orders.reduce((s, w) => s + w.planned_qty, 0));
+    if (Math.abs(woQty - l.qty) <= EPS) continue;
+    out.push({
+      so_id: l.order_id, so_no: l.order.no, line_id: l.id, line_no: l.line_no, material_code: l.material.code, so_qty: l.qty, wo_qty: woQty,
+      wo_ids: l.work_orders.map((w) => w.id), adjustable_ids: l.work_orders.filter((w) => OPEN_WO.includes(w.status)).map((w) => w.id),
+      changed_at: null,
+    });
+  }
+  if (out.length) {
+    const logs = await db.auditLog.findMany({
+      where: { entity: 'erp_sales_order_line', entity_id: { in: out.map((m) => m.line_id) }, action: 'UPDATE', changes: { contains: '"qty"' } },
+      orderBy: { id: 'desc' },
+      select: { entity_id: true, ts: true },
+    });
+    for (const m of out) m.changed_at = logs.find((x) => x.entity_id === m.line_id)?.ts.toISOString() ?? null;
+  }
+  return out;
+}

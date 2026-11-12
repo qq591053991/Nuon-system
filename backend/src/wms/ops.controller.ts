@@ -100,6 +100,12 @@ export class WmsOpsController {
   }
 
   // ---------- 拣料 ----------
+  /** 已下达、仍有未领物料的工单（拣料列表为空时给出“生成领料单”入口） */
+  @Get('wms/issue-candidates')
+  issueCandidates() {
+    return this.svc.issueCandidates(this.db.client);
+  }
+
   /** 录入实拣数量（短缺自动从下一 FEFO 批次补足） */
   @Post('issues/:id/pick')
   @Perms('wms')

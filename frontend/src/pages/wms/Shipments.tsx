@@ -119,6 +119,21 @@ function ShipmentDrawer({ id, onClose, onChanged }: { id: number | null; onClose
       render: (_, r) => (r.serial_list?.length ? <Tag color="geekblue">{r.serial_list.length} 台</Tag> : <Typography.Text type="secondary">非序列号产品</Typography.Text>),
     },
   ];
+  /** 窄屏（PDA）卡片：产品 · 批号 · 库位 · 数量，序列号直接列在卡片里 */
+  const cardColumns: RColumn[] = [
+    { title: '产品', key: 'm', mobile: 'title', render: (_, r) => <MaterialCell code={r.material_code} name={r.material_name} spec={r.material_spec} /> },
+    { title: '批号', dataIndex: 'lot_no', render: (v, r) => <LotLink code={r.material_code} lot={v} /> },
+    { title: '库位', dataIndex: 'location_code', render: (v) => <b className="mono">{v}</b> },
+    { title: '数量', dataIndex: 'qty', render: (v, r) => <Qty qty={v} uom={r.uom} strong /> },
+    {
+      title: '序列号', key: 'sn',
+      render: (_, r) => (r.serial_list?.length ? (
+        <Space size={[4, 4]} wrap>
+          {(r.serial_list as string[]).map((sn) => <Link key={sn} to={traceSnUrl(sn)}><Tag className="mono" style={{ marginInlineEnd: 0, fontSize: 13 }}>{sn}</Tag></Link>)}
+        </Space>
+      ) : '-'),
+    },
+  ];
   const total = (d?.lines as Rec[] | undefined)?.reduce((s, l) => s + (l.qty || 0), 0) ?? 0;
 
   const actions = d && (
@@ -153,6 +168,12 @@ function ShipmentDrawer({ id, onClose, onChanged }: { id: number | null; onClose
             {d.status === 'DRAFT' && (
               <Alert type="warning" showIcon style={{ marginBottom: 12 }} message="请按下列库位、批号、序列号拣货并核对实物，确认无误后点击右上角“发货过账”。" />
             )}
+            {narrow ? (
+              <>
+                <ResponsiveTable rowKey="id" size="small" columns={cardColumns} dataSource={d.lines} pagination={false} breakpoint={768} />
+                <div style={{ textAlign: 'right', marginTop: 8 }}><b>合计 {fmtQty(total)}</b></div>
+              </>
+            ) : (
             <Table
               rowKey="id"
               size="small"
@@ -178,6 +199,7 @@ function ShipmentDrawer({ id, onClose, onChanged }: { id: number | null; onClose
                 </Table.Summary.Row>
               )}
             />
+            )}
             <Typography.Paragraph type="secondary" style={{ marginTop: 12, fontSize: 12 }}>
               点击序列号可查看该台设备的完整追溯记录（物料批次、工序、测试数据、放行）。
             </Typography.Paragraph>

@@ -1,13 +1,14 @@
 import { Alert, Avatar, Badge, Button, ConfigProvider, Drawer, Dropdown, Empty, Form, Input, Layout, List, Menu, Modal, Popover, Result, Spin, Tag, Typography, message } from 'antd';
 import {
-  BellOutlined, ClockCircleOutlined, LockOutlined, LogoutOutlined, MenuFoldOutlined, MenuOutlined, MenuUnfoldOutlined, RightOutlined, SafetyOutlined, UserOutlined,
+  BellOutlined, LockOutlined, LogoutOutlined, MenuFoldOutlined, MenuOutlined, MenuUnfoldOutlined, RightOutlined, SafetyOutlined, UserOutlined,
 } from '@ant-design/icons';
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
-import { get, post, TOKEN_KEY, type Rec } from '../api/http';
+import { get, post, type Rec } from '../api/http';
 import { clearLoginPassword, passwordDaysLeft, peekLoginPassword, useAuth } from '../auth';
 import { useNarrow } from '../components/ResponsiveTable';
 import GlobalSearch from '../pages/workbench/GlobalSearch';
+import IdleLock from '../pages/workbench/IdleLock';
 import { useGo } from '../pages/workbench/links';
 import '../pages/workbench/shell.css';
 import { menu, type MenuDef } from '../routes';
@@ -182,11 +183,8 @@ function ChangePassword({ open, forced, reason, policy, onClose, onDone, onLogou
   );
 }
 
-const ACTIVITY_KEY = 'nuon_last_activity';
-/** 本机空闲退出时间（分钟，只能比系统策略更短；PDA/公用电脑可单独设短） */
+/** 本机空闲锁屏时间（分钟，只能比系统策略更短；公用电脑可单独设短） */
 const DEVICE_IDLE_KEY = 'nuon_device_idle_minutes';
-const ACTIVITY_EVENTS = ['mousemove', 'mousedown', 'keydown', 'wheel', 'touchstart', 'scroll'];
-const WARN_SECONDS = 60;
 
 const readDeviceIdle = () => {
   try {
@@ -195,83 +193,6 @@ const readDeviceIdle = () => {
     return 0;
   }
 };
-
-/**
- * 空闲超时：minutes 分钟无键盘/鼠标/触摸操作自动退出登录，退出前 60 秒弹窗提醒。
- * 多个标签页共享最近操作时间（localStorage），任一标签页有操作即视为在用。
- */
-function IdleLogout({ minutes, paused, onTimeout }: { minutes: number; paused?: boolean; onTimeout: () => void }) {
-  const [left, setLeft] = useState<number | null>(null);
-  const last = useRef(Date.now());
-  const warning = useRef(false);
-
-  const touch = useCallback(() => {
-    last.current = Date.now();
-    try {
-      localStorage.setItem(ACTIVITY_KEY, String(last.current));
-    } catch {
-      /* 存储不可用时仅本页计时 */
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!(minutes > 0) || paused) return;
-    const limit = minutes * 60_000;
-    const onActivity = () => {
-      if (!warning.current && Date.now() - last.current > 1000) touch();
-    };
-    ACTIVITY_EVENTS.forEach((e) => window.addEventListener(e, onActivity, { capture: true, passive: true }));
-    touch();
-    const timer = setInterval(() => {
-      try {
-        const shared = Number(localStorage.getItem(ACTIVITY_KEY));
-        if (shared > last.current) last.current = shared; // 其他标签页有操作
-      } catch {
-        /* ignore */
-      }
-      const idle = Date.now() - last.current;
-      if (idle >= limit) {
-        clearInterval(timer);
-        onTimeout();
-      } else if (idle >= limit - WARN_SECONDS * 1000) {
-        warning.current = true;
-        setLeft(Math.ceil((limit - idle) / 1000));
-      } else if (warning.current) {
-        warning.current = false;
-        setLeft(null);
-      }
-    }, 1000);
-    return () => {
-      ACTIVITY_EVENTS.forEach((e) => window.removeEventListener(e, onActivity, { capture: true }));
-      clearInterval(timer);
-      warning.current = false;
-      setLeft(null);
-    };
-  }, [minutes, paused, onTimeout, touch]);
-
-  return (
-    <Modal
-      open={left !== null}
-      title={<span><ClockCircleOutlined style={{ color: '#fa8c16', marginRight: 8 }} />长时间未操作</span>}
-      closable={false}
-      maskClosable={false}
-      keyboard={false}
-      okText="继续使用"
-      cancelText="立即退出"
-      onOk={() => {
-        warning.current = false;
-        touch();
-        setLeft(null);
-      }}
-      onCancel={onTimeout}
-    >
-      <Typography.Paragraph>
-        您已约 {minutes} 分钟没有操作。为保护数据安全，系统将在 <b style={{ color: '#cf1322', fontSize: 16 }}>{left}</b> 秒后自动退出登录。
-      </Typography.Paragraph>
-      <Typography.Text type="secondary">未保存的内容可能丢失，如仍在使用请点击“继续使用”。</Typography.Text>
-    </Modal>
-  );
-}
 
 /** 密码到期前 7 天提醒（每天提醒一次，可关闭） */
 function PasswordExpiryBanner({ onChange }: { onChange: () => void }) {
@@ -350,11 +271,6 @@ function Shell() {
   const noRole = !user?.roles.length;
   const items = useMenuItems(can, noRole);
 
-  // 空闲超时退出：工位终端页面有自己的（更短的）锁屏，不在此处退出
-  const onIdle = useCallback(() => {
-    localStorage.removeItem(TOKEN_KEY);
-    location.href = `/login?idle=1&redirect=${encodeURIComponent(location.pathname + location.search)}`;
-  }, []);
   const sysIdle = options.idle_minutes ?? 0;
   const idleMinutes = deviceIdle > 0 && (sysIdle <= 0 || deviceIdle < sysIdle) ? deviceIdle : sysIdle;
 
@@ -391,7 +307,7 @@ function Shell() {
 
   const idleItems = [0, 5, 10, 15].filter((m) => m === 0 || sysIdle <= 0 || m < sysIdle).map((m) => ({
     key: `idle-${m}`,
-    label: m === 0 ? `按系统策略（${sysIdle > 0 ? `${sysIdle} 分钟` : '不自动退出'}）` : `${m} 分钟`,
+    label: m === 0 ? `按系统策略（${sysIdle > 0 ? `${sysIdle} 分钟` : '不自动锁屏'}）` : `${m} 分钟`,
     onClick: () => {
       try {
         if (m) localStorage.setItem(DEVICE_IDLE_KEY, String(m));
@@ -400,7 +316,7 @@ function Shell() {
         /* ignore */
       }
       setDeviceIdle(m);
-      message.success(m ? `本机无操作 ${m} 分钟自动退出` : '本机按系统策略自动退出');
+      message.success(m ? `本机无操作 ${m} 分钟自动锁屏` : '本机按系统策略自动锁屏');
     },
   }));
 
@@ -410,7 +326,7 @@ function Shell() {
       user?.auth_source === 'KINGDEE'
         ? { key: 'pwd', icon: <LockOutlined />, label: '修改密码（请在金蝶云星空中修改）', disabled: true }
         : { key: 'pwd', icon: <LockOutlined />, label: '修改密码', onClick: () => setPwd(true) },
-      { key: 'idle', icon: <SafetyOutlined />, label: `本机自动退出：${idleMinutes > 0 ? `${idleMinutes} 分钟` : '不启用'}`, children: idleItems },
+      { key: 'idle', icon: <SafetyOutlined />, label: `本机自动锁屏：${idleMinutes > 0 ? `${idleMinutes} 分钟` : '不启用'}`, children: idleItems },
       { type: 'divider' as const },
       { key: 'logout', icon: <LogoutOutlined />, label: '退出登录', onClick: logout },
     ],
@@ -519,7 +435,7 @@ function Shell() {
           refresh();
         }}
       />
-      <IdleLogout minutes={idleMinutes} onTimeout={onIdle} />
+      <IdleLock minutes={idleMinutes} />
     </Layout>
   );
 }

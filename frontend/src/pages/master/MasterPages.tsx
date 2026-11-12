@@ -28,6 +28,10 @@ export function Customers() {
         { name: 'email', label: '邮箱', list: false },
         { name: 'currency', label: '结算币别', type: 'select', options: ['CNY', 'USD', 'EUR'].map((v) => ({ value: v, label: v })), default: 'CNY', width: 90 },
         { name: 'payment_terms_days', label: '账期(天)', type: 'number', default: 30, width: 90 },
+        {
+          name: 'tax_rate', label: '增值税率', type: 'number', width: 90,
+          help: '填小数：13% 填 0.13，出口零税率填 0；不填 = 人民币客户按 13%、外币（出口）客户按 0%。用于金蝶凭证拆分销项税',
+        },
         { name: 'quality_agreement_no', label: '质量协议编号', width: 140 },
         { name: 'quality_agreement_expiry', label: '质量协议有效期', type: 'date', width: 130 },
         { name: 'tax_no', label: '税号', list: false },
@@ -63,6 +67,7 @@ export function Suppliers() {
         { name: 'email', label: '邮箱', list: false },
         { name: 'currency', label: '结算币别', type: 'select', options: ['CNY', 'USD'].map((v) => ({ value: v, label: v })), default: 'CNY', list: false },
         { name: 'payment_terms_days', label: '账期(天)', type: 'number', default: 30, list: false },
+        { name: 'tax_rate', label: '进项税率', type: 'number', list: false, help: '填小数：13% 填 0.13；不填 = 按 13%。用于金蝶凭证拆分进项税' },
         { name: 'address', label: '地址', type: 'textarea', list: false },
         active,
         { name: 'remark', label: '备注', type: 'textarea', list: false },

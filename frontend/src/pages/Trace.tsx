@@ -4,13 +4,15 @@ import {
 } from 'antd';
 import {
   AimOutlined, AuditOutlined, BarcodeOutlined, CarOutlined, CheckCircleFilled, CloseCircleFilled, DownloadOutlined, ExperimentOutlined,
-  FileProtectOutlined, InboxOutlined, NodeIndexOutlined, PrinterOutlined, SearchOutlined, ToolOutlined, WarningOutlined,
+  FileProtectOutlined, InboxOutlined, NodeIndexOutlined, SearchOutlined, ToolOutlined, WarningOutlined,
 } from '@ant-design/icons';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { get, type Rec } from '../api/http';
 import ExportButton, { type ExportColumn } from '../components/ExportButton';
 import PageHeader from '../components/PageHeader';
+import { PrintHeader } from '../components/Print';
+import { QPrintButton, QPrintSignatures } from './quality/qshared';
 import StatusTag from '../components/StatusTag';
 import { dictLabel } from '../utils/dict';
 import { fmtDate, fmtDateTime, fmtQty } from '../utils/format';
@@ -364,7 +366,7 @@ function SerialTrace({ sn, onSearch }: { sn: string; onSearch: (sn: string) => v
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <Card style={{ background: 'linear-gradient(120deg,#f3efff 0%,#ffffff 70%)' }}>
+      <Card className="no-print" style={{ background: 'linear-gradient(120deg,#f3efff 0%,#ffffff 70%)' }}>
         <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
           扫描设备铭牌上的序列号或 UDI 条码，追溯这台设备：用了哪些物料批次（供应商、来料检验）、每道工序谁在哪台设备做的、测试数据、是否返工、何时发给了哪个客户。
         </Typography.Paragraph>
@@ -396,9 +398,12 @@ function SerialTrace({ sn, onSearch }: { sn: string; onSearch: (sn: string) => v
         ) : data ? (
           <>
             <div style={{ textAlign: 'right', marginBottom: 8 }} className="no-print">
-              <Button icon={<PrinterOutlined />} onClick={() => window.print()}>打印追溯报告</Button>
+              <QPrintButton title={`追溯报告 · 序列号 ${data.serial?.sn ?? ''}`} text="打印追溯报告" />
             </div>
+            <PrintHeader title="产品追溯报告（序列号反向追溯）" no={data.serial?.sn}
+              extra={<div>{data.product?.code} {data.product?.name} · 工单 {data.work_order?.no} · 生产批号 {data.work_order?.lot_no || '-'}</div>} />
             <SerialResult d={data} />
+            <QPrintSignatures roles={['追溯人', 'QA 审核']} />
           </>
         ) : (
           <Card><Empty description="输入序列号开始追溯" /></Card>
@@ -541,7 +546,7 @@ function LotResult({ d }: { d: Rec }) {
             {serials.length > 0
               ? <ExportButton rows={recallRows} columns={recallColumns} filename={`召回清单_${m.code}_${d.lot_no}`} title={`召回清单：${m.code} ${m.name} 批号 ${d.lot_no}（已发货 ${sum.shipped} 台 / 在厂 ${inFactory} 台）`} text="导出召回清单" />
               : <Button icon={<DownloadOutlined />} disabled>导出召回清单</Button>}
-            <Button icon={<PrinterOutlined />} onClick={() => window.print()}>打印</Button>
+            <QPrintButton title={`召回范围评估 · ${m.code} 批号 ${d.lot_no}`} text="打印报告" />
           </Space>
         </div>
         <Row gutter={[12, 12]}>
@@ -700,7 +705,7 @@ function LotTrace({ code, lot, onSearch }: { code: string; lot: string; onSearch
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <Card style={{ background: 'linear-gradient(120deg,#fff1f0 0%,#ffffff 70%)' }}>
+      <Card className="no-print" style={{ background: 'linear-gradient(120deg,#fff1f0 0%,#ffffff 70%)' }}>
         <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
           发现某个物料批次有质量问题时，输入物料编码和批号，几秒内算出召回范围：用到了哪些工单、哪些序列号、已发给哪些客户。
         </Typography.Paragraph>
@@ -742,7 +747,11 @@ function LotTrace({ code, lot, onSearch }: { code: string; lot: string; onSearch
         {error ? (
           <Card><Result status="warning" title="查询失败" subTitle={error} /></Card>
         ) : data ? (
-          <LotResult key={`${data.material.code}|${data.lot_no}`} d={data} />
+          <>
+            <PrintHeader title="召回范围评估报告（批次正向追溯）" no={`${data.material.code} / ${data.lot_no}`} extra={<div>{data.material.name}</div>} />
+            <LotResult key={`${data.material.code}|${data.lot_no}`} d={data} />
+            <QPrintSignatures roles={['评估人', 'QA 审核', '质量负责人批准']} />
+          </>
         ) : (
           <Card><Empty description="输入物料编码与批号，评估召回范围" /></Card>
         )}
@@ -767,11 +776,15 @@ export default function Trace() {
   }, [sn, code, lot]);
 
   return (
-    <>
-      <PageHeader
-        title="质量追溯"
-        sub="一码到底：序列号反查物料批次、工序、测试、放行与发货；物料批次正查工单、整机与客户，召回范围秒级评估。"
-      />
+    <div className="trace-page">
+      {/* 打印时不印页面标题、页签与搜索框，只印报告抬头与结果 */}
+      <style>{'@media print { .trace-page .ant-tabs-nav, .trace-page .page-header { display: none !important; } .trace-page .ant-tabs-content-holder, .trace-page .ant-tabs-tabpane { padding: 0 !important; margin: 0 !important; } }'}</style>
+      <div className="no-print">
+        <PageHeader
+          title="质量追溯"
+          sub="一码到底：序列号反查物料批次、工序、测试、放行与发货；物料批次正查工单、整机与客户，召回范围秒级评估。"
+        />
+      </div>
       <Tabs
         activeKey={tab}
         onChange={setTab}
@@ -790,6 +803,6 @@ export default function Trace() {
           },
         ]}
       />
-    </>
+    </div>
   );
 }

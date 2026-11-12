@@ -3,11 +3,13 @@ import {
 } from 'antd';
 import { AlertOutlined, AuditOutlined, CheckCircleOutlined, EditOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, SolutionOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
+import type { InputRef } from 'antd';
 import { useEffect, useRef, useState, type MouseEvent } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { get, post, put, type Rec } from '../../api/http';
 import { useAuth } from '../../auth';
 import Attachments from '../../components/Attachments';
+import { PrintHeader } from '../../components/Print';
 import { isCancel, useESign } from '../../components/ESign';
 import PageHeader from '../../components/PageHeader';
 import ExportButton from '../../components/ExportButton';
@@ -17,7 +19,7 @@ import StatusTag from '../../components/StatusTag';
 import { usePaged } from '../../components/usePaged';
 import { dictLabel } from '../../utils/dict';
 import { fmtDate, fmtDateTime, toDate } from '../../utils/format';
-import { DateRangeFilter, useUrlFilters } from './qshared';
+import { COUNTRIES, DateRangeFilter, QPrintButton, QPrintSignatures, normCountry, reportDays, useUrlFilters } from './qshared';
 
 const STATUS_TABS = [
   { value: 'OPEN,INVESTIGATING', label: '未结案' },
@@ -26,11 +28,10 @@ const STATUS_TABS = [
   { value: 'CLOSED', label: '已结案' },
   { value: '', label: '全部' },
 ];
-const COUNTRIES = ['中国', 'US', 'EU', '德国', '日本', '韩国', '澳大利亚', '其他'];
 /** 上报时限说明（与后端默认一致） */
 const REPORT_RULE = '默认上报期限（自接收日起）：中国《医疗器械不良事件监测和再评价管理办法》严重伤害 20 天（死亡 7 天）；美国 FDA MDR 30 天；欧盟 MDR 严重事件 15 天。可按实际调整。';
 const dateKeys = ['received_date', 'event_date', 'report_deadline', 'reported_at', 'replied_at'];
-const toForm = (r: Rec) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, dateKeys.includes(k) && v ? dayjs(v as string) : v]));
+const toForm = (r: Rec) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, dateKeys.includes(k) && v ? dayjs(v as string) : k === 'country' ? normCountry(v as string) : v]));
 
 /** 上报倒计时标签 */
 function ReportDue({ c }: { c: Rec }) {
@@ -43,28 +44,36 @@ function ReportDue({ c }: { c: Rec }) {
   return <Tooltip title={`${text}，期限 ${c.report_due}。${REPORT_RULE}`}><Tag color={color}>{text} · {left < 0 ? `超期 ${-left} 天` : `剩 ${left} 天`}</Tag></Tooltip>;
 }
 
-/** 法规字段：上报评估与客户回复（修改弹窗与结案弹窗共用） */
-function RegulatoryFields({ adverse, due }: { adverse: boolean; due?: string | null }) {
+/** 按国家与接收日计算的默认上报期限 */
+const dueFor = (received: any, country?: string | null) => dayjs(received || undefined).add(reportDays(country), 'day');
+
+/** 法规字段：上报评估与客户回复（修改弹窗与结案弹窗共用）；closing=结案时，需上报的必须填写上报编号与日期 */
+function RegulatoryFields({ adverse, closing }: { adverse: boolean; closing?: boolean }) {
   const form = Form.useFormInstance();
   const reportable = Form.useWatch('reportable', form);
   return (
     <>
-      <Form.Item name="reportable" label="上报评估" tooltip={REPORT_RULE} rules={adverse ? [{ required: true, message: '不良事件须完成上报评估' }] : []}>
+      <Form.Item name="reportable" label="上报评估" tooltip={REPORT_RULE} rules={adverse ? [{ required: true, message: '不良事件须完成上报评估（选择“需要上报”或“无需上报”）' }] : []}>
         <Radio.Group optionType="button" options={[{ value: true, label: '需要上报' }, { value: false, label: '无需上报' }]}
           onChange={(e) => {
-            // 选“需要上报”时自动带出法规期限
+            // 选“需要上报”时按国家带出法规期限
             if (e.target.value && !form.getFieldValue('report_deadline')) {
               const r = form.getFieldsValue(['received_date', 'country']);
-              const days = ['US', 'USA', '美国'].includes(String(r.country ?? '').toUpperCase()) ? 30 : ['EU', '欧盟', '德国', '法国'].includes(String(r.country ?? '')) ? 15 : 20;
-              form.setFieldsValue({ report_deadline: due ? dayjs(due) : dayjs(r.received_date || undefined).add(days, 'day') });
+              form.setFieldsValue({ report_deadline: dueFor(r.received_date, r.country) });
             }
           }} />
       </Form.Item>
       {reportable && (
         <Row gutter={12}>
-          <Col xs={24} sm={8}><Form.Item name="report_deadline" label="上报期限" tooltip="不填按国家默认"><DatePicker style={{ width: '100%' }} /></Form.Item></Col>
-          <Col xs={24} sm={8}><Form.Item name="report_no" label="上报编号"><Input placeholder="监管系统报告编号" /></Form.Item></Col>
-          <Col xs={24} sm={8}><Form.Item name="reported_at" label="上报日期"><DatePicker style={{ width: '100%' }} /></Form.Item></Col>
+          <Col xs={24} sm={8}><Form.Item name="report_deadline" label="上报期限" tooltip="按国家自动计算，可调整"><DatePicker style={{ width: '100%' }} /></Form.Item></Col>
+          <Col xs={24} sm={8}>
+            <Form.Item name="report_no" label="上报编号" rules={closing ? [{ required: true, whitespace: true, message: '需上报的事件结案前须填写上报编号' }] : []}>
+              <Input placeholder="监管系统报告编号" />
+            </Form.Item>
+          </Col>
+          <Col xs={24} sm={8}>
+            <Form.Item name="reported_at" label="上报日期" rules={closing ? [{ required: true, message: '请填写上报日期' }] : []}><DatePicker style={{ width: '100%' }} /></Form.Item>
+          </Col>
         </Row>
       )}
       <Row gutter={12}>
@@ -95,31 +104,48 @@ function ComplaintModal({ open, record, onClose, onDone }: { open: boolean; reco
   const [form] = Form.useForm();
   const [saving, setSaving] = useState(false);
   const adverse = Form.useWatch('is_adverse_event', form);
+  const country = Form.useWatch('country', form);
+  const received = Form.useWatch('received_date', form);
+  const lastSn = useRef('');
+  const snRef = useRef<InputRef>(null);
 
   useEffect(() => {
     if (!open) return;
     form.resetFields();
+    lastSn.current = '';
     if (record) {
       form.setFieldsValue(toForm(record));
     } else {
-      form.setFieldsValue({ received_date: dayjs(), is_adverse_event: false, country: '中国' });
+      form.setFieldsValue({ received_date: dayjs(), is_adverse_event: false });
     }
   }, [open, record, form]);
 
-  /** 输入序列号后自动带出产品与批号 */
-  const fillBySn = async (sn: string) => {
-    if (!sn.trim()) return;
-    try {
-      const d = await get(`/mes/scan/${encodeURIComponent(sn.trim())}`, undefined, true);
-      form.setFieldsValue({ material_id: d.product?.id, lot_no: d.lot_no });
-      message.info(`已带出：${d.product?.code} ${d.product?.name}，批号 ${d.lot_no}`);
-    } catch {
-      /* 非本系统序列号，手工填写 */
+  /** 改国家：需上报且尚未上报时立即按新国家重算上报期限 */
+  const onCountry = (c?: string) => {
+    const v = form.getFieldsValue(['reportable', 'report_no', 'received_date']);
+    if (v.reportable && !v.report_no) form.setFieldsValue({ report_deadline: dueFor(v.received_date, c) });
+  };
+
+  /** 输入/扫描序列号：带出产品、批号、发货客户与客户国家（同一序列号只提示一次） */
+  const fillBySn = async (raw: string) => {
+    const sn = raw.trim();
+    if (!sn || sn === lastSn.current) return;
+    lastSn.current = sn;
+    const d = await get('/complaints/lookup', { sn }, true).catch(() => null);
+    if (!d?.found) {
+      message.warning(`序列号 ${sn} 不是本厂产品或尚未生产，请手工选择客户与产品`);
+      return;
     }
+    const patch: Rec = { material_id: d.material_id, lot_no: d.lot_no };
+    if (d.customer_id && !record) Object.assign(patch, { customer_id: d.customer_id, country: d.country ?? undefined });
+    form.setFieldsValue(patch);
+    if (patch.country) onCountry(patch.country);
+    message.info(`已带出：${d.material_code} ${d.material_name}，批号 ${d.lot_no}${d.customer_name ? `；发货客户 ${d.customer_name}（${d.country ?? '国家未维护'}）` : '；该台尚未发货，请选择客户'}`);
   };
 
   const submit = async () => {
-    const v = await form.validateFields();
+    const v = await form.validateFields().catch(() => null);
+    if (!v) return;
     const body = {
       customer_id: v.customer_id, received_date: toDate(v.received_date), material_id: v.material_id ?? null,
       sn: v.sn?.trim() || null, lot_no: v.lot_no?.trim() || null, description: v.description, is_adverse_event: !!v.is_adverse_event,
@@ -129,7 +155,7 @@ function ComplaintModal({ open, record, onClose, onDone }: { open: boolean; reco
     setSaving(true);
     try {
       const r = record ? await put(`/complaints/${record.id}`, body) : await post('/complaints', body);
-      message.success(record ? `${r.no} 已保存` : `已登记客户投诉 ${r.no}`);
+      message.success(record ? `${r.no} 已保存` : `已登记客户投诉 ${r.no}${r.is_adverse_event ? `，上报评估期限 ${r.report_due}` : ''}`);
       onDone(r);
       onClose();
     } finally {
@@ -139,16 +165,29 @@ function ComplaintModal({ open, record, onClose, onDone }: { open: boolean; reco
 
   return (
     <Modal open={open} title={record ? `修改客户投诉 ${record.no}` : '登记客户投诉 / 不良事件'} width={720} okText={record ? '保存' : '登记'}
-      confirmLoading={saving} onOk={submit} onCancel={onClose} destroyOnHidden maskClosable={false}>
+      confirmLoading={saving} onOk={submit} onCancel={onClose} destroyOnHidden maskClosable={false}
+      afterOpenChange={(o) => { if (o && !record) setTimeout(() => snRef.current?.focus(), 0); }}>
       <Alert type="info" showIcon style={{ marginBottom: 16 }}
-        message="收到客户投诉（含电话、邮件、退货附言）应在当日登记；涉及使用者伤害或可能导致伤害的，请勾选“不良事件”，QA 将评估是否需协助注册人上报。" />
+        message="先扫描/输入产品序列号：自动带出产品、批号、发货客户及其国家。涉及使用者伤害或可能导致伤害的，请勾选“不良事件”，系统按国家给出上报期限。" />
       <Form form={form} layout="vertical">
         <Space size={16} wrap style={{ width: '100%' }}>
-          <Form.Item name="customer_id" label="投诉客户" rules={[{ required: true, message: '请选择客户' }]}>
-            <CustomerSelect style={{ width: 300 }} />
+          <Form.Item name="sn" label="产品序列号" extra="回车或离开输入框即带出">
+            <Input ref={snRef} style={{ width: 220 }} className="mono" onBlur={(e) => fillBySn(e.target.value)} onPressEnter={(e) => { e.preventDefault(); fillBySn((e.target as HTMLInputElement).value); }} />
+          </Form.Item>
+          <Form.Item name="lot_no" label="批号">
+            <Input style={{ width: 180 }} className="mono" />
           </Form.Item>
           <Form.Item name="received_date" label="接收日期" rules={[{ required: true, message: '请选择日期' }]}>
-            <DatePicker style={{ width: 160 }} />
+            <DatePicker style={{ width: 150 }} onChange={() => onCountry(form.getFieldValue('country'))} />
+          </Form.Item>
+        </Space>
+        <Space size={16} wrap style={{ width: '100%' }}>
+          <Form.Item name="customer_id" label="投诉客户" rules={[{ required: true, message: '请选择客户（或先输入已发货的序列号）' }]}>
+            <CustomerSelect style={{ width: 300 }} onPick={(c) => { const ct = normCountry(c?.country); if (ct) { form.setFieldsValue({ country: ct }); onCountry(ct); } }} />
+          </Form.Item>
+          <Form.Item name="country" label="国家/地区" tooltip="按客户主数据带出；决定不良事件上报时限"
+            extra={adverse ? <span style={{ color: '#cf1322' }}>上报期限 {dueFor(received, country).format('YYYY-MM-DD')}（{reportDays(country)} 天）</span> : undefined}>
+            <Select style={{ width: 140 }} showSearch allowClear placeholder="随客户带出" options={COUNTRIES.map((c) => ({ value: c, label: c }))} onChange={onCountry} />
           </Form.Item>
         </Space>
         <Space size={16} wrap style={{ width: '100%' }}>
@@ -156,30 +195,19 @@ function ComplaintModal({ open, record, onClose, onDone }: { open: boolean; reco
             <Input style={{ width: 300 }} placeholder="如：Dr. Smith / +1-555-0100 / 邮箱" />
           </Form.Item>
           <Form.Item name="event_date" label="事件发生日期">
-            <DatePicker style={{ width: 160 }} />
-          </Form.Item>
-          <Form.Item name="country" label="国家/地区" tooltip="决定不良事件上报时限">
-            <Select style={{ width: 130 }} showSearch allowClear options={COUNTRIES.map((c) => ({ value: c, label: c }))} />
-          </Form.Item>
-        </Space>
-        <Space size={16} wrap style={{ width: '100%' }}>
-          <Form.Item name="sn" label="产品序列号" extra="输入后自动带出产品与批号">
-            <Input style={{ width: 220 }} className="mono" onBlur={(e) => fillBySn(e.target.value)} onPressEnter={(e) => fillBySn((e.target as HTMLInputElement).value)} />
-          </Form.Item>
-          <Form.Item name="lot_no" label="批号">
-            <Input style={{ width: 180 }} className="mono" />
+            <DatePicker style={{ width: 150 }} />
           </Form.Item>
         </Space>
         <Form.Item name="material_id" label="产品">
           <MaterialSelect params={{ category: 'FINISHED' }} />
         </Form.Item>
         <Form.Item name="description" label="投诉内容" rules={[{ required: true, whitespace: true, message: '请填写投诉内容' }]}>
-          <Input.TextArea rows={4} placeholder="客户反馈的现象、发生时间与场景、使用者/患者情况、数量、客户诉求" />
+          <Input.TextArea rows={3} placeholder="客户反馈的现象、发生时间与场景、使用者/患者情况、数量、客户诉求" />
         </Form.Item>
         <Form.Item name="is_adverse_event" valuePropName="checked" style={{ marginBottom: record ? 16 : 0 }}>
           <Checkbox><b style={{ color: adverse ? '#cf1322' : undefined }}>涉及不良事件</b>（导致或可能导致使用者/患者伤害，如灼伤、电击、眼部损伤等）</Checkbox>
         </Form.Item>
-        {record && <RegulatoryFields adverse={false} due={record.report_due} />}
+        {record && <RegulatoryFields adverse={false} />}
       </Form>
     </Modal>
   );
@@ -198,7 +226,8 @@ function CloseModal({ c, onClose, onDone }: { c: Rec | null; onClose: () => void
   return (
     <Modal open={!!c} title={`结案 - 客户投诉 ${c?.no ?? ''}`} width={720} okText="签名并结案" onCancel={onClose} destroyOnHidden maskClosable={false}
       onOk={async () => {
-        const v = await form.validateFields();
+        const v = await form.validateFields().catch(() => null);
+        if (!v) return;
         try {
           const r = await sign({
             meaning: '客诉结案',
@@ -219,7 +248,7 @@ function CloseModal({ c, onClose, onDone }: { c: Rec | null; onClose: () => void
         <Form.Item name="investigation" label="调查结论" rules={[{ required: true, whitespace: true, message: '结案前必须填写调查结论' }]}>
           <Input.TextArea rows={5} placeholder="原因分析（追溯结果、复现/检测情况）、处理措施（返修/更换/退货/CAPA）、上报评估依据、对其他批次的影响评估" />
         </Form.Item>
-        <RegulatoryFields adverse={!!c?.is_adverse_event} due={c?.report_due} />
+        <RegulatoryFields adverse={!!c?.is_adverse_event} closing />
       </Form>
     </Modal>
   );
@@ -255,16 +284,18 @@ function ComplaintDrawer({ c, onClose, onChanged, onEdit, onCloseIt }: {
       width={760}
       onClose={onClose}
       title={<Space wrap>{c.no}<StatusTag dict="complaint_status" value={c.status} />{c.is_adverse_event && <AdverseTag />}</Space>}
-      extra={!closed && (
+      extra={(
         <Space wrap>
-          {can('qa', 'sales') && <Button icon={<EditOutlined />} onClick={onEdit}>修改</Button>}
-          {can('qa') && c.status === 'OPEN' && (
+          <QPrintButton drawer title={`客户投诉 ${c.no}`} text="打印" />
+          {!closed && can('qa', 'sales') && <Button icon={<EditOutlined />} onClick={onEdit}>修改</Button>}
+          {!closed && can('qa') && c.status === 'OPEN' && (
             <Button icon={<SearchOutlined />} loading={busy === 'inv'} onClick={() => act('inv', () => post(`/complaints/${c.id}/investigate`), '已开始调查')}>开始调查</Button>
           )}
-          {can('qa') && c.status === 'INVESTIGATING' && <Button type="primary" icon={<CheckCircleOutlined />} onClick={onCloseIt}>结案</Button>}
+          {!closed && can('qa') && c.status === 'INVESTIGATING' && <Button type="primary" icon={<CheckCircleOutlined />} onClick={onCloseIt}>结案</Button>}
         </Space>
       )}
     >
+      <PrintHeader title="客户投诉 / 不良事件记录" no={c.no} />
       {c.is_adverse_event && (
         <Alert type="error" showIcon icon={<AlertOutlined />} style={{ marginBottom: 16 }}
           message={<b>不良事件</b>}
@@ -284,7 +315,7 @@ function ComplaintDrawer({ c, onClose, onChanged, onEdit, onCloseIt }: {
         { key: 'cust', label: '客户', children: c.customer_name || '-' },
         { key: 'date', label: '接收日期', children: fmtDate(c.received_date) },
         { key: 'rc', label: '投诉人 / 联系方式', children: c.reporter_contact || '-' },
-        { key: 'ed', label: '事件日期 / 国家', children: `${fmtDate(c.event_date)} / ${c.country || '-'}` },
+        { key: 'ed', label: '事件日期 / 国家', children: `${fmtDate(c.event_date)} / ${normCountry(c.country) || '-'}` },
         { key: 'm', label: '产品', span: 2, children: c.material_code ? `${c.material_code} ${c.material_name}` : '-' },
         { key: 'sn', label: '序列号', children: c.sn ? <Link className="mono" to={`/trace?sn=${encodeURIComponent(c.sn)}`}>{c.sn}</Link> : '-' },
         {
@@ -305,7 +336,7 @@ function ComplaintDrawer({ c, onClose, onChanged, onEdit, onCloseIt }: {
         { key: 'rep', label: '上报评估', children: <ReportDue c={c} /> },
         { key: 'repd', label: '上报期限 / 日期', children: `${fmtDate(c.report_deadline ?? c.report_due)} / ${fmtDate(c.reported_at)}` },
         { key: 'reply', label: '客户回复', span: 2, children: c.customer_reply ? <span style={{ whiteSpace: 'pre-wrap' }}>{c.customer_reply}（{fmtDate(c.replied_at)}）</span> : <Typography.Text type="secondary">尚未回复</Typography.Text> },
-        { key: 'by', label: '登记人', children: c.created_by || '-' },
+        { key: 'by', label: '登记人', children: c.created_by_name || c.created_by || '-' },
         { key: 'cl', label: '结案人/时间', children: c.closed_by ? `${c.closed_by} ${fmtDateTime(c.closed_at)}` : '-' },
       ]} />
       {!closed && can('qa') && (
@@ -344,6 +375,9 @@ function ComplaintDrawer({ c, onClose, onChanged, onEdit, onCloseIt }: {
       </Card>
       <div style={{ marginTop: 16 }}>
         <Attachments entity="qms_complaint" entityId={c.id} bare hint="客户邮件、照片/视频、检测报告、上报回执等。" canUpload={can('qa', 'sales')} />
+      </div>
+      <div>
+        <QPrintSignatures roles={['登记', 'QA 调查', '质量负责人结案']} />
       </div>
     </Drawer>
   );
@@ -401,11 +435,11 @@ export default function Complaints() {
     { title: '序列号', dataIndex: 'sn', render: (v: string) => (v ? <Link className="mono" to={`/trace?sn=${encodeURIComponent(v)}`} onClick={stop}>{v}</Link> : '-') },
     { title: '批号', dataIndex: 'lot_no', render: (v: string) => (v ? <span className="mono">{v}</span> : '-') },
     { title: '投诉内容', dataIndex: 'description', width: 260, ellipsis: { showTitle: true } },
-    { title: '国家', dataIndex: 'country', sorter: true, render: (v: string) => v || '-' },
+    { title: '国家', dataIndex: 'country', sorter: true, render: (v: string) => normCountry(v) || '-' },
     { title: 'NCR', dataIndex: 'ncr_no', render: (v: string, r: Rec) => (v ? <Link className="mono" to={`/quality/ncrs?id=${r.ncr_id}`} onClick={stop}>{v}</Link> : '-') },
     { title: 'CAPA', dataIndex: 'capa_no', render: (v: string, r: Rec) => (v ? <Link className="mono" to={`/quality/capas?id=${r.capa_id}`} onClick={stop}>{v}</Link> : '-') },
     { title: '客户回复', dataIndex: 'replied_at', sorter: true, render: (v: string) => (v ? fmtDate(v) : <Typography.Text type="secondary">未回复</Typography.Text>) },
-    { title: '登记人', dataIndex: 'created_by' },
+    { title: '登记人', dataIndex: 'created_by', render: (v: string, r: Rec) => r.created_by_name || v },
     {
       title: '操作', key: '_op', fixed: 'right',
       render: (_: any, r: Rec) =>

@@ -52,6 +52,14 @@ export const config = {
   get demoMode(): string {
     return (process.env.DEMO_MODE || '').trim().toLowerCase();
   },
+  /** 大额采购单审批阈值（本位币，含税金额）：≥ 该金额须厂长（po_big_approve）电子签名审批；运行时读取便于测试覆盖 */
+  get poApprovalThreshold(): number {
+    return numEnv('PO_APPROVAL_THRESHOLD', 50000);
+  },
+  /** 默认增值税率（客户/供应商未设税率时使用；出口零税率客户在主数据中设 0） */
+  get defaultVatRate(): number {
+    return numEnv('DEFAULT_VAT_RATE', 0.13);
+  },
   /** 本位币：报表/驾驶舱金额统一折算为该币别（汇率表 md_exchange_rate：1 外币 = rate 本位币） */
   baseCurrency: (process.env.BASE_CURRENCY || 'CNY').trim().toUpperCase(),
   /** 人员上岗资质：报工时校验操作员持有该工序（或 *）的有效资质（REQUIRE_QUALIFICATION=0 关闭） */

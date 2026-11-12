@@ -168,7 +168,7 @@ function StockDetail({ q, onQ }: { q: string; onQ: (q: string) => void }) {
         <Input.Search allowClear placeholder="物料编码 / 名称 / 批号（可扫码）" style={{ width: narrow ? '100%' : 240 }} value={text} onChange={(e) => setText(e.target.value)} onSearch={(v) => onQ(v.trim())} />
         <WarehouseSelect placeholder="全部仓库" style={{ width: narrow ? 128 : 170 }} onChange={(v) => setQuery({ warehouse_id: v })} />
         <Select allowClear placeholder="质量状态" style={{ width: narrow ? 128 : 140 }} defaultValue={sp.get('status') || undefined} options={dictOptions('stock_status')} onChange={(v) => setQuery({ status: v })} />
-        {!narrow && <Select allowClear placeholder="效期预警" style={{ width: 140 }} defaultValue={exp ? Number(exp) : undefined} options={EXPIRING} onChange={(v) => setQuery({ expiring_days: v })} />}
+        <Select allowClear placeholder="临期预警" style={{ width: narrow ? 128 : 140 }} defaultValue={exp ? Number(exp) : undefined} options={EXPIRING} onChange={(v) => setQuery({ expiring_days: v })} />
         {(query.material_id || query.lot_no || query.location_id) && (
           <Tag closable color="blue" onClose={() => setQuery({ material_id: undefined, lot_no: undefined, location_id: undefined })}>
             已按{query.lot_no ? `批号 ${query.lot_no}` : query.location_id ? '库位' : '物料'}筛选

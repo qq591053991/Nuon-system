@@ -1,15 +1,19 @@
 import {
-  Alert, Button, Card, Col, DatePicker, Descriptions, Empty, Form, Input, InputNumber, Modal, Popconfirm, Result, Row, Select, Space, Spin,
+  Alert, App, Button, Card, Col, DatePicker, Descriptions, Empty, Form, Input, InputNumber, Modal, Popconfirm, Result, Row, Select, Space, Spin,
   Steps, Table, Tag, Typography, message, type TableColumnsType,
 } from 'antd';
-import { ArrowLeftOutlined, AuditOutlined, EditOutlined, HistoryOutlined, ImportOutlined, SaveOutlined } from '@ant-design/icons';
+import {
+  ArrowLeftOutlined, AuditOutlined, CheckOutlined, EditOutlined, HistoryOutlined, ImportOutlined, MobileOutlined, RollbackOutlined, SaveOutlined, SendOutlined,
+} from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { get, post, put, type Rec } from '../../api/http';
 import { useAuth } from '../../auth';
 import PageHeader from '../../components/PageHeader';
+import { isCancel, useESign } from '../../components/ESign';
 import { PrintButton, PrintHeader, PrintSignatures } from '../../components/Print';
+import { useCompany } from '../../utils/company';
 import { LocationSelect } from '../../components/RemoteSelect';
 import StatusTag from '../../components/StatusTag';
 import { dictLabel } from '../../utils/dict';
@@ -20,9 +24,10 @@ import {
 import { QualifiedSupplierSelect } from './purchaseKit';
 
 const RECEIVABLE = ['APPROVED', 'PARTIAL_RECEIVED'];
-const STEP_OF: Record<string, number> = { DRAFT: 0, APPROVED: 1, PARTIAL_RECEIVED: 2, RECEIVED: 3, CLOSED: 3 };
+const STEP_OF: Record<string, number> = { DRAFT: 0, SUBMITTED: 1, APPROVED: 1, PARTIAL_RECEIVED: 2, RECEIVED: 3, CLOSED: 3 };
 const NEXT_HINT: Record<string, string> = {
-  DRAFT: '确认无误后点击【保存并审批】。GMP 采购控制：只有“合格供方”且资质在有效期内的供应商才能审批通过，不符合时系统会拒绝并提示原因；客供料不能采购。',
+  DRAFT: '确认无误后点击【保存并审批】（大额采购单为【保存并提交厂长审批】）。GMP 采购控制：只有“合格供方”且资质在有效期内的供应商才能审批通过；客供料不能采购。',
+  SUBMITTED: '大额采购单已提交厂长审批：厂长在工作台“待我拍板”或本页【批准】/【退回】（电子签名）。审批前不能修改；如需修改请厂长退回。',
   APPROVED: '订单已审批：点【打印 / 导出 PDF】发给供应商。供应商回复交期或调价时点【变更】登记（需填原因，留痕）。到货后点击【收货】。',
   PARTIAL_RECEIVED: '部分到货。剩余数量到货后继续【收货】；交期/单价有变点【变更】；供应商不再供货时可【关闭】订单。',
   RECEIVED: '已全部到货。来料检验结果见下方收货记录中的 IQC 检验单。',
@@ -70,7 +75,7 @@ function PoSteps({ po }: { po: Rec | null }) {
         status={['APPROVED', 'RECEIVED', 'CLOSED'].includes(st) ? 'finish' : 'process'}
         items={[
           { title: '草稿', description: '录入订单' },
-          { title: '审批', description: po?.approved_by ? `${po.approved_by} 已审批` : '合格供方校验' },
+          { title: '审批', description: po?.approved_by ? `${po.approved_by} 已审批` : st === 'SUBMITTED' ? '待厂长审批' : '合格供方校验' },
           { title: '收货', description: got > 0 ? `已收 ${fmtQty(got)}/${fmtQty(qty)}` : '到货待检' },
           { title: '完成', description: st === 'CLOSED' ? '已关闭' : st === 'RECEIVED' ? '全部到货' : undefined },
         ]}
@@ -138,6 +143,19 @@ function PoEditor({ po, onSaved }: { po: Rec | null; onSaved: (d: Rec) => void }
   const currency: string = Form.useWatch('currency', form) || po?.currency || 'CNY';
   const expected = Form.useWatch('expected_date', form);
   const supplierId: number | undefined = Form.useWatch('supplier_id', form);
+  const { can } = useAuth();
+  const [sign, signHolder] = useESign();
+  // 大额采购单（本位币 ≥ 审批标准）：采购员只能“提交厂长审批”；厂长可直接审批（电子签名）
+  const total = useMemo(() => lines.reduce((a, r) => a + (r.purchase_uom ? (Number(r.purchase_qty) || 0) * (Number(r.purchase_price) || 0) : (Number(r.qty) || 0) * (Number(r.unit_price) || 0)), 0), [lines]);
+  const [rule, setRule] = useState<Rec | null>(null);
+  useEffect(() => {
+    const t = setTimeout(() => {
+      get('/purchase-orders/approval-rule', { amount: total, currency }, true).then(setRule).catch(() => setRule(null));
+    }, 300);
+    return () => clearTimeout(t);
+  }, [total, currency]);
+  const big = !!rule?.big;
+  const bigBoss = big && can('po_big_approve');
 
   const save = async (andApprove: boolean) => {
     const v = await form.validateFields().catch(() => null);
@@ -153,8 +171,23 @@ function PoEditor({ po, onSaved }: { po: Rec | null; onSaved: (d: Rec) => void }
     try {
       saved = po ? await put(`/purchase-orders/${po.id}`, body) : await post('/purchase-orders', body);
       if (andApprove) {
-        await post(`/purchase-orders/${saved!.id}/approve`);
-        message.success('采购订单已审批，可发送给供应商');
+        const r: Rec = saved!;
+        if (r.approval?.big ?? big) {
+          if (can('po_big_approve')) {
+            let ok = true;
+            await sign({ meaning: '大额采购单审批', submit: (signature) => post(`/purchase-orders/${r.id}/approve`, { signature }) }).catch((e) => {
+              ok = false;
+              if (!isCancel(e)) throw e;
+            });
+            message.success(ok ? '大额采购单已审批，可发送给供应商' : '草稿已保存（未审批）');
+          } else {
+            await post(`/purchase-orders/${r.id}/submit`);
+            message.success(`金额达到大额审批标准（${Number(rule?.threshold ?? 0).toLocaleString()}），已提交厂长审批`, 5);
+          }
+        } else {
+          await post(`/purchase-orders/${r.id}/approve`, {});
+          message.success('采购订单已审批，可发送给供应商');
+        }
       } else {
         message.success('草稿已保存');
       }
@@ -189,12 +222,25 @@ function PoEditor({ po, onSaved }: { po: Rec | null; onSaved: (d: Rec) => void }
               </Popconfirm>
             )}
             <Button icon={<SaveOutlined />} loading={busy === 'save'} disabled={!!busy && busy !== 'save'} onClick={() => save(false)}>保存草稿</Button>
-            <Button type="primary" icon={<AuditOutlined />} loading={busy === 'approve'} disabled={!!busy && busy !== 'approve'} onClick={() => save(true)}>
-              保存并审批
+            <Button type="primary" icon={big && !bigBoss ? <SendOutlined /> : <AuditOutlined />} loading={busy === 'approve'} disabled={!!busy && busy !== 'approve'} onClick={() => save(true)}>
+              {big && !bigBoss ? '保存并提交厂长审批' : '保存并审批'}
             </Button>
           </>
         }
       />
+      {signHolder}
+      {big && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={
+            rule?.missing_rate
+              ? `缺少 ${currency} 今日汇率，无法折算本位币，按大额采购单处理：须厂长审批`
+              : `本单金额折合 ${rule?.base_currency} ${Number(rule?.base_amount ?? 0).toLocaleString('zh-CN', { minimumFractionDigits: 2 })}，达到大额审批标准 ${Number(rule?.threshold ?? 0).toLocaleString()}：${bigBoss ? '审批时需电子签名' : '保存后提交厂长审批，批准后才能发给供应商'}`
+          }
+        />
+      )}
       <Space direction="vertical" size={16} style={{ width: '100%' }}>
         <Card size="small"><PoSteps po={po} /></Card>
         <Card title="订单信息" size="small">
@@ -213,7 +259,7 @@ function PoEditor({ po, onSaved }: { po: Rec | null; onSaved: (d: Rec) => void }
             <Row gutter={16}>
               <Col xs={24} md={12} lg={8}>
                 <Form.Item name="supplier_id" label="供应商" rules={[{ required: true, message: '请选择供应商' }]} style={{ marginBottom: 4 }}>
-                  <QualifiedSupplierSelect onPick={(s) => s && form.setFieldsValue({ currency: s.currency || 'CNY' })} />
+                  <QualifiedSupplierSelect autoFocus={!po} onPick={(s) => s && form.setFieldsValue({ currency: s.currency || 'CNY' })} />
                 </Form.Item>
                 <div style={{ marginBottom: 16 }}><SupplierCheck supplierId={supplierId} /></div>
               </Col>
@@ -259,18 +305,35 @@ function PoEditor({ po, onSaved }: { po: Rec | null; onSaved: (d: Rec) => void }
 }
 
 // ---------------- 收货弹窗 ----------------
+/**
+ * 电脑端采购收货：每行默认带出建议库位（默认库位 → 防潮柜 → 上次收货库位…）；提交前逐行做库位校验，
+ * 湿敏物料放非防潮库位等“需确认”的放置弹窗确认后带 confirm_placement 提交；收货后可直接打印批次标签。
+ */
 function ReceiveModal({ po, open, onClose, onDone }: { po: Rec; open: boolean; onClose: () => void; onDone: () => void }) {
   const [form] = Form.useForm();
+  const { modal } = App.useApp();
+  const nav = useNavigate();
   const [rows, setRows] = useState<Rec[]>([]);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (!open) return;
-    setRows(
-      (po.lines as Rec[])
-        .filter((l) => remainOf(l) > 0)
-        .map((l) => ({ _key: String(l.id), po_line_id: l.id, line: l, qty: remainOf(l) })),
-    );
+    const base = (po.lines as Rec[])
+      .filter((l) => remainOf(l) > 0)
+      .map((l) => ({ _key: String(l.id), po_line_id: l.id, line: l, qty: remainOf(l) }));
+    setRows(base);
+    // 建议库位（与 PDA 收货同一规则）
+    get('/wms/receive-context', { po: po.no }, true)
+      .then((ctx: Rec) => {
+        const sug = new Map<number, Rec>(((ctx?.lines || []) as Rec[]).map((x) => [x.po_line_id, x]));
+        setRows((old) =>
+          old.map((r) => {
+            const s = sug.get(r.po_line_id)?.suggest_location;
+            return r.location_id || !s ? r : { ...r, location_id: s.id, suggested: s };
+          }),
+        );
+      })
+      .catch(() => undefined);
   }, [open, po]);
 
   const patch = (key: string, p: Rec) => setRows((old) => old.map((r) => (r._key === key ? { ...r, ...p } : r)));
@@ -282,6 +345,39 @@ function ReceiveModal({ po, open, onClose, onDone }: { po: Rec; open: boolean; o
       onChange={(d) => patch(r._key, { [k]: d ? d.format('YYYY-MM-DD') : null })}
     />
   );
+
+  const send = async (head: Rec, use: Rec[], confirm: boolean) => {
+    setSaving(true);
+    try {
+      const rc = await post(`/purchase-orders/${po.id}/receive`, {
+        delivery_note: head.delivery_note || null,
+        remark: head.remark || null,
+        confirm_placement: confirm,
+        lines: use.map((r) => ({
+          po_line_id: r.po_line_id,
+          qty: Number(r.qty),
+          location_id: r.location_id,
+          lot_no: r.lot_no || null,
+          supplier_lot: r.supplier_lot || null,
+          mfg_date: r.mfg_date || null,
+          expiry_date: r.expiry_date || null,
+        })),
+      });
+      const quarantine = ((rc.lines || []) as Rec[]).some((l) => l.status === 'QUARANTINE');
+      onDone();
+      modal.confirm({
+        title: `已收货 ${rc.no}`,
+        content: quarantine ? '物料处于“待检”状态，已自动生成 IQC 检验单。现在打印批次标签贴到料盘/外箱上？' : '免检物料已直接入库为合格。现在打印批次标签？',
+        okText: '打印批次标签',
+        cancelText: '稍后',
+        onOk: () => {
+          window.open(`/wms/print/labels?receipt=${rc.id}`, '_blank');
+        },
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const submit = async () => {
     const head = await form.validateFields().catch(() => null);
@@ -296,27 +392,32 @@ function ReceiveModal({ po, open, onClose, onDone }: { po: Rec; open: boolean; o
       message.error(`${noLoc.line.material_code} 请选择收货库位`);
       return;
     }
+    // 提交前逐行校验库位：错误直接拦下；湿敏放非防潮柜等警告需确认
     setSaving(true);
+    let checks: { r: Rec; c: Rec }[] = [];
     try {
-      const rc = await post(`/purchase-orders/${po.id}/receive`, {
-        delivery_note: head.delivery_note || null,
-        remark: head.remark || null,
-        lines: use.map((r) => ({
-          po_line_id: r.po_line_id,
-          qty: Number(r.qty),
-          location_id: r.location_id,
-          lot_no: r.lot_no || null,
-          supplier_lot: r.supplier_lot || null,
-          mfg_date: r.mfg_date || null,
-          expiry_date: r.expiry_date || null,
-        })),
-      });
-      const quarantine = ((rc.lines || []) as Rec[]).some((l) => l.status === 'QUARANTINE');
-      message.success(quarantine ? '已收货，物料处于“待检”状态，已自动生成 IQC 检验单' : '已收货入库（免检物料直接为合格状态）', 5);
-      onDone();
+      checks = await Promise.all(use.map(async (r) => ({ r, c: await post('/wms/placement-check', { material_id: r.line.material_id, location_id: r.location_id }, true).catch(() => ({ errors: [], warnings: [] })) })));
     } finally {
       setSaving(false);
     }
+    const errors = checks.flatMap(({ r, c }) => (c.errors || []).map((e: string) => `${r.line.material_code}：${e}`));
+    if (errors.length) {
+      modal.error({ title: '收货库位不符合放置规则', content: <ul style={{ paddingLeft: 18, margin: 0 }}>{errors.map((t) => <li key={t}>{t}</li>)}</ul>, okText: '返回修改' });
+      return;
+    }
+    const warns = checks.flatMap(({ r, c }) => (c.warnings || []).map((w: string) => `${r.line.material_code}：${w}`));
+    if (warns.length) {
+      modal.confirm({
+        title: '请确认库位',
+        content: <ul style={{ paddingLeft: 18, margin: 0 }}>{warns.map((t) => <li key={t}>{t}</li>)}</ul>,
+        okText: '确认放入（已知风险）',
+        cancelText: '返回修改库位',
+        autoFocusButton: 'cancel',
+        onOk: () => send(head, use, true),
+      });
+      return;
+    }
+    await send(head, use, false);
   };
 
   const columns: TableColumnsType<Rec> = [
@@ -354,9 +455,16 @@ function ReceiveModal({ po, open, onClose, onDone }: { po: Rec; open: boolean; o
       ),
     },
     {
-      title: '收货库位', key: 'loc', width: 240,
+      title: '收货库位', key: 'loc', width: 250,
       render: (_, r) => (
-        <LocationSelect style={{ width: 230 }} value={r.location_id} onChange={(v) => patch(r._key, { location_id: v })} status={Number(r.qty) > 0 && !r.location_id ? 'error' : undefined} />
+        <div>
+          <LocationSelect style={{ width: 240 }} value={r.location_id} onChange={(v) => patch(r._key, { location_id: v })} status={Number(r.qty) > 0 && !r.location_id ? 'error' : undefined} />
+          {r.suggested && (
+            <Typography.Text type="secondary" style={{ display: 'block', fontSize: 12 }}>
+              建议 {r.suggested.code}{r.suggested.reason ? `（${r.suggested.reason}）` : ''}
+            </Typography.Text>
+          )}
+        </div>
       ),
     },
     {
@@ -387,7 +495,12 @@ function ReceiveModal({ po, open, onClose, onDone }: { po: Rec; open: boolean; o
         type="info"
         showIcon
         style={{ marginBottom: 16 }}
-        message="收货一律按库存单位（如 PCS）登记，按采购单位下单的行会提示折合的采购单位数量。需检验的物料收货后为“待检”状态，IQC 检验合格后才能领用；本次收货数量默认为未收数量，允许超收 5%。数量填 0 的行不收货。"
+        message="库位已按物料默认库位/防潮柜等规则带出（与 PDA 收货一致），提交前会校验：湿敏物料放非防潮库位需要确认，自有料不能进客供料仓。收货按库存单位登记，需检验的物料收货后为“待检”。"
+        action={
+          <Button size="small" icon={<MobileOutlined />} onClick={() => nav(`/wms/pda/receive?po=${encodeURIComponent(po.no)}`)}>
+            PDA 扫码收货
+          </Button>
+        }
       />
       <Form form={form} layout="inline" style={{ marginBottom: 16, rowGap: 8 }} preserve={false}>
         <Form.Item name="delivery_note" label="送货单号"><Input style={{ width: 180 }} placeholder="供应商送货单号" /></Form.Item>
@@ -404,7 +517,6 @@ function ReceiveModal({ po, open, onClose, onDone }: { po: Rec; open: boolean; o
     </Modal>
   );
 }
-
 
 // ---------------- 审批后变更（交期 / 回复交期 / 单价 / 数量） ----------------
 const REASONS = ['供应商回复交期', '供应商推迟交货', '价格调整', '数量调整', '需求变更'];
@@ -564,10 +676,100 @@ function ChangeHistory({ poId, version }: { poId: number; version: number }) {
   );
 }
 
+// ---------------- 采购订单打印（发给供应商：我方抬头、交货地址、按采购单位、无内部字段） ----------------
+function PurchaseOrderPrint({ po, supplier }: { po: Rec; supplier: Rec | null }) {
+  const company = useCompany();
+  const cell = { border: '1px solid #000', padding: '3px 6px', fontSize: 11 } as const;
+  const num = { ...cell, textAlign: 'right' as const, whiteSpace: 'nowrap' as const };
+  return (
+    <div className="print-only">
+      <PrintHeader
+        title={`${company?.name ? `${company.name} ` : ''}采购订单 PURCHASE ORDER`}
+        no={po.no}
+        extra={<div>下单日期：{fmtDate(po.order_date)}　币别：{po.currency}</div>}
+      />
+      <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 8 }}>
+        <tbody>
+          <tr>
+            <td style={{ ...cell, width: '50%', verticalAlign: 'top' }}>
+              <b>供应商</b>：{po.supplier_name}<br />
+              联系人：{[supplier?.contact, supplier?.phone, supplier?.email].filter(Boolean).join(' / ') || '-'}<br />
+              地址：{supplier?.address || '-'}
+            </td>
+            <td style={{ ...cell, verticalAlign: 'top' }}>
+              <b>采购方</b>：{company?.name || '-'}{company?.phone ? `　电话：${company.phone}` : ''}<br />
+              交货地址：{company?.address || '-'}<br />
+              付款条件：{supplier?.payment_terms_days != null ? `月结 ${supplier.payment_terms_days} 天` : '-'}{company?.tax_no ? `　税号：${company.tax_no}` : ''}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+        <thead>
+          <tr>
+            {['行', '物料编码', '品名 / 规格', '数量', '单位', '单价', '金额', '交期', '备注'].map((h) => (
+              <th key={h} style={{ ...cell, background: '#f0f0f0', whiteSpace: 'nowrap' }}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {(po.lines as Rec[]).map((l) => {
+            const pu = !!l.purchase_uom;
+            return (
+              <tr key={l.id}>
+                <td style={cell}>{l.line_no}</td>
+                <td style={{ ...cell, whiteSpace: 'nowrap' }}>{l.material_code}</td>
+                <td style={cell}>{l.material_name}{l.material_spec ? ` / ${l.material_spec}` : ''}</td>
+                <td style={num}>{fmtQty(pu ? l.purchase_qty : l.qty)}{pu && <div style={{ fontSize: 9 }}>（{fmtQty(l.qty)} {l.uom}）</div>}</td>
+                <td style={{ ...cell, whiteSpace: 'nowrap' }}>{pu ? l.purchase_uom : l.uom}</td>
+                <td style={num}>{fmtPrice(pu ? l.purchase_price : l.unit_price, po.currency)}</td>
+                <td style={num}>{fmtMoney(l.amount, po.currency)}</td>
+                <td style={{ ...cell, whiteSpace: 'nowrap' }}>{fmtDate(l.promised_date || l.expected_date || po.expected_date)}</td>
+                <td style={cell}>{l.remark || ''}</td>
+              </tr>
+            );
+          })}
+          <tr>
+            <td style={{ ...cell, textAlign: 'right' }} colSpan={6}><b>合计（含税）</b></td>
+            <td style={num}><b>{fmtMoney(po.total_amount, po.currency)}</b></td>
+            <td style={cell} colSpan={2} />
+          </tr>
+        </tbody>
+      </table>
+      {po.remark && <p style={{ fontSize: 11, margin: '6px 0 0' }}>备注：{po.remark}</p>}
+      <div style={{ fontSize: 11, marginTop: 8, lineHeight: 1.8 }}>
+        <div>交货要求：1. 送货单请注明本采购单号、物料编码与批号，随货附出厂检验报告/COA；2. 湿敏/静电敏感物料请真空防潮、防静电包装；3. 交期如有变化请提前书面告知采购。</div>
+        <div>来料须经本公司 IQC 检验合格后入库；不合格品按质量协议退换。</div>
+      </div>
+      <style>{'@media print { .po-sign > .print-only { display: flex !important; } }'}</style>
+      <div className="po-sign"><PrintSignatures roles={['采购', '审核', '供应商确认（签字盖章）']} /></div>
+    </div>
+  );
+}
+
 // ---------------- 查看（审批后） ----------------
 function PoView({ po, reload }: { po: Rec; reload: () => Promise<unknown> }) {
   const nav = useNavigate();
   const { can } = useAuth();
+  const [sign, signHolder] = useESign();
+  /** 厂长批准 / 退回大额采购单（电子签名；退回需填原因） */
+  const decide = async (approve: boolean) => {
+    try {
+      if (approve) {
+        await sign({ meaning: '大额采购单审批', submit: (signature) => post(`/purchase-orders/${po.id}/approve`, { signature }) });
+        message.success(`${po.no} 已批准，采购可发给供应商`);
+      } else {
+        await sign({
+          meaning: '大额采购单退回', reasonRequired: true, reasonLabel: '退回原因', reasonPlaceholder: '如：单价偏高，请再议价',
+          submit: (signature) => post(`/purchase-orders/${po.id}/reject`, { reason: signature.reason, signature }),
+        });
+        message.success(`${po.no} 已退回采购修改`);
+      }
+      await reload();
+    } catch (e) {
+      if (!isCancel(e)) throw e;
+    }
+  };
   const [busy, setBusy] = useState<string>();
   const [receiving, setReceiving] = useState(false);
   const [changing, setChanging] = useState(false);
@@ -677,7 +879,19 @@ function PoView({ po, reload }: { po: Rec; reload: () => Promise<unknown> }) {
         extra={
           <>
             <Button icon={<ArrowLeftOutlined />} onClick={() => nav('/purchase/orders')}>返回列表</Button>
-            <PrintButton title={`采购订单 ${po.no}`} />
+            {st !== 'SUBMITTED' && <PrintButton landscape title={`采购订单 ${po.no}`} />}
+            {st === 'SUBMITTED' && can('po_big_approve') && (
+              <>
+                <Button icon={<RollbackOutlined />} onClick={() => decide(false)}>退回</Button>
+                <Button type="primary" icon={<CheckOutlined />} onClick={() => decide(true)}>批准</Button>
+              </>
+            )}
+            {st === 'SUBMITTED' && !can('po_big_approve') && <Tag color="orange" style={{ alignSelf: 'center' }}>已提交厂长审批，等待批准</Tag>}
+            {st === 'SUBMITTED' && can('purchase') && (
+              <Popconfirm title="撤回并取消该采购订单？" okText="取消订单" cancelText="不取消" onConfirm={() => act('cancel', `/purchase-orders/${po.id}/cancel`, '订单已取消')}>
+                <Button danger loading={busy === 'cancel'}>取消订单</Button>
+              </Popconfirm>
+            )}
             {receivable && can('purchase') && <Button icon={<EditOutlined />} onClick={() => setChanging(true)}>变更</Button>}
             {st === 'APPROVED' && !anyReceived && can('purchase') && (
               <Popconfirm title="确定取消该采购订单？" onConfirm={() => act('cancel', `/purchase-orders/${po.id}/cancel`, '订单已取消')}>
@@ -696,7 +910,18 @@ function PoView({ po, reload }: { po: Rec; reload: () => Promise<unknown> }) {
         }
       />
       </div>
-      <PrintHeader title="采购订单" no={po.no} extra={<div>币别：{po.currency}</div>} />
+      {signHolder}
+      {st === 'SUBMITTED' && po.approval && (
+        <Alert
+          className="no-print"
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={`大额采购单：金额折合 ${po.approval.base_currency} ${Number(po.approval.base_amount ?? 0).toLocaleString('zh-CN', { minimumFractionDigits: 2 })}（≥ ${Number(po.approval.threshold).toLocaleString()}），须厂长电子签名批准`}
+        />
+      )}
+      <PurchaseOrderPrint po={po} supplier={supplier} />
+      <div className="no-print">
       <Space direction="vertical" size={16} style={{ width: '100%' }}>
         <Card size="small" className="no-print"><PoSteps po={po} /></Card>
         <Card size="small" title="订单信息">
@@ -736,13 +961,6 @@ function PoView({ po, reload }: { po: Rec; reload: () => Promise<unknown> }) {
               </Table.Summary.Row>
             )}
           />
-          <div className="print-only" style={{ fontSize: 11, marginTop: 8, lineHeight: 1.8 }}>
-            <div>交货要求：1. 送货单请注明本采购单号、物料编码与批号，随货附出厂检验报告/COA；2. 湿敏/静电敏感物料请真空防潮、防静电包装；3. 交期如有变化请提前书面告知采购。</div>
-            <div>来料须经本公司 IQC 检验合格后入库；不合格品按质量协议退换。</div>
-          </div>
-          {/* 通用签字栏在打印时被 .print-only 的 display:block 覆盖成竖排，这里局部恢复横排 */}
-          <style>{'@media print { .po-sign > .print-only { display: flex !important; } }'}</style>
-          <div className="po-sign"><PrintSignatures roles={['采购', '审核', '供应商确认（签字盖章）']} /></div>
         </Card>
         <ChangeHistory poId={po.id} version={version} />
         <Card size="small" className="no-print" title={`收货记录（${(po.receipts || []).length} 次）`}>
@@ -753,6 +971,7 @@ function PoView({ po, reload }: { po: Rec; reload: () => Promise<unknown> }) {
           )}
         </Card>
       </Space>
+      </div>
       {receivable && (
         <ChangeModal
           po={po}

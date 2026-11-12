@@ -9,10 +9,14 @@ import { EPS, g, round } from '../common/num';
 import { inList, like, paginate } from '../common/paginate';
 import { inc, ser, serList } from '../common/presenter';
 import { PrismaService, type Tx } from '../common/prisma.service';
+import { config } from '../config';
+import { userPermissions } from '../auth';
+import { EsignService, type SignatureDto } from '../core/esign.service';
 import { NumberingService } from '../core/numbering.service';
 import { WmsService, type ReceiveLineInput } from '../wms/wms.service';
 import type { PoDto, PoLineDto, ReceiveDto } from './erp.dto';
 import { bookingOf, RateBook } from './currency';
+import { KittingService } from './kitting.service';
 import { calcPoLine } from './po-line';
 import { qInt } from './query';
 
@@ -50,7 +54,13 @@ export interface MaterialPurchaseInput {
 
 @Injectable()
 export class PurchaseService {
-  constructor(private readonly db: PrismaService, private readonly numbering: NumberingService, private readonly wms: WmsService) {}
+  constructor(
+    private readonly db: PrismaService,
+    private readonly numbering: NumberingService,
+    private readonly wms: WmsService,
+    private readonly esign: EsignService,
+    private readonly kitting: KittingService,
+  ) {}
 
   /** 校验并生成订单行：客供料不能采购 */
   private async poLines(tx: Tx, lines: PoLineDto[]) {
@@ -140,6 +150,7 @@ export class PurchaseService {
     if (!po) throw new NotFound('采购订单');
     const d = fixPo(ser('PurchaseOrder', po, CH));
     d.receipts = serList('Receipt', await c.receipt.findMany({ where: { po_id: id }, orderBy: { id: 'asc' }, include: inc('Receipt', CH) }), CH);
+    d.approval = await this.bigness(c, po);
     return d;
   }
 
@@ -164,6 +175,7 @@ export class PurchaseService {
     return this.db.tx(async (tx) => {
       const po = await tx.purchaseOrder.findUnique({ where: { id } });
       if (!po) throw new NotFound('采购订单');
+      if (po.status === 'SUBMITTED') throw new BizError('采购单已提交厂长审批，不能修改；如需修改请厂长【退回】后再改');
       if (po.status !== 'DRAFT') throw new BizError('只有草稿状态可以修改');
       const supplierId = b.supplier_id ?? po.supplier_id;
       if (supplierId !== po.supplier_id) await this.checkSupplier(tx, supplierId);
@@ -185,26 +197,106 @@ export class PurchaseService {
     });
   }
 
-  /** 审批：供应商必须在合格供方名录内且资质未过期 */
-  approve(id: number, user: CurrentUser) {
+  /**
+   * 大额采购单判定：订单金额折本位币（今日适用汇率）≥ PO_APPROVAL_THRESHOLD 时须厂长（po_big_approve）电子签名审批；
+   * 缺汇率无法折算时按大额处理（宁可多一道审批）。
+   */
+  async bigness(c: Tx, po: { total_amount: Prisma.Decimal | number; currency: string }) {
+    const threshold = config.poApprovalThreshold;
+    const book = await RateBook.load(c);
+    const base = book.toBase(po.total_amount, po.currency, today());
+    const big = threshold > 0 && (base === null || base + 0.005 >= threshold);
+    return { threshold, base_currency: book.base, base_amount: base, missing_rate: base === null, big };
+  }
+
+  /** 供应商合格供方校验（审批、提交审批前） */
+  private checkQualified(sup: { name: string; status: string; qualification_expiry: Date | null }) {
+    if (sup.status !== 'QUALIFIED') {
+      throw new BizError(
+        `供应商【${sup.name}】当前为“${SUPPLIER_STATUS[sup.status] ?? sup.status}”，不在合格供方名录内，采购订单不能审批（GMP 采购控制）。` +
+          '请联系质量部完成供应商评审，评为“合格供方”后再审批；急用可改选其他合格供应商。',
+      );
+    }
+    if (sup.qualification_expiry && sup.qualification_expiry.getTime() < today().getTime()) {
+      throw new BizError(`供应商【${sup.name}】资质已于 ${fmtDate(sup.qualification_expiry)} 过期，采购订单不能审批。请联系质量部完成供应商再评价（更新资质有效期）后再审批。`);
+    }
+  }
+
+  private bigText(b: { base_amount: number | null; threshold: number; base_currency: string; missing_rate: boolean }, currency: string) {
+    return b.missing_rate
+      ? `缺少 ${currency} 今日汇率，无法折算本位币，按大额采购单处理`
+      : `金额折合 ${b.base_currency} ${money(b.base_amount!).toLocaleString('zh-CN', { minimumFractionDigits: 2 })} ≥ 大额审批标准 ${b.threshold.toLocaleString('zh-CN')}`;
+  }
+
+  /**
+   * 审批：供应商必须在合格供方名录内且资质未过期。
+   * 大额采购单（见 bigness）只能由厂长（po_big_approve）电子签名审批（草稿直接批或批“待审批”）；采购员须先【提交审批】。
+   */
+  approve(id: number, user: CurrentUser, signature?: SignatureDto | null) {
     return this.db.tx(async (tx) => {
       const po = await tx.purchaseOrder.findUnique({ where: { id }, include: { supplier: true } });
       if (!po) throw new NotFound('采购订单');
-      if (po.status !== 'DRAFT') throw new BizError('只有草稿可以审批');
-      const sup = po.supplier;
-      if (sup.status !== 'QUALIFIED') {
-        throw new BizError(
-          `供应商【${sup.name}】当前为“${SUPPLIER_STATUS[sup.status] ?? sup.status}”，不在合格供方名录内，采购订单不能审批（GMP 采购控制）。` +
-            '请联系质量部完成供应商评审，评为“合格供方”后再审批；急用可改选其他合格供应商。',
-        );
-      }
-      if (sup.qualification_expiry && sup.qualification_expiry.getTime() < today().getTime()) {
-        throw new BizError(`供应商【${sup.name}】资质已于 ${fmtDate(sup.qualification_expiry)} 过期，采购订单不能审批。请联系质量部完成供应商再评价（更新资质有效期）后再审批。`);
+      if (!['DRAFT', 'SUBMITTED'].includes(po.status)) throw new BizError('只有草稿或待审批的采购单可以审批');
+      this.checkQualified(po.supplier);
+      const b = await this.bigness(tx, po);
+      const canBig = userPermissions(user).has('po_big_approve');
+      if (b.big) {
+        if (!canBig) {
+          throw new BizError(
+            po.status === 'SUBMITTED'
+              ? `采购单 ${po.no} 已提交厂长审批（${this.bigText(b, po.currency)}），请等待厂长批准`
+              : `采购单 ${po.no} ${this.bigText(b, po.currency)}，须厂长审批：请点【提交审批】`,
+          );
+        }
+        await this.esign.sign(tx, user, signature, '大额采购单审批', 'erp_purchase_order', po.id, po.no);
+      } else if (!userPermissions(user).has('purchase') && !canBig) {
+        throw new BizError('无权限审批采购单');
       }
       const row = await tx.purchaseOrder.update({
         where: { id },
         data: { status: 'APPROVED', approved_by: user.full_name, approved_at: new Date() },
         include: inc('PurchaseOrder', CH),
+      });
+      return { ...fixPo(ser('PurchaseOrder', row, CH)), approval: b };
+    });
+  }
+
+  /** 采购员提交大额采购单给厂长审批（草稿 → 待审批 SUBMITTED；不能再修改，厂长可批准或退回） */
+  submit(id: number, user: CurrentUser) {
+    return this.db.tx(async (tx) => {
+      const po = await tx.purchaseOrder.findUnique({ where: { id }, include: { supplier: true, lines: true } });
+      if (!po) throw new NotFound('采购订单');
+      if (po.status !== 'DRAFT') throw new BizError('只有草稿可以提交审批');
+      if (!po.lines.length) throw new BizError('请至少录入一行采购明细');
+      this.checkQualified(po.supplier);
+      const b = await this.bigness(tx, po);
+      if (!b.big) throw new BizError(`采购单金额未达大额审批标准（${b.threshold.toLocaleString('zh-CN')}），请直接【审批】`);
+      const row = await tx.purchaseOrder.update({ where: { id }, data: { status: 'SUBMITTED' }, include: inc('PurchaseOrder', CH) });
+      await tx.auditLog.create({
+        data: {
+          username: user.username, full_name: user.full_name, entity: 'erp_purchase_order', entity_id: id, action: 'UPDATE',
+          changes: JSON.stringify({ 变更类型: '提交审批', 单号: po.no, 变更原因: '大额采购单提交厂长审批', 变更内容: [this.bigText(b, po.currency)] }),
+        },
+      });
+      return { ...fixPo(ser('PurchaseOrder', row, CH)), approval: b };
+    });
+  }
+
+  /** 厂长退回大额采购单（待审批 → 草稿，填写原因、电子签名），采购员修改后可再次提交 */
+  reject(id: number, user: CurrentUser, reason: string, signature?: SignatureDto | null) {
+    return this.db.tx(async (tx) => {
+      const po = await tx.purchaseOrder.findUnique({ where: { id } });
+      if (!po) throw new NotFound('采购订单');
+      if (po.status !== 'SUBMITTED') throw new BizError('只有待审批的采购单可以退回');
+      const why = String(reason ?? '').trim();
+      if (why.length < 2) throw new BizError('请填写退回原因（如：单价偏高，请再议价）');
+      await this.esign.sign(tx, user, { password: signature?.password ?? '', reason: why }, '大额采购单退回', 'erp_purchase_order', po.id, po.no);
+      const row = await tx.purchaseOrder.update({ where: { id }, data: { status: 'DRAFT' }, include: inc('PurchaseOrder', CH) });
+      await tx.auditLog.create({
+        data: {
+          username: user.username, full_name: user.full_name, entity: 'erp_purchase_order', entity_id: id, action: 'UPDATE',
+          changes: JSON.stringify({ 变更类型: '退回', 单号: po.no, 变更原因: why, 变更内容: ['厂长退回大额采购单，状态 待审批 → 草稿'] }),
+        },
       });
       return fixPo(ser('PurchaseOrder', row, CH));
     });
@@ -214,7 +306,7 @@ export class PurchaseService {
     return this.db.tx(async (tx) => {
       const po = await tx.purchaseOrder.findUnique({ where: { id }, include: { lines: true } });
       if (!po) throw new NotFound('采购订单');
-      if (!['DRAFT', 'APPROVED'].includes(po.status) || po.lines.some((l) => (l.received_qty || 0) > 0)) {
+      if (!['DRAFT', 'SUBMITTED', 'APPROVED'].includes(po.status) || po.lines.some((l) => (l.received_qty || 0) > 0)) {
         throw new BizError('已收货的订单不能取消，请使用“关闭”');
       }
       const row = await tx.purchaseOrder.update({ where: { id }, data: { status: 'CANCELLED' }, include: inc('PurchaseOrder', CH) });
@@ -247,9 +339,12 @@ export class PurchaseService {
           mfg_date: dateOnly(ln.mfg_date), expiry_date: dateOnly(ln.expiry_date), material_id: pl.material_id,
         });
       }
-      const rc = await this.wms.receive(tx, user, {
+      // confirm_placement：湿敏物料放非防潮库位等需确认的放置（仓储服务校验，未确认时 400 “【需确认】…”）
+      const args: Parameters<WmsService['receive']>[2] & { confirm_placement?: boolean } = {
         receipt_type: 'PURCHASE', lines, supplier_id: po.supplier_id, po, delivery_note: b.delivery_note ?? null, remark: b.remark ?? null,
-      });
+        confirm_placement: !!b.confirm_placement,
+      };
+      const rc = await this.wms.receive(tx, user, args);
       // 应付单按收货日适用汇率记账（记账汇率 + 本位币金额）
       const aps = await tx.financeDoc.findMany({ where: { ref_type: 'RECEIPT', ref_no: rc.no, exchange_rate: null } });
       if (aps.length) {
@@ -430,6 +525,9 @@ export class PurchaseService {
         };
       })
       .filter((r) => r.open_qty > EPS);
+    // 影响工单：这些物料缺料的未完工工单（齐套分析口径）
+    const short = await this.kitting.shortWorkOrdersByMaterial([...new Set(rows.map((r) => r.material_id))]);
+    for (const r of rows as any[]) r.affected_wos = (short.get(r.material_id) ?? []).slice(0, 5);
     const counts = {
       total: rows.length,
       overdue: rows.filter((r) => r.state === 'OVERDUE').length,

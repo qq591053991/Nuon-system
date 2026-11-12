@@ -7,7 +7,7 @@ import {
   SplitCellsOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { get, post, put, type Rec } from '../../api/http';
 import { useAuth } from '../../auth';
@@ -337,12 +337,14 @@ function EditWoModal({ wo, open, onClose, onDone }: { wo: Rec; open: boolean; on
 }
 
 // ---------------- 弹窗：下达后调整（未开工部分的数量 / 计划日期） ----------------
-function AdjustWoModal({ wo, open, onClose, onDone }: { wo: Rec; open: boolean; onClose: () => void; onDone: () => void }) {
+function AdjustWoModal({ wo, open, onClose, onDone, preset }: { wo: Rec; open: boolean; onClose: () => void; onDone: () => void; preset?: { qty: number; reason: string } | null }) {
   const [form] = Form.useForm();
   const [info, setInfo] = useState<Rec | null>(null);
   const [preview, setPreview] = useState<Rec | null>(null);
   const [previewErr, setPreviewErr] = useState<string | null>(null);
+  const [noChange, setNoChange] = useState(true);
   const [saving, setSaving] = useState(false);
+  const done = useRef(false);
   const timer = useMemo(() => ({ t: undefined as any }), []);
   const body = () => {
     const v = form.getFieldsValue();
@@ -355,39 +357,53 @@ function AdjustWoModal({ wo, open, onClose, onDone }: { wo: Rec; open: boolean; 
       try {
         setPreview(await post(`/work-orders/${wo.id}/adjust`, { ...body(), preview: true }, true));
         setPreviewErr(null);
+        setNoChange(false);
       } catch (e: any) {
         setPreview(null);
         const d = e?.response?.data?.detail;
+        setNoChange(d === '没有修改任何内容');
         setPreviewErr(d && d !== '没有修改任何内容' ? d : null);
       }
     }, 300);
   };
   const submit = async () => {
+    // 防重复提交：提交中或已成功时忽略（日期框连按回车等）
+    if (saving || done.current) return;
+    if (noChange) {
+      message.info('没有修改数量或日期');
+      return;
+    }
     await form.validateFields();
     setSaving(true);
     try {
       const r = await post(`/work-orders/${wo.id}/adjust`, body());
+      done.current = true;
       message.success(`工单已调整：${r.changes.join('；')}`);
       if (r.warnings?.length) message.warning(r.warnings.join('；'), 8);
-      onDone();
       onClose();
+      onDone();
     } finally {
       setSaving(false);
     }
   };
   return (
     <Modal open={open} title={`调整工单 ${wo.no}（未开工部分）`} width={620} okText="确认调整" onOk={submit} confirmLoading={saving} onCancel={onClose}
-      destroyOnHidden maskClosable={false} okButtonProps={{ disabled: !!previewErr }}
+      destroyOnHidden maskClosable={false} okButtonProps={{ disabled: !!previewErr || noChange || saving }}
       afterOpenChange={(o) => {
         if (!o) return;
+        done.current = false;
         setPreview(null);
         setPreviewErr(null);
+        setNoChange(true);
         form.setFieldsValue({
-          planned_qty: wo.planned_qty, reason: '',
+          planned_qty: preset?.qty ?? wo.planned_qty, reason: preset?.reason ?? '',
           range: [wo.planned_start ? dayjs(wo.planned_start) : null, wo.planned_end ? dayjs(wo.planned_end) : null],
         });
+        if (preset) runPreview();
         get(`/work-orders/${wo.id}/adjust-info`).then(setInfo);
       }}>
+      {/* 日期框里的回车只确认日期，不提交弹窗 */}
+      <div onKeyDown={(e) => { if (e.key === 'Enter' && (e.target as HTMLElement).closest('.ant-picker')) { e.preventDefault(); e.stopPropagation(); } }}>
       {info && (
         <Alert type="info" showIcon style={{ marginBottom: 12 }}
           message={`已开工 ${num(info.started)} ${info.uom}（完工 ${num(info.completed_qty)}、报废 ${num(info.scrap_qty)}），数量最少可调到 ${num(info.min_qty)}${info.serial_control ? `；调减时作废未开工的序列号（现有 ${info.unstarted_serials} 个），调增时按原批号补发序列号/UDI` : ''}`}
@@ -409,7 +425,71 @@ function AdjustWoModal({ wo, open, onClose, onDone }: { wo: Rec; open: boolean; 
         <Alert type={preview.warnings?.length ? 'warning' : 'success'} showIcon message={`将调整：${preview.changes.join('；')}`}
           description={preview.warnings?.length ? <ul style={{ margin: 0, paddingLeft: 18 }}>{preview.warnings.map((t: string) => <li key={t}>{t}</li>)}</ul> : undefined} />
       )}
+      {noChange && !previewErr && <Typography.Text type="secondary">修改数量或日期后，这里会显示调整内容</Typography.Text>}
+      </div>
     </Modal>
+  );
+}
+
+/** 与订单不符（销售改了订单数量）：显示订单/工单数量，一键按订单同步 */
+function MismatchAlert({ wo, onFix }: { wo: Rec; onFix: (preset: { qty: number; reason: string } | null) => void }) {
+  const { can } = useAuth();
+  const [info, setInfo] = useState<Rec | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (!wo.so_line_id || !['PLANNED', 'RELEASED', 'IN_PROGRESS'].includes(wo.status)) {
+      setInfo(null);
+      return;
+    }
+    get(`/work-orders/${wo.id}/adjust-info`, undefined, true).then(setInfo).catch(() => setInfo(null));
+  }, [wo]);
+  const m = info?.mismatch;
+  if (!m) return null;
+  const sl = info!.so_line;
+  const reason = `订单 ${sl.so_no} 第${sl.line_no}行数量变更为 ${num(m.so_qty)}，按订单同步工单数量`;
+  const planned = wo.status === 'PLANNED';
+  const fix = async () => {
+    if (planned) {
+      setBusy(true);
+      try {
+        await put(`/work-orders/${wo.id}`, { material_id: wo.material_id, planned_qty: m.suggest_qty });
+        message.success(`工单数量已改为 ${num(m.suggest_qty)}`);
+        onFix(null);
+      } finally {
+        setBusy(false);
+      }
+    } else {
+      onFix({ qty: m.suggest_qty, reason });
+    }
+  };
+  return (
+    <Alert
+      type="error"
+      showIcon
+      style={{ marginBottom: 16 }}
+      message={
+        <span>
+          与订单不符：订单 <Link to={`/sales/orders/${sl.so_id}`}>{sl.so_no}</Link> 第{sl.line_no}行 <b>{num(m.so_qty)}</b> / 工单合计 <b>{num(m.wo_total)}</b>
+          {sl.other_wo_qty ? `（含其他工单 ${num(sl.other_wo_qty)}）` : ''}
+        </span>
+      }
+      description={
+        m.cancel_suggested
+          ? '订单已不再需要本工单的数量，可取消本工单（右上角【取消工单】）。'
+          : `建议将本工单调为 ${num(m.suggest_qty)}${m.suggest_qty > m.so_qty - (sl.other_wo_qty || 0) + 1e-9 ? '（已开工部分不能再减）' : ''}。`
+      }
+      action={
+        can('plan') && !m.cancel_suggested && Math.abs(m.suggest_qty - wo.planned_qty) > 1e-9 ? (
+          planned ? (
+            <Popconfirm title={`将工单数量 ${num(wo.planned_qty)} 改为 ${num(m.suggest_qty)}？`} okText="确认调整" cancelText="不调整" onConfirm={fix}>
+              <Button type="primary" danger loading={busy}>一键调整为 {num(m.suggest_qty)}</Button>
+            </Popconfirm>
+          ) : (
+            <Button type="primary" danger onClick={fix}>一键调整为 {num(m.suggest_qty)}</Button>
+          )
+        ) : undefined
+      }
+    />
   );
 }
 
@@ -433,6 +513,7 @@ export default function WorkOrderDetail() {
   const [editOpen, setEditOpen] = useState(false);
   const [releaseOpen, setReleaseOpen] = useState(false);
   const [adjustOpen, setAdjustOpen] = useState(false);
+  const [adjustPreset, setAdjustPreset] = useState<{ qty: number; reason: string } | null>(null);
   const [relKey, setRelKey] = useState(0);
   const [sp] = useSearchParams();
   const [tab, setTab] = useState<string | undefined>(sp.get('tab') || undefined);
@@ -832,6 +913,7 @@ export default function WorkOrderDetail() {
               ]}
             />
           )}
+          <MismatchAlert wo={wo} onFix={(p) => { if (p) { setAdjustPreset(p); setAdjustOpen(true); } else load(); }} />
           {g.text && <Alert type={g.type} showIcon message={g.text} style={{ marginBottom: 16 }} />}
           <Descriptions
             size="small"
@@ -866,7 +948,7 @@ export default function WorkOrderDetail() {
       <BatchReportModal wo={wo} open={batchOpen} onClose={() => setBatchOpen(false)} onDone={load} />
       <FgReceiptModal wo={wo} open={fgOpen} onClose={() => setFgOpen(false)} onDone={load} />
       <EditWoModal wo={wo} open={editOpen} onClose={() => setEditOpen(false)} onDone={load} />
-      <AdjustWoModal wo={wo} open={adjustOpen} onClose={() => setAdjustOpen(false)} onDone={load} />
+      <AdjustWoModal wo={wo} open={adjustOpen} preset={adjustPreset} onClose={() => { setAdjustOpen(false); setAdjustPreset(null); }} onDone={load} />
       <ReleaseBatchModal wo={wo} open={releaseOpen} onClose={() => setReleaseOpen(false)}
         onDone={() => {
           setRelKey((k) => k + 1);

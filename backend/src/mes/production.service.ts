@@ -87,8 +87,28 @@ export const DEFECT_CODES: Record<string, { code: string; name: string }[]> = {
 const DEFECT_OTHER = { code: 'OTHER', name: '其他（请说明）' };
 export const defectCodes = (opType: string | null | undefined) => [...(DEFECT_CODES[opType || ''] ?? []), DEFECT_OTHER];
 
-/** QA 返工处置意见要求更换零件（此时重测前必须先登记返工换件） */
-export const REWORK_PARTS_RE = /更换|换件|换新|替换|换上|换掉|换一/;
+/**
+ * 返工换件候选与 QA 处置意见的相关度：最长公共子串长度（汉字按 2 计，字母数字按 1 计）。
+ * ≥ 4 视为意见里提到了该零件（如“更换驱动IC”↔“恒流驱动IC”、“更换电源”↔“医用电源适配器”），工位预选为拆下件。
+ */
+export function mentionScore(remark: string | null | undefined, text: string): number {
+  const a = (remark || '').toUpperCase();
+  const b = (text || '').toUpperCase();
+  const w = (ch: string) => (/[\u4e00-\u9fa5]/.test(ch) ? 2 : /[A-Z0-9]/.test(ch) ? 1 : 0);
+  let best = 0;
+  for (let i = 0; i < a.length; i++) {
+    for (let j = 0; j < b.length; j++) {
+      let k = 0;
+      let score = 0;
+      while (i + k < a.length && j + k < b.length && a[i + k] === b[j + k]) {
+        score += w(a[i + k]);
+        k += 1;
+      }
+      if (score > best) best = score;
+    }
+  }
+  return best;
+}
 export type WoOp = WorkOrderOperation & { work_center?: { name: string } | null };
 
 export interface KeyPartInput { lot_no?: string | null; part_sn?: string | null }
@@ -395,7 +415,7 @@ export class ProductionService {
     // 返工重测：QA 处置意见要求换件时，必须先登记返工换件（拆下/装上），保证单台追溯完整（F17）
     if (this.underRework(sn) && sn.ng_seq === op.seq) {
       const rn = await this.reworkNcr(tx, sn);
-      if (rn && REWORK_PARTS_RE.test(rn.disposition_remark || '')) {
+      if (rn?.require_part_change) {
         const n = await tx.keyPartBinding.count({ where: { sn_id: sn.id, ncr_id: rn.id, action: { in: ['REMOVE', 'INSTALL'] } } });
         if (!n) {
           throw new BizError(`QA 处置意见要求更换零件（“${rn.disposition_remark}”），请先在【返工换件】中登记拆下/装上的零件，再重新测试（${rn.no}）`);
@@ -587,12 +607,12 @@ export class ProductionService {
         ? {
             ncr_id: reworkNcr.id, ncr_no: reworkNcr.no, ng_seq: sn.ng_seq, op_name: reworkOp?.name ?? reworkNcr.op_name,
             description: reworkNcr.description, disposition_remark: reworkNcr.disposition_remark,
-            /** QA 意见要求换件：重测前必须先登记 */
-            require_parts: REWORK_PARTS_RE.test(reworkNcr.disposition_remark || ''),
+            /** QA 处置时勾选“需更换零件”（Ncr.require_part_change）：重测前必须先登记 */
+            require_parts: !!reworkNcr.require_part_change,
             /** 本次返工已登记的换件条数 */
             registered: keyParts.filter((k) => k.ncr_id === reworkNcr.id && k.action !== 'BIND').length,
             /** 拆下件候选：本机已绑定的关键件 + 工单 BOM 用料（含已领批次），供工位一键选择 */
-            candidates: await this.reworkCandidates(tx, wo.id, keyParts),
+            candidates: await this.reworkCandidates(tx, wo.id, keyParts, reworkNcr.disposition_remark),
           }
         : null,
       /** 关键件绑定与返工换件记录（BIND/REMOVE/INSTALL） */
@@ -642,19 +662,43 @@ export class ProductionService {
     return out('EARLY', '工序未到，禁止跳站', `该产品尚未完成【${nxt.seq} ${nxt.name}】，应先送往【${nxt.seq} ${nxt.name}】工序`);
   }
 
-  /** 返工拆下件候选：本机已绑定的关键件（带批号/部件序列号）+ 工单 BOM 用料（带已领批次） */
-  private async reworkCandidates(tx: Tx, woId: number, keyParts: { action: string; material_id: number; material_code: string | null; material_name: string | null; lot_no: string | null; part_sn: string | null }[]) {
-    const out: { material_id: number; code: string; name: string; source: 'BIND' | 'BOM'; lot_no: string | null; part_sn: string | null; lots: string[] }[] = [];
+  /**
+   * 返工拆下件候选（C-N4）：本机已绑定的关键件 + 工单 BOM 用料（带已领批次）+ 有已发布 BOM 的组件展开一层下级（如灯板里的驱动 IC，带位号）；
+   * suggested = QA 处置意见里提到了该零件（工位预选）。
+   */
+  private async reworkCandidates(
+    tx: Tx, woId: number,
+    keyParts: { action: string; material_id: number; material_code: string | null; material_name: string | null; lot_no: string | null; part_sn: string | null }[],
+    remark?: string | null,
+  ) {
+    type Cand = {
+      material_id: number; code: string; name: string; source: 'BIND' | 'BOM' | 'SUB'; parent_code: string | null; designator: string | null;
+      lot_no: string | null; part_sn: string | null; lots: string[]; score: number; suggested: boolean;
+    };
+    const out: Cand[] = [];
+    const add = (c: Omit<Cand, 'score' | 'suggested'>) => out.push({ ...c, score: Math.max(mentionScore(remark, c.name), mentionScore(remark, c.code)), suggested: false });
     for (const k of keyParts.filter((x) => x.action === 'BIND' || x.action === 'INSTALL')) {
-      out.push({ material_id: k.material_id, code: k.material_code ?? '', name: k.material_name ?? '', source: 'BIND', lot_no: k.lot_no, part_sn: k.part_sn, lots: k.lot_no ? [k.lot_no] : [] });
+      add({ material_id: k.material_id, code: k.material_code ?? '', name: k.material_name ?? '', source: 'BIND', parent_code: null, designator: null, lot_no: k.lot_no, part_sn: k.part_sn, lots: k.lot_no ? [k.lot_no] : [] });
     }
     const mats = await tx.workOrderMaterial.findMany({ where: { wo_id: woId }, orderBy: { id: 'asc' }, include: { material: true } });
     for (const m of mats) {
       if (out.some((o) => o.material_id === m.material_id)) continue;
       const lots = [...(await this.issuedLots(tx, woId, m.material_id))].sort();
-      out.push({ material_id: m.material_id, code: m.material.code, name: m.material.name, source: 'BOM', lot_no: lots.length === 1 ? lots[0] : null, part_sn: null, lots });
+      add({ material_id: m.material_id, code: m.material.code, name: m.material.name, source: 'BOM', parent_code: null, designator: null, lot_no: lots.length === 1 ? lots[0] : null, part_sn: null, lots });
+      // 半成品 / 组件：展开下级组件（返工常常只换组件里的某个零件）
+      const sub = await releasedBom(tx, m.material_id);
+      for (const ln of sub?.lines ?? []) {
+        if (out.some((o) => o.material_id === ln.component_id)) continue;
+        add({
+          material_id: ln.component_id, code: ln.component.code, name: ln.component.name, source: 'SUB', parent_code: m.material.code,
+          designator: ln.designator ?? null, lot_no: null, part_sn: null, lots: [],
+        });
+      }
     }
-    return out;
+    const top = Math.max(0, ...out.map((c) => c.score));
+    if (top >= 4) out.forEach((c) => (c.suggested = c.score === top));
+    // 预选的排在最前
+    return out.sort((a, b) => Number(b.suggested) - Number(a.suggested));
   }
 
   /** 关键件扫码即时校验（F15）：批号须是本工单已领用的批次 */
@@ -665,6 +709,12 @@ export class ProductionService {
     if (!op?.key_part_material_id) return { ok: true, message: null };
     const lot = (lotNo || '').trim();
     if (!lot) return { ok: false, message: '请扫描关键件批号' };
+    // 扫到的是产品序列号（C-N7）
+    const asSn = await tx.serialNumber.findUnique({ where: { sn: lot } });
+    if (asSn) {
+      const km = await tx.material.findUnique({ where: { id: op.key_part_material_id } });
+      return { ok: false, message: `扫到的是产品序列号 ${lot}，不是关键件【${km?.code} ${km?.name}】的批号，请扫关键件上的批号标签` };
+    }
     const lots = await this.issuedLots(tx, wo.id, op.key_part_material_id);
     if (lots.size && !lots.has(lot)) {
       return { ok: false, message: `关键件批号 ${lot} 未领用到工单 ${wo.no}（已领批次：${[...lots].sort().join(', ')}），请核对后重扫` };

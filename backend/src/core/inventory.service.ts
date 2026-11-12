@@ -226,7 +226,7 @@ export class InventoryService {
   /**
    * 库位放置规则（收货、调拨/上架、退料、盘盈新增行共用）：
    *   - 自有物料（无货主）不能放入客供料仓；客供料不能放入自有的原材料仓/成品仓（线边仓、不合格品仓两者都可）——错误，后端拒绝；
-   *   - MSL ≥ 2 的湿敏物料放入非防潮柜库位（线边、不合格品区除外）——警告，需操作人确认。
+   *   - MSL 2a 及以上的湿敏物料放入非防潮柜库位（线边、不合格品区除外）——警告，需操作人确认（收货 confirm_placement、调拨 confirm）。
    * owner_customer_id 未传时按物料主数据的货主判断。
    */
   async checkPlacement(tx: Tx, a: { material_id: number; location_id: number; owner_customer_id?: number | null }): Promise<PlacementCheck> {
@@ -241,14 +241,24 @@ export class InventoryService {
     const whName = loc.warehouse?.name ?? '';
     const firstLoc = async (where: any) =>
       (await tx.location.findFirst({ where: { is_active: true, ...where }, orderBy: { code: 'asc' } }))?.code ?? null;
+    /** 建议库位：物料默认库位（且仓库类型合适）→ 湿敏物料防潮柜 → 同类仓库的普通存储库位（不建议防潮柜给普通物料） */
+    const altFor = async (wt: string) => {
+      if (m.default_location_id) {
+        const d = await tx.location.findUnique({ where: { id: m.default_location_id }, include: { warehouse: true } });
+        if (d?.is_active && d.warehouse?.warehouse_type === wt) return d.code;
+      }
+      if (needsDryStorage(m.msl_level)) {
+        const dry = await firstLoc({ location_type: 'DRY_CABINET', warehouse: { warehouse_type: wt } });
+        if (dry) return dry;
+      }
+      return (await firstLoc({ location_type: 'STORAGE', warehouse: { warehouse_type: wt } })) ?? (await firstLoc({ warehouse: { warehouse_type: wt } }));
+    };
     if (!owner && wtype === 'CUSTOMER') {
-      const alt = needsDryStorage(m.msl_level)
-        ? await firstLoc({ location_type: 'DRY_CABINET', warehouse: { warehouse_type: 'RAW' } })
-        : await firstLoc({ warehouse: { warehouse_type: m.category === 'FINISHED' ? 'FG' : 'RAW' } });
+      const alt = await altFor(m.category === 'FINISHED' ? 'FG' : 'RAW');
       errors.push(`${m.code} 是公司自有物料，不能放入客供料仓库位 ${loc.code}（${whName}）。请改放自有仓库位${alt ? `，如 ${alt}` : ''}`);
     } else if (owner && (wtype === 'RAW' || wtype === 'FG')) {
       const cust = m.owner_customer_id === owner ? m.owner_customer?.name : (await tx.customer.findUnique({ where: { id: owner } }))?.name;
-      const alt = await firstLoc({ warehouse: { warehouse_type: 'CUSTOMER' } });
+      const alt = await altFor('CUSTOMER');
       errors.push(`${m.code} 是客供料（货主：${cust ?? owner}），不能放入自有仓库位 ${loc.code}（${whName}）。请放客供料仓库位${alt ? `，如 ${alt}` : ''}`);
     }
     if (needsDryStorage(m.msl_level) && loc.location_type !== 'DRY_CABINET' && wtype !== 'WIP' && wtype !== 'REJECT') {

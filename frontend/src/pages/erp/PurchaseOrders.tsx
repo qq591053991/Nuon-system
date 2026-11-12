@@ -1,4 +1,5 @@
-import { Badge, Button, Card, Checkbox, DatePicker, Input, Select, Space, Table, Tag, Tooltip, Typography, type TableColumnsType } from 'antd';
+import { Badge, Button, Card, Checkbox, DatePicker, Input, Select, Space, Tag, Tooltip, Typography } from 'antd';
+import ResponsiveTable, { type RColumn } from '../../components/ResponsiveTable';
 import { AlertOutlined, PlusOutlined, ReloadOutlined, SettingOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { useEffect, useState } from 'react';
@@ -66,10 +67,10 @@ export default function PurchaseOrders() {
     get('/purchase/chase', { page_size: 1 }, true).then((d) => setChase(d.counts)).catch(() => undefined);
   }, []);
 
-  const columns: TableColumnsType<Rec> = [
-    { title: '单号', dataIndex: 'no', fixed: 'left', sorter: true, render: (v, r) => <Link to={`/purchase/orders/${r.id}`} className="mono">{v}</Link> },
-    { title: '供应商', dataIndex: 'supplier_name', ellipsis: true, width: 220 },
-    { title: '下单日期', dataIndex: 'order_date', sorter: true, render: fmtDate },
+  const columns: RColumn<Rec>[] = [
+    { title: '单号', dataIndex: 'no', fixed: 'left', sorter: true, mobile: 'title', render: (v, r) => <Link to={`/purchase/orders/${r.id}`} className="mono">{v}</Link> },
+    { title: '供应商', dataIndex: 'supplier_name', ellipsis: true, width: 220, mobile: 'subtitle' },
+    { title: '下单日期', dataIndex: 'order_date', sorter: true, mobile: 'hidden', render: fmtDate },
     {
       title: '预计到货', dataIndex: 'expected_date', sorter: true,
       render: (v, r) => {
@@ -86,7 +87,7 @@ export default function PurchaseOrders() {
     },
     { title: '金额', dataIndex: 'total_amount', align: 'right', sorter: true, render: (v, r) => fmtMoney(v, r.currency) },
     { title: '状态', dataIndex: 'status', sorter: true, render: (v) => <StatusTag dict="po_status" value={v} /> },
-    { title: '到货进度', key: 'progress', render: (_, r) => <LinesProgress po={r} /> },
+    { title: '到货进度', key: 'progress', mobile: 'hidden', render: (_, r) => <LinesProgress po={r} /> },
     {
       title: '物料', key: 'materials', ellipsis: true, width: 240,
       render: (_, r) => (
@@ -95,7 +96,7 @@ export default function PurchaseOrders() {
         </Typography.Text>
       ),
     },
-    { title: '来源', dataIndex: 'source', render: (v) => (v ? <Tag>{v}</Tag> : '手工') },
+    { title: '来源', dataIndex: 'source', mobile: 'hidden', render: (v) => (v ? <Tag>{v}</Tag> : '手工') },
   ];
 
   const exportParams = { ...query, sort: undefined, order: undefined };
@@ -179,7 +180,7 @@ export default function PurchaseOrders() {
             placeholder="订单状态"
             style={{ width: 170 }}
             defaultValue={init.status}
-            options={[{ value: OPEN_STATUS, label: '进行中（待到货）' }, ...dictOptions('po_status')]}
+            options={[{ value: OPEN_STATUS, label: '进行中（待到货）' }, { value: 'DRAFT,SUBMITTED', label: '待审批（草稿 + 待厂长审批）' }, ...dictOptions('po_status')]}
             onChange={(v) => setQuery({ status: v })}
           />
           <QualifiedSupplierSelect style={{ width: 260 }} placeholder="按供应商筛选" defaultValue={init.supplier_id} onChange={(v) => setQuery({ supplier_id: v })} />
@@ -192,7 +193,7 @@ export default function PurchaseOrders() {
           <Checkbox defaultChecked={init.overdue === '1'} onChange={(e) => setQuery({ overdue: e.target.checked ? '1' : undefined })}>只看逾期未到</Checkbox>
           <Button icon={<ReloadOutlined />} onClick={reload} />
         </Space>
-        <Table
+        <ResponsiveTable
           rowKey="id"
           size="middle"
           columns={columns}

@@ -1,4 +1,4 @@
-import { Alert, Button, Card, Descriptions, Input, InputNumber, Popover, Segmented, Select, Space, Spin, Typography } from 'antd';
+import { Alert, Button, Card, Descriptions, Input, InputNumber, Popover, Segmented, Select, Space, Spin, Tooltip, Typography } from 'antd';
 import { CalculatorOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
@@ -15,9 +15,16 @@ import { fmtDateTime, fmtQty } from '../../utils/format';
 import { DateRangeFilter, useUrlFilters } from './qshared';
 
 const AQL_VALUES = [0.065, 0.1, 0.15, 0.25, 0.4, 0.65, 1.0, 1.5, 2.5, 4.0, 6.5];
+/** GB/T 2828.1 检验水平：只决定样本量大小（判别力），与“正常/加严/放宽”严格度无关 */
 const LEVELS = [
-  { value: 'II', label: '一般 II（默认）' }, { value: 'I', label: '一般 I（放宽）' }, { value: 'III', label: '一般 III（加严）' },
-  { value: 'S-1', label: '特殊 S-1' }, { value: 'S-2', label: '特殊 S-2' }, { value: 'S-3', label: '特殊 S-3' }, { value: 'S-4', label: '特殊 S-4' },
+  { value: 'I', label: '一般 I（样本量少）' }, { value: 'II', label: '一般 II（默认，标准）' }, { value: 'III', label: '一般 III（样本量多）' },
+  { value: 'S-1', label: '特殊 S-1（样本量很小）' }, { value: 'S-2', label: '特殊 S-2' }, { value: 'S-3', label: '特殊 S-3' }, { value: 'S-4', label: '特殊 S-4' },
+];
+/** 严格度（转移规则）：本系统按正常检验抽样；加严/放宽由 QA 按 GB/T 2828.1 第 9 章转移规则判定后另行执行 */
+const SEVERITIES = [
+  { value: 'NORMAL', label: '正常检验' },
+  { value: 'TIGHTENED', label: '加严检验（按表 II-B，另行执行）', disabled: true },
+  { value: 'REDUCED', label: '放宽检验（按表 II-C，另行执行）', disabled: true },
 ];
 
 const STATUS_TABS = [
@@ -54,11 +61,16 @@ export function AqlCalculator({ initialLot = 1000, initialAql = 1.0 }: { initial
     };
   }, [lot, aql, level]);
   return (
-    <div style={{ width: 340 }}>
+    <div style={{ width: 420 }}>
       <Space wrap>
         <InputNumber min={1} value={lot} onChange={setLot} placeholder="批量" prefix="批量" style={{ width: 160 }} autoFocus />
         <Select value={aql} onChange={setAql} style={{ width: 110 }} options={AQL_VALUES.map((v) => ({ value: v, label: `AQL ${v}` }))} />
-        <Select value={level} onChange={setLevel} style={{ width: 150 }} options={LEVELS} />
+        <Tooltip title="检验水平只决定样本量大小（判别力）：I 样本量少、II 标准（默认）、III 样本量多；特殊水平用于破坏性或昂贵的检验">
+          <Select value={level} onChange={setLevel} style={{ width: 190 }} options={LEVELS} popupMatchSelectWidth={false} />
+        </Tooltip>
+        <Tooltip title="严格度（正常 / 加严 / 放宽）由 GB/T 2828.1 第 9 章转移规则决定，与检验水平无关。本系统按正常检验计算；需加严或放宽时由 QA 判定后另行执行。">
+          <Select value="NORMAL" style={{ width: 150 }} options={SEVERITIES} popupMatchSelectWidth={false} />
+        </Tooltip>
       </Space>
       <Spin spinning={loading} size="small">
         {plan ? (
@@ -70,7 +82,7 @@ export function AqlCalculator({ initialLot = 1000, initialAql = 1.0 }: { initial
               { key: 're', label: '拒收数 Re', children: <b style={{ color: '#cf1322' }}>{plan.reject_num}</b> },
             ]} />
             <Typography.Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0, fontSize: 12 }}>
-              批量 {plan.lot_qty}、AQL {plan.aql}、检验水平 {plan.level}：
+              批量 {plan.lot_qty}、AQL {plan.aql}、检验水平 {plan.level}、正常检验：
               {plan.full_inspection ? '样本量 ≥ 批量，需全数检验。' : `随机抽取 ${plan.sample_size} 件，不良数 ≤ ${plan.accept_num} 接收，≥ ${plan.reject_num} 拒收。`}
               {plan.plan_letter !== plan.code_letter && `（按箭头规则采用字码 ${plan.plan_letter} 的方案）`}
             </Typography.Paragraph>
@@ -149,7 +161,7 @@ export default function Inspections() {
               { title: '检验员', key: 'inspector' }, { title: '检验时间', key: 'inspected_at', type: 'datetime' }, { title: '到货时间', key: 'created_at', type: 'datetime' },
               { title: '检验结论备注', key: 'result_remark' },
             ]} />
-            <Popover trigger="click" placement="bottomRight" title="AQL 抽样计算器（GB/T 2828.1）" content={<AqlCalculator />} destroyOnHidden>
+            <Popover trigger="click" placement="bottomRight" title="AQL 抽样计算器（GB/T 2828.1 正常检验一次抽样）" content={<AqlCalculator />} destroyOnHidden>
               <Button icon={<CalculatorOutlined />}>AQL 计算器</Button>
             </Popover>
           </Space>

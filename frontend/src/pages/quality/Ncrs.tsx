@@ -17,7 +17,8 @@ import StatusTag from '../../components/StatusTag';
 import { usePaged } from '../../components/usePaged';
 import { dictLabel, dictOptions } from '../../utils/dict';
 import { fmtDateTime, fmtQty, toDate } from '../../utils/format';
-import { DateRangeFilter, DueTag, useUrlFilters } from './qshared';
+import { DateRangeFilter, DueTag, QPrintButton, QPrintSignatures, useUrlFilters } from './qshared';
+import { PrintHeader } from '../../components/Print';
 
 const STATUS_TABS = [
   { value: 'OPEN', label: '待处置' },
@@ -28,7 +29,8 @@ const STATUS_TABS = [
 const DUE_TEXT = '处置期限按严重度：致命 3 天、严重 7 天、轻微 14 天';
 
 /** 各来源允许的处置方式及其后果说明（与后端规则一致） */
-function dispositionChoices(ncr: Rec): { value: string; label: string; desc: string }[] {
+/** 处置名称统一用字典名（与列表、签名台账一致），场景说明放在 hint */
+function dispositionChoices(ncr: Rec): { value: string; label: string; hint?: string; desc: string }[] {
   const source = ncr.source;
   if (source === 'PROCESS') {
     return [
@@ -39,7 +41,7 @@ function dispositionChoices(ncr: Rec): { value: string; label: string; desc: str
   if (source === 'IQC') {
     return [
       { value: 'USE_AS_IS', label: '让步接收', desc: '不合格库存转为“合格”，可被领用。需评估对产品安全有效性的影响。' },
-      { value: 'REWORK', label: '挑选后重检', desc: '库存转回“待检”，系统自动生成新的检验单；重检完成后才能关闭本 NCR。' },
+      { value: 'REWORK', label: '返工/返修', hint: '挑选后重检', desc: '库存转回“待检”，系统自动生成新的检验单；重检完成后才能关闭本 NCR。' },
       { value: 'RETURN', label: '退货', desc: '生成退供应商单，库存保持“不合格”隔离、暂不扣账；仓管实物出库确认后才扣减库存（采购可在“退供应商”中跟进）。' },
       { value: 'SCRAP', label: '报废', desc: '不合格库存立即报废出库。' },
     ];
@@ -50,16 +52,16 @@ function dispositionChoices(ncr: Rec): { value: string; label: string; desc: str
       { value: 'REWORK', label: '返工/返修', desc: `返修并重新检验合格后，关闭退货单 ${ncr.customer_return_no} 时退货品转为合格库存。` },
       { value: 'SCRAP', label: '报废', desc: `关闭退货单 ${ncr.customer_return_no} 时退货品报废出库，序列号标记为报废。` },
       { value: 'USE_AS_IS', label: '让步接收', desc: `经评审无质量问题（如客户误操作），关闭退货单 ${ncr.customer_return_no} 时转为合格库存。` },
-      { value: 'RETURN', label: '返还客户', desc: `原样返还客户，关闭退货单 ${ncr.customer_return_no} 时出库，序列号恢复为已发货。` },
+      { value: 'RETURN', label: '退货', hint: '返还客户', desc: `原样返还客户，关闭退货单 ${ncr.customer_return_no} 时出库，序列号恢复为已发货。` },
     ];
   }
   if (source === 'CUSTOMER') {
     // 客诉开具、无实物退回的 NCR：处置针对客户手中的产品与后续措施
     return [
-      { value: 'REWORK', label: '返修/更换', desc: '安排对客户产品返修或更换（现场或寄回）；完成后在调查记录中注明并关闭本 NCR。' },
-      { value: 'USE_AS_IS', label: '无需处理产品', desc: '经调查非产品质量问题（如使用不当），产品维持现状；向客户说明并在客诉中回复。' },
+      { value: 'REWORK', label: '返工/返修', hint: '返修或更换', desc: '安排对客户产品返修或更换（现场或寄回）；完成后在调查记录中注明并关闭本 NCR。' },
+      { value: 'USE_AS_IS', label: '让步接收', hint: '无需处理产品', desc: '经调查非产品质量问题（如使用不当），产品维持现状；向客户说明并在客诉中回复。' },
       { value: 'SCRAP', label: '报废', desc: '产品已无法修复，作报废处理（如需寄回，请登记客户退货）。' },
-      { value: 'RETURN', label: '退回客户', desc: '检测后原样退回客户。' },
+      { value: 'RETURN', label: '退货', hint: '退回客户', desc: '检测后原样退回客户。' },
     ];
   }
   return [
@@ -85,9 +87,11 @@ function DispositionModal({ ncr, onClose, onDone }: { ncr: Rec | null; onClose: 
     try {
       await sign({
         meaning: `不合格品评审处置：${dictLabel('disposition', v.disposition)}`,
-        description: `${ncr!.no}：处置方式【${c?.label}】。${c?.desc ?? ''}`,
+        description: `${ncr!.no}：处置方式【${c?.label}${c?.hint ? `（${c.hint}）` : ''}】${v.disposition === 'REWORK' && v.require_part_change ? '，要求更换零件（工位重测前须先登记返工换件）' : ''}。${c?.desc ?? ''}`,
         defaultReason: v.remark,
-        submit: (signature) => post(`/ncrs/${ncr!.id}/disposition`, { disposition: v.disposition, remark: v.remark, signature }, true),
+        submit: (signature) => post(`/ncrs/${ncr!.id}/disposition`, {
+          disposition: v.disposition, remark: v.remark, require_part_change: v.disposition === 'REWORK' && !!v.require_part_change, signature,
+        }, true),
       });
       message.success(`${ncr!.no} 已处置：${c?.label}${v.disposition === 'RETURN' && ncr!.source === 'IQC' ? '，已生成退供应商单待仓管出库' : ''}`);
       onDone();
@@ -117,12 +121,18 @@ function DispositionModal({ ncr, onClose, onDone }: { ncr: Rec | null; onClose: 
             <Space direction="vertical" style={{ width: '100%' }}>
               {choices.map((c) => (
                 <Radio key={c.value} value={c.value}>
-                  <b>{c.label}</b> <Typography.Text type="secondary" style={{ fontSize: 12 }}>{c.desc}</Typography.Text>
+                  <b>{c.label}</b>{c.hint && <b>（{c.hint}）</b>} <Typography.Text type="secondary" style={{ fontSize: 12 }}>{c.desc}</Typography.Text>
                 </Radio>
               ))}
             </Space>
           </Radio.Group>
         </Form.Item>
+        {disp === 'REWORK' && (ncr?.source === 'PROCESS' || ncr?.sn) && (
+          <Form.Item name="require_part_change" valuePropName="checked" style={{ marginTop: -8 }}
+            extra="勾选后，工位重新测试前必须先在【返工换件】中登记拆下/装上的零件（单台追溯）；不勾选则可直接重测。">
+            <Checkbox><b>需更换零件</b></Checkbox>
+          </Form.Item>
+        )}
         <Form.Item name="remark" label="评审意见" rules={[{ required: disp === 'USE_AS_IS', message: '让步接收必须填写风险评估意见' }]}>
           <Input.TextArea rows={3} placeholder={disp === 'USE_AS_IS' ? '请说明风险评估结论（对安全有效性无影响的依据）' : '如：原因为测试夹具接触不良，返工后重测'} />
         </Form.Item>
@@ -302,18 +312,20 @@ function NcrDrawer({ ncr, loading, onClose, onAction, onChanged }: {
       width={680}
       title={<Space wrap>{ncr.no}<StatusTag dict="ncr_status" value={ncr.status} /><StatusTag dict="severity" value={ncr.severity} /></Space>}
       onClose={onClose}
-      extra={can('qa') && (
+      extra={(
         <Space>
-          {ncr.status === 'OPEN' && <Button type="primary" icon={<AuditOutlined />} onClick={() => onAction('disp')}>评审处置</Button>}
-          {ncr.status === 'DISPOSITIONED' && (
+          <QPrintButton drawer title={`不合格品报告 ${ncr.no}`} text="打印" />
+          {can('qa') && ncr.status === 'OPEN' && <Button type="primary" icon={<AuditOutlined />} onClick={() => onAction('disp')}>评审处置</Button>}
+          {can('qa') && ncr.status === 'DISPOSITIONED' && (
             <Tooltip title={ncr.close_block || ''}>
               <Button type="primary" icon={<CheckCircleOutlined />} disabled={!!ncr.close_block} onClick={() => onAction('close')}>关闭</Button>
             </Tooltip>
           )}
-          {!ncr.capa_id && <Button icon={<SolutionOutlined />} onClick={() => onAction('capa')}>发起 CAPA</Button>}
+          {can('qa') && !ncr.capa_id && <Button icon={<SolutionOutlined />} onClick={() => onAction('capa')}>发起 CAPA</Button>}
         </Space>
       )}
     >
+      <PrintHeader title="不合格品报告（NCR）" no={ncr.no} />
       <Steps size="small" current={step} status={ncr.status === 'CLOSED' ? 'finish' : 'process'} style={{ marginBottom: 16 }} items={[
         { title: '开具', description: fmtDateTime(ncr.created_at) },
         { title: '评审处置', description: ncr.disposition_by ? `${ncr.disposition_by}` : `期限 ${ncr.due_on}` },
@@ -347,9 +359,12 @@ function NcrDrawer({ ncr, loading, onClose, onAction, onChanged }: {
         { key: 'sup', label: ncr.source === 'CUSTOMER' ? '客户' : '供应商', children: (ncr.source === 'CUSTOMER' ? ncr.customer_name : ncr.supplier_name) || '-' },
         { key: 'insp', label: '检验单', children: ncr.inspection_id ? <Link to={`/quality/inspections/${ncr.inspection_id}`}>{ncr.inspection_no ?? '查看检验单'}</Link> : ncr.complaint_no ? <Link to={`/quality/complaints?id=${ncr.complaint_id}`}>客诉 {ncr.complaint_no}</Link> : '-' },
         { key: 'qty', label: '数量', children: `${fmtQty(ncr.qty)} ${ncr.uom ?? ''}` },
-        { key: 'by', label: '开具人', children: ncr.created_by || '-' },
+        { key: 'by', label: '开具人', children: ncr.created_by_name || ncr.created_by || '-' },
         { key: 'desc', label: '不合格描述', span: 2, children: <span style={{ whiteSpace: 'pre-wrap' }}>{ncr.description}</span> },
-        { key: 'disp', label: '处置方式', children: <StatusTag dict="disposition" value={ncr.disposition} /> },
+        {
+          key: 'disp', label: '处置方式',
+          children: <Space size={4} wrap><StatusTag dict="disposition" value={ncr.disposition} />{ncr.require_part_change && <Tag color="orange">已要求换件</Tag>}</Space>,
+        },
         { key: 'dby', label: '处置人/时间', children: ncr.disposition_by ? `${ncr.disposition_by} ${fmtDateTime(ncr.disposition_at)}` : '-' },
         { key: 'drm', label: '评审意见', span: 2, children: <span style={{ whiteSpace: 'pre-wrap' }}>{ncr.disposition_remark || '-'}</span> },
         { key: 'capa', label: '关联 CAPA', span: 2, children: ncr.capa_id ? <Link to={`/quality/capas?id=${ncr.capa_id}`}>{ncr.capa_no ?? '查看 CAPA'}</Link> : '-' },
@@ -361,6 +376,7 @@ function NcrDrawer({ ncr, loading, onClose, onAction, onChanged }: {
       )}
       <div style={{ marginTop: 16 }}>
         <Attachments entity="qms_ncr" entityId={ncr.id} bare linked={linked} hint="缺陷照片、检测报告、客户反馈材料等；来源检验单/客诉的附件一并显示。" canUpload={can('qc', 'qa', 'wms', 'mes')} />
+        <QPrintSignatures roles={['开具', 'QA 评审处置', '关闭确认']} />
       </div>
     </Drawer>
   );
@@ -369,10 +385,11 @@ function NcrDrawer({ ncr, loading, onClose, onAction, onChanged }: {
 export default function Ncrs() {
   const { can } = useAuth();
   const [sp, setSp] = useSearchParams();
-  const url = useUrlFilters(['q', 'status', 'overdue', 'source', 'severity', 'wo_id', 'capa_id']);
-  const initStatus = url.status ?? (url.q || url.overdue || url.wo_id || url.capa_id ? '' : 'OPEN');
+  const url = useUrlFilters(['q', 'status', 'overdue', 'closable', 'source', 'severity', 'wo_id', 'capa_id']);
+  const initStatus = url.status ?? (url.closable ? 'DISPOSITIONED' : url.q || url.overdue || url.wo_id || url.capa_id ? '' : 'OPEN');
   const [status, setStatus] = useState(initStatus);
   const [overdue, setOverdue] = useState(!!url.overdue);
+  const [closableOnly, setClosableOnly] = useState(!!url.closable);
   const { rows, loading, setQuery, reload, pagination, query, onTableChange } = usePaged('/ncrs', { ...url, status: initStatus || undefined });
   const [current, setCurrent] = useState<Rec | null>(null);
   const [drawerLoading, setDrawerLoading] = useState(false);
@@ -430,6 +447,7 @@ export default function Ncrs() {
       render: (v: string, r: Rec) => (
         <Space size={4} wrap>
           <StatusTag dict="disposition" value={v} />
+          {r.require_part_change && <Tag color="orange" style={{ marginInlineEnd: 0 }}>需换件</Tag>}
           {r.status === 'DISPOSITIONED' && (r.close_block
             ? <Tooltip title={r.close_block}><Tag color="gold" style={{ marginInlineEnd: 0 }}>{r.disposition === 'RETURN' ? '待出库' : r.disposition === 'REWORK' ? '待复测' : '未满足'}</Tag></Tooltip>
             : <Tag color="green" style={{ marginInlineEnd: 0 }}>可关闭</Tag>)}
@@ -484,6 +502,11 @@ export default function Ncrs() {
       <Card>
         <Space wrap style={{ marginBottom: 12 }}>
           <Segmented value={status} options={STATUS_TABS} onChange={(v) => { setStatus(v as string); setSelected([]); setQuery({ status: v || undefined }); }} />
+          <Tooltip title="处置已执行完毕（返工已复测、退货已出库、重检已完成），可以签名关闭">
+            <Checkbox checked={closableOnly} onChange={(e) => { setClosableOnly(e.target.checked); setQuery({ closable: e.target.checked ? 1 : undefined }); }}>
+              <span style={{ color: closableOnly ? '#389e0d' : undefined }}>只看可关闭</span>
+            </Checkbox>
+          </Tooltip>
           <Tooltip title={DUE_TEXT}>
             <Checkbox checked={overdue} onChange={(e) => { setOverdue(e.target.checked); setQuery({ overdue: e.target.checked ? 1 : undefined }); }}>
               <span style={{ color: overdue ? '#cf1322' : undefined }}>只看超期</span>

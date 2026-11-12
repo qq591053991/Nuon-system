@@ -19,7 +19,12 @@ import { BigButton, confirmEnter, errText, FeedbackBar, focusLater, numText, Pda
 
 const sortLines = (ls: Rec[]) => [...ls].sort((a, b) => String(a.location_code).localeCompare(String(b.location_code))
   || String(a.material_code).localeCompare(String(b.material_code)) || String(a.lot_no).localeCompare(String(b.lot_no)) || a.id - b.id);
-const isCounted = (l: Rec) => l.counted_qty !== null && l.counted_qty !== undefined;
+/** 已盘且有效：录入后又有收发的行（recount）视为未盘，须重新清点 */
+const isCounted = (l: Rec) => l.counted_qty !== null && l.counted_qty !== undefined && !l.recount;
+/** 行标记：录入后有收发（须重盘，红）；建单后有收发、未录入（按现在实物清点，橙）——盲盘也显示，不泄露账面 */
+const MoveTag = ({ l }: { l: Rec }) => (l.recount
+  ? <Tag color="red" style={{ marginInlineEnd: 0 }}>录入后有收发，请重新清点</Tag>
+  : l.moved && (l.counted_qty === null || l.counted_qty === undefined) ? <Tag color="orange" style={{ marginInlineEnd: 0 }}>建单后有收发，按现在的实物清点</Tag> : null);
 
 /** 盘点单列表 + 新建（PDA） */
 export function PdaCountList() {
@@ -222,12 +227,16 @@ export default function PdaCount() {
 
   const doPost = async () => {
     const chk = await get(`/stock-counts/${id}`, { review: 1 });
+    // 录入后又有收发的行必须重新清点
+    const stale = (chk.lines as Rec[]).filter((l) => l.recount);
+    if (stale.length) {
+      setD(await get(`/stock-counts/${id}`));
+      const first = sortLines(stale)[0];
+      select(first);
+      return show('err', <>有 {stale.length} 行在录入后又有收发/调拨，请重新清点后再过账（已定位到 {first.location_code} {first.material_code} {first.lot_no || '-'}）</>);
+    }
     const unc = (chk.lines as Rec[]).filter((l) => !isCounted(l));
     const diffs = (chk.lines as Rec[]).filter((l) => l.diff_qty);
-    if (chk.moved_count) {
-      const ok = await confirmEnter('盘点期间有库存变动', <div>有 {chk.moved_count} 行在建单后发生过收发/调拨（账面已变）。过账按“实盘 − 当前账面”调整，请确认这些行是在变动之后盘的。</div>, '已确认，继续');
-      if (!ok) return;
-    }
     let asBook = false;
     if (unc.length) {
       asBook = await confirmEnter(`还有 ${unc.length} 行未盘`, <div>未盘行将<b>按当前账面</b>处理（不调整库存）。确定过账？<br />如需继续盘点请点“返回”。</div>, '未盘按账面，过账', true);
@@ -259,7 +268,8 @@ export default function PdaCount() {
         : <BigButton icon={<AuditOutlined />} onClick={doPost}>过账（已盘 {counted}/{lines.length}）</BigButton>) : undefined}
     >
       <Progress percent={lines.length ? Math.round((counted / lines.length) * 100) : 0} format={() => `${counted}/${lines.length}`} />
-      {d.moved_count > 0 && !blind && open && <Alert type="warning" showIcon style={{ margin: '6px 0' }} message={`${d.moved_count} 行在建单后有收发/调拨，账面已变（以当前账面为准）`} />}
+      {open && d.recount_count > 0 && <Alert type="error" showIcon style={{ margin: '6px 0' }} message={`${d.recount_count} 行在录入后又有收发/调拨，原录数已过时，请重新清点（红色“须重盘”）`} />}
+      {open && d.moved_count > d.recount_count && <Alert type="warning" showIcon style={{ margin: '6px 0' }} message={`${d.moved_count - d.recount_count} 行在建单后有收发/调拨：请按现在的实物清点${blind ? '' : '（以当前账面为准）'}`} />}
       {open && <ScanInput ref={scanRef} onScan={(c, p) => locate(c, p)} autoFocus={false} placeholder="扫库位 / 批次标签定位" style={{ height: 48, fontSize: 17, marginTop: 6 }} />}
       <FeedbackBar fb={fb} />
 
@@ -278,7 +288,8 @@ export default function PdaCount() {
           <div style={{ fontSize: 26, fontWeight: 800 }} className="mono">{cur.location_code}</div>
           <div style={{ fontSize: 17, fontWeight: 600 }}>{cur.material_code} <span style={{ fontWeight: 400, fontSize: 13, color: '#888' }}>{cur.material_name}</span></div>
           <div style={{ fontSize: 16 }}>批号 <b className="mono">{cur.lot_no || '-'}</b> <StatusTag dict="stock_status" value={cur.status} />{cur.owner_customer_id ? <Tag color="purple">客供</Tag> : null}</div>
-          {!blind && <div style={{ fontSize: 15, color: '#595959' }}>账面 {fmtQty(cur.current_qty)} {cur.uom}{cur.moved ? <Tag color="orange" style={{ marginLeft: 6 }}>建单后有变动（快照 {fmtQty(cur.system_qty)}）</Tag> : null}</div>}
+          {!blind && <div style={{ fontSize: 15, color: '#595959' }}>账面 {fmtQty(cur.current_qty)} {cur.uom}</div>}
+          {(cur.recount || cur.moved) && <div style={{ marginTop: 4 }}><MoveTag l={cur} />{cur.recount ? <span style={{ color: '#a8071a', marginLeft: 6 }}>（原录 {fmtQty(cur.counted_qty)}）</span> : null}</div>}
           <div style={{ marginTop: 8 }}>
             <PdaField ref={qtyRef} label={`实盘数量（${cur.uom}），回车保存并跳下一条`} value={val} onChange={setVal} onEnter={save} inputMode="decimal" active
               placeholder={blind ? '输入清点数量' : '输入清点数量，没有实物填 0'} />
@@ -298,9 +309,10 @@ export default function PdaCount() {
             style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '8px 10px', borderRadius: 6, border: `1px solid ${l.id === curId ? '#1677ff' : '#f0f0f0'}`, background: isCounted(l) ? '#fafafa' : '#fff', cursor: open ? 'pointer' : 'default' }}>
             <div style={{ flex: 1, minWidth: 0, fontSize: 14 }}>
               <b className="mono">{l.location_code}</b> · {l.material_code} · <span className="mono">{l.lot_no || '-'}</span>
+              {(l.recount || l.moved) && <div><MoveTag l={l} /></div>}
             </div>
             <div style={{ textAlign: 'right', fontSize: 15, minWidth: 70 }}>
-              {isCounted(l) ? <b>{fmtQty(l.counted_qty)}</b> : <span style={{ color: '#bbb' }}>未盘</span>}
+              {l.recount ? <b style={{ color: '#cf1322' }}>须重盘</b> : isCounted(l) ? <b>{fmtQty(l.counted_qty)}</b> : <span style={{ color: '#bbb' }}>未盘</span>}
               {!blind && l.diff_qty ? <div style={{ color: l.diff_qty > 0 ? '#389e0d' : '#cf1322', fontSize: 12 }}>{l.diff_qty > 0 ? '+' : ''}{fmtQty(l.diff_qty)}</div> : null}
             </div>
           </div>

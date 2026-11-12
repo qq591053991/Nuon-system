@@ -23,7 +23,7 @@ const userLabel = (u: Rec) => `${u.full_name}${u.badge_no ? `（工牌 ${u.badge
 
 /** 资质当前状态 */
 function stateOf(r: Rec): { text: string; color: string } {
-  if (!r.is_active) return { text: String(r.remark || '').includes('作废') ? '已作废' : '已停用', color: 'default' };
+  if (!r.is_active) return { text: r.voided_at || String(r.remark || '').includes('作废') ? '已作废' : '已停用', color: 'default' };
   const t = dayjs().format('YYYY-MM-DD');
   if (r.certified_at > t) return { text: '未生效', color: 'gold' };
   if (r.expires_at && r.expires_at < t) return { text: '已过期', color: 'red' };
@@ -33,7 +33,7 @@ function stateOf(r: Rec): { text: string; color: string } {
 }
 
 export default function Qualifications() {
-  const { can } = useAuth();
+  const { can, user } = useAuth();
   const editable = can('qa', 'admin');
   const [sign, signHolder] = useESign();
   const { rows, loading, setQuery, reload, pagination, query, onTableChange } = usePaged('/qualifications', {}, 50);
@@ -71,7 +71,7 @@ export default function Qualifications() {
         expires_at: row.expires_at ? dayjs(row.expires_at) : null, trainer: row.trainer, certificate: row.certificate,
         is_active: row.is_active, remark: row.remark,
       }
-      : { level: 'QUALIFIED', certified_at: dayjs(), expires_at: dayjs().add(1, 'year'), is_active: true });
+      : { level: 'QUALIFIED', certified_at: dayjs(), expires_at: dayjs().add(1, 'year'), is_active: true, trainer: user?.full_name });
   };
 
   /** 扫工牌 / 输入工牌号回车 → 选中人员 */
@@ -152,7 +152,8 @@ export default function Qualifications() {
       title: '状态', key: 'state', mobile: 'subtitle',
       render: (_: any, r: Rec) => {
         const s = stateOf(r);
-        return <Tag color={s.color}>{s.text}</Tag>;
+        const tip = r.voided_at ? `${r.voided_by ?? ''} ${fmtDateTime(r.voided_at)} 作废：${r.void_reason ?? ''}` : '';
+        return <Tooltip title={tip}><Tag color={s.color}>{s.text}</Tag></Tooltip>;
       },
     },
     {
@@ -165,7 +166,8 @@ export default function Qualifications() {
     { title: '培训/考核人', dataIndex: 'trainer', render: (v: string) => v || '-' },
     { title: '证书/记录编号', dataIndex: 'certificate', render: (v: string) => v || '-' },
     { title: '备注', dataIndex: 'remark', ellipsis: true, render: (v: string) => v || '-' },
-    { title: '登记', dataIndex: 'created_at', sorter: true, render: (_: any, r: Rec) => `${r.created_by ?? ''} ${fmtDateTime(r.created_at)}` },
+    { title: '作废原因', dataIndex: 'void_reason', render: (v: string, r: Rec) => (v ? `${v}（${r.voided_by ?? ''}）` : '-') },
+    { title: '登记', dataIndex: 'created_at', sorter: true, render: (_: any, r: Rec) => `${r.created_by_name ?? r.created_by ?? ''} ${fmtDateTime(r.created_at)}` },
   ];
   if (editable) {
     columns.push({
@@ -193,7 +195,8 @@ export default function Qualifications() {
               { title: '等级', value: (r) => dictLabel('qual_level', r.level) }, { title: '状态', value: (r) => stateOf(r).text },
               { title: '取证日期', key: 'certified_at', type: 'date' }, { title: '有效期至', key: 'expires_at', type: 'date' },
               { title: '培训/考核人', key: 'trainer' }, { title: '证书/记录编号', key: 'certificate' }, { title: '备注', key: 'remark' },
-              { title: '登记人', key: 'created_by' }, { title: '登记时间', key: 'created_at', type: 'datetime' },
+              { title: '作废原因', key: 'void_reason' }, { title: '作废人', key: 'voided_by' }, { title: '作废时间', key: 'voided_at', type: 'datetime' },
+              { title: '登记人', value: (r) => r.created_by_name ?? r.created_by }, { title: '登记时间', key: 'created_at', type: 'datetime' },
             ]} />
             {editable && <Button type="primary" icon={<PlusOutlined />} onClick={() => openForm(null)}>登记资质</Button>}
           </Space>

@@ -54,6 +54,7 @@ export const ENTITY_NAMES: Record<string, string> = {
   sys_login: '登录',
   sys_attachment: '附件',
   sys_setting: '系统设置',
+  sys_audit_verify: '审计完整性校验',
 };
 
 export const entityName = (e?: string | null) => (e ? ENTITY_NAMES[e] || e : '-');
@@ -147,7 +148,19 @@ export const FIELD_NAMES: Record<string, string> = {
   // 用户与登录
   username: '账号', badge_no: '工牌号', pin: '工位 PIN', auth_source: '登录方式', must_change_password: '下次登录须改密', password_changed_at: '密码修改时间',
   failed_login_count: '连续失败次数', locked_until: '锁定至', last_login_at: '最近登录', reason: '原因', source: '登录方式', locked: '已锁定',
-  import_migration_mode: '上线迁移模式', external_id: '金蝶用户ID',
+  import_migration_mode: '上线迁移模式', external_id: '金蝶用户ID', must_change_pin: '下次刷卡须改 PIN',
+  // 物料 / 往来单位（审计中常见的主数据字段）
+  category: '物料类别', uom: '单位', lead_time_days: '提前期(天)', min_order_qty: '最小订购量', purchase_uom: '采购单位', purchase_factor: '采购单位换算',
+  gtin: 'GTIN', sn_prefix: '序列号前缀', msl_level: '湿敏等级', esd_sensitive: '静电敏感', wavelength_nm: '波长(nm)', aql: 'AQL', model: '型号',
+  registration_no: '注册证号', device_class: '器械类别', name_en: '英文名称', tax_rate: '税率', short_name: '简称', country: '国家', contact: '联系人',
+  phone: '电话', address: '地址', tax_no: '税号', mah_name: '注册人', payment_terms_days: '账期(天)', quality_agreement_no: '质量协议号',
+  quality_agreement_expiry: '质量协议到期', qualification_expiry: '资质有效期', iso: 'ISO 认证', priority: '优先级', planned_start: '计划开工',
+  planned_end: '计划完工', customer_po: '客户 PO', ship_to: '收货地址', expected_date_line: '行交期', purchase_qty: '采购数量', purchase_price: '采购单价',
+  invoice_no: '发票号', invoice_date: '开票日期', bank_account: '收款账户', exchange_rate: '汇率', base_amount: '本位币金额', require_part_change: '须换件返工',
+  calibration_required: '需校准', next_calibration_date: '下次校准', last_calibration_date: '上次校准', calibration_cycle_days: '校准周期(天)', op_types: '适用工序',
+  ok: '结论', sealed_total: '已封存记录', sealed_now: '本次新封存', problems: '异常条数', problem_records: '异常记录',
+  'company.name': '公司名称', 'company.name_en': '英文名称', 'company.address': '地址', 'company.address_en': '英文地址', 'company.phone': '电话',
+  'company.tax_no': '税号', 'company.bank': '开户行及账号', 'company.swift': 'SWIFT',
 };
 
 /** 审计中的 ID 字段（后端在 refs 中给出“编码 名称”） */

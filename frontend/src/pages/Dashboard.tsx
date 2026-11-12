@@ -6,7 +6,7 @@
  *  - QA/质检/采购/工程：KPI + 待办。
  * KPI 与待办点进去都带筛选参数（见后端 workbench.service.ts 的 PATHS）。
  */
-import { Alert, Button, Card, Col, Empty, Result, Row, Skeleton, Space, Typography } from 'antd';
+import { Alert, Button, Card, Col, Result, Row, Skeleton, Space, Typography } from 'antd';
 import {
   AccountBookOutlined, ApartmentOutlined, AuditOutlined, ExperimentOutlined, FileSearchOutlined, NodeIndexOutlined, PlusOutlined,
   SafetyCertificateOutlined, ShoppingCartOutlined, TeamOutlined, ThunderboltOutlined, ToolOutlined, UploadOutlined,
@@ -20,7 +20,7 @@ import { useNarrow } from '../components/ResponsiveTable';
 import DeliveryRisk from './workbench/DeliveryRisk';
 import { useGo } from './workbench/links';
 import {
-  Approvals, FinancePanel, FpyDrill, KpiGrid, ManagerCharts, OperatorHome, OutputDrill, SecurityPanel, TodoCard, WarehouseGrid, useShortcuts, type Shortcut,
+  Approvals, ExpiryCard, FinancePanel, FpyDrill, KpiGrid, ManagerCharts, OperatorHome, OutputDrill, SecurityPanel, TodoCard, WarehouseGrid, useShortcuts, type Shortcut,
 } from './workbench/parts';
 
 /** 首次登录的金蝶账号等尚未分配角色的用户 */
@@ -116,20 +116,23 @@ function Workbench() {
   const [riskRed, setRiskRed] = useState(0);
   const profile: string = wb?.profile ?? '';
 
-  useEffect(() => {
-    get('/workbench').then(setWb).catch(() => setWb({ profile: 'none', kpis: [], sections: {} }));
+  const load = useCallback(() => {
+    get('/workbench').then(setWb).catch(() => setWb((old: Rec | null) => old ?? { profile: 'none', kpis: [], sections: {} }));
     get('/todos').then(setTodos).catch(() => undefined);
   }, []);
+  useEffect(load, [load]);
   useEffect(() => {
     if (profile === 'manager') get('/dashboard').then(setDash).catch(() => undefined);
   }, [profile]);
   useEffect(() => {
-    if (sp.get('risk')) setTimeout(() => document.getElementById('risk')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 300);
-  }, [sp]);
+    const target = sp.get('risk') ? 'risk' : sp.get('panel') === 'expiry' ? 'expiry' : null;
+    if (target && wb) setTimeout(() => document.getElementById(target)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 300);
+  }, [sp, wb]);
 
   const scrollRisk = () => setTimeout(() => document.getElementById('risk')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
   const onHash = useCallback((h: string) => {
-    if (h === '#output') setOutDate('');
+    if (h === '#expiry' || h.includes('panel=expiry')) setTimeout(() => document.getElementById('expiry')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
+    else if (h === '#output') setOutDate('');
     else if (h === '#fpy') setFpyOp('');
     else if (h === '#risk-red' || h.includes('risk=overdue') || h === '#risk') {
       setRiskFilter(h === '#risk-red' ? 'red' : h === '#risk' ? 'all' : 'overdue');
@@ -145,6 +148,8 @@ function Workbench() {
   const hour = new Date().getHours();
   const greet = hour < 12 ? '上午好' : hour < 18 ? '下午好' : '晚上好';
   const showRisk = ['manager', 'planner', 'sales'].includes(profile);
+  // 厂长“其他预警”：校准/供应商资质已在“到期预警”卡中，这里只留缺汇率、低于安全库存、逾期订单等；手机上只留红色
+  const managerAlerts: Rec[] = (dash?.alerts ?? []).filter((a: Rec) => !/^(设备|供应商)/.test(a.text) && (!narrow || a.level === 'error'));
 
   const banner = (
     <div className="wb-banner">
@@ -209,31 +214,28 @@ function Workbench() {
       {narrowShortcuts}
       {kpis.length > 0 && <KpiGrid kpis={kpis} onHash={onHash} limit={narrow ? 6 : undefined} />}
 
+      {profile === 'qa' && sections.expiry && <ExpiryCard data={sections.expiry} />}
+
       {profile === 'manager' && (
-        <Row gutter={[16, 16]}>
-          {(!narrow || (sections.approvals?.length ?? 0) + riskRed > 0) && (
-            <Col xs={24} lg={10}><Approvals items={sections.approvals ?? []} risk={riskRed} onHash={onHash} /></Col>
-          )}
-          {!narrow && (
-            <Col xs={24} lg={14}>
-              <Card title="预警提醒" size="small" style={{ height: '100%' }}>
-                {dash?.alerts?.length ? (
-                  <Space direction="vertical" style={{ width: '100%' }}>
-                    {dash.alerts.slice(0, 6).map((a: Rec, i: number) => <Alert key={i} type={a.level} showIcon message={a.text} />)}
-                  </Space>
-                ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="一切正常" />}
-              </Card>
-            </Col>
-          )}
-        </Row>
+        <Approvals items={sections.approvals ?? []} risk={riskRed} bigPos={sections.big_pos ?? []} onHash={onHash} onChanged={load} />
       )}
 
       {showRisk && <DeliveryRisk key={`${riskFilter}-${riskNonce}`} initialFilter={riskFilter} title={profile === 'sales' ? '订单交付跟踪' : '交付风险'} onSummary={(x) => setRiskRed(x.red)} />}
+
+      {profile === 'manager' && sections.expiry && <ExpiryCard data={sections.expiry} />}
+      {profile === 'manager' && managerAlerts.length > 0 && (
+        <Card title="其他预警" size="small">
+          <Space direction="vertical" style={{ width: '100%' }}>
+            {managerAlerts.slice(0, narrow ? 3 : 6).map((a: Rec, i: number) => <Alert key={i} type={a.level} showIcon message={a.text} />)}
+          </Space>
+        </Card>
+      )}
 
       {profile === 'finance' && sections.finance && <FinancePanel f={sections.finance} />}
       {profile === 'admin' && sections.security && <SecurityPanel s={sections.security} />}
 
       {profile !== 'manager' && <TodoCard todos={todos} onHash={onHash} />}
+      {['purchaser', 'engineer'].includes(profile) && sections.expiry && <ExpiryCard data={sections.expiry} />}
 
       {profile === 'manager' && dash && !narrow && (
         <ManagerCharts d={dash} drill={{ output: (date) => setOutDate(date ?? ''), fpy: (op) => setFpyOp(op ?? '') }} />

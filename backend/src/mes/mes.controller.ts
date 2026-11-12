@@ -1,5 +1,5 @@
 /** MES 接口：生产工单、工位终端（扫码过站）、完工入库、DHR 与产品放行。 */
-import { Body, Controller, Get, Param, ParseIntPipe, Post, Put, Query } from '@nestjs/common';
+import { Body, Controller, Get, HttpException, Param, ParseIntPipe, Post, Put, Query } from '@nestjs/common';
 import { Type } from 'class-transformer';
 import { IsArray, IsBoolean, IsInt, IsNumber, IsObject, IsOptional, IsPositive, IsString, ValidateNested } from 'class-validator';
 import { Perms, User } from '../auth';
@@ -9,6 +9,7 @@ import { BizError, NotFound } from '../common/errors';
 import { inc, like, paginate, ser, serList } from '../common/paginate';
 import { PrismaService, type Tx } from '../common/prisma.service';
 import { AuthService } from '../auth/auth.service';
+import { userPermissions } from '../auth/roles';
 import { SignatureDto } from '../core/esign.service';
 import { NumberingService } from '../core/numbering.service';
 import { OP_TYPE_TEXT, ProductionService } from './production.service';
@@ -101,8 +102,10 @@ class ReworkPartsDto {
   @IsOptional() @IsString() remark?: string | null;
 }
 
+/** 班组长授权：刷班组长本人工牌 + PIN（须有 mes_lead） */
 class StationAuthDto {
-  @IsString() password: string;
+  @IsString() badge_no: string;
+  @IsString() pin: string;
 }
 
 class StationResumeDto {
@@ -290,12 +293,23 @@ export class MesController {
     }));
   }
 
-  /** 终端账号授权（退出工位终端 / 终端设置 / 设定本工位工序）：校验当前登录的终端账号密码（班组长掌握） */
+  /**
+   * 班组长授权（设定本工位工序 / 终端设置 / 退出工位终端，C-N3）：刷班组长本人工牌 + PIN，须有 mes_lead 权限。
+   * 只校验、不切换工位会话；工牌或 PIN 错误按工牌登录失败计数（连续失败锁定）。
+   */
   @Post('mes/station/authorize')
-  async stationAuthorize(@Body() b: StationAuthDto, @User() user: CurrentUser) {
-    const v = await this.auth.verifyUserPassword(user, b.password || '');
-    if (!v.ok) throw new BizError(`密码错误：请输入本工位终端登录账号（${user.full_name}）的密码，由班组长或管理员输入`);
-    return { ok: true, username: user.username, full_name: user.full_name };
+  async stationAuthorize(@Body() b: StationAuthDto) {
+    // 授权失败返回 400（不能用 401：会让工位上的终端账号被当作登录失效而退出）
+    const u = await this.auth.authenticateBadge(b.badge_no, b.pin).catch((e: unknown) => {
+      if (e instanceof HttpException && e.getStatus() === 401) {
+        throw new BizError(`班组长授权失败：${(e.getResponse() as { detail?: string }).detail ?? '工牌号或 PIN 错误'}`);
+      }
+      throw e;
+    });
+    if (!userPermissions(u).has('mes_lead')) {
+      throw new BizError(`${u.full_name} 不是班组长（没有“工位终端设定/退出授权”权限），请由本线班组长刷工牌授权`);
+    }
+    return { ok: true, user: { username: u.username, full_name: u.full_name } };
   }
 
   /** 空闲锁定后本人刷工牌恢复（同一班次免 PIN、保留未提交数据）：工牌须属于当前操作员 */

@@ -1,5 +1,6 @@
 /** ERP 请求体：销售订单、采购订单、采购收货、MRP 转单、收付款 */
 import { Type } from 'class-transformer';
+import { SignatureDto } from '../core/esign.service';
 import { IsArray, IsBoolean, IsInt, IsNumber, IsOptional, IsPositive, IsString, Min, ValidateNested } from 'class-validator';
 
 // ============ 销售订单 ============
@@ -95,6 +96,8 @@ export class ReceiveLineDto {
 }
 
 export class ReceiveDto {
+  /** 湿敏物料放非防潮库位等“需确认”的放置，前端弹窗确认后带 true */
+  @IsOptional() @IsBoolean() confirm_placement?: boolean;
   @IsOptional() @IsString() delivery_note?: string | null;
   @IsOptional() @IsString() remark?: string | null;
   @IsArray() @ValidateNested({ each: true }) @Type(() => ReceiveLineDto) lines: ReceiveLineDto[];
@@ -120,4 +123,16 @@ export class PaymentDto {
   @IsOptional() @Type(() => Number) @IsNumber() @IsPositive() exchange_rate?: number | null;
   /** 超出未结余额的部分转为预收/预付款 */
   @IsOptional() @IsBoolean() as_advance?: boolean;
+  /** 收付款银行账户 */
+  @IsOptional() @IsString() bank_account?: string | null;
+}
+
+// ============ 大额采购单审批 ============
+export class PoApproveDto {
+  @IsOptional() @ValidateNested() @Type(() => SignatureDto) signature?: SignatureDto | null;
+}
+
+export class PoRejectDto {
+  @IsString() reason: string;
+  @IsOptional() @ValidateNested() @Type(() => SignatureDto) signature?: SignatureDto | null;
 }

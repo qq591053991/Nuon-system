@@ -18,6 +18,7 @@ import { ser } from '../common/presenter';
 import type { Tx } from '../common/prisma.service';
 import { EsignService, type SignatureDto } from '../core/esign.service';
 import { NumberingService } from '../core/numbering.service';
+import { capaDueDate, fullNames } from './qms-rules';
 
 export interface ComplaintInput {
   customer_id?: number;
@@ -40,11 +41,27 @@ export interface ComplaintInput {
   replied_at?: Date | null;
 }
 
-/** 不良事件上报时限（天，自获知/接收日起）：中国《医疗器械不良事件监测和再评价管理办法》严重伤害 20 天；美国 FDA MDR 30 天；欧盟 MDR 严重事件 15 天 */
+/** 国家/地区统一为中文（兼容 US / USA / EU / CN 等代码） */
+const COUNTRY_ALIAS: Record<string, string> = {
+  US: '美国', USA: '美国', 'UNITED STATES': '美国', 美国: '美国', EU: '欧盟', 欧盟: '欧盟', CN: '中国', CHINA: '中国', 中国: '中国',
+  DE: '德国', GERMANY: '德国', FR: '法国', FRANCE: '法国', IT: '意大利', ES: '西班牙', NL: '荷兰', GB: '英国', UK: '英国',
+  JP: '日本', JAPAN: '日本', KR: '韩国', AU: '澳大利亚', CA: '加拿大',
+};
+export const normCountry = (v: string | null | undefined): string | null => {
+  const t = String(v ?? '').trim();
+  if (!t) return null;
+  return COUNTRY_ALIAS[t.toUpperCase()] ?? t;
+};
+const EU = ['欧盟', '德国', '法国', '意大利', '西班牙', '荷兰', '比利时', '奥地利', '瑞典', '丹麦', '芬兰', '爱尔兰', '波兰', '葡萄牙', '希腊', '捷克'];
+
+/**
+ * 不良事件上报时限（天，自获知/接收日起）：中国《医疗器械不良事件监测和再评价管理办法》严重伤害 20 天；
+ * 美国 FDA MDR 30 天；欧盟 MDR 严重事件 15 天；其他国家/地区默认 20 天（请按当地法规调整）。
+ */
 export function reportDays(country: string | null | undefined): number {
-  const c = String(country ?? '').trim().toUpperCase();
-  if (['US', 'USA', '美国'].includes(c)) return 30;
-  if (['EU', '欧盟', 'DE', 'FR', 'IT', 'ES', 'NL', '德国', '法国', '意大利', '西班牙', '荷兰'].includes(c)) return 15;
+  const c = normCountry(country) ?? '';
+  if (c === '美国') return 30;
+  if (EU.includes(c)) return 15;
   return 20;
 }
 const REG_TEXT = ['reporter_contact', 'country', 'report_no', 'customer_reply'] as const;
@@ -76,17 +93,21 @@ export class ComplaintService {
   }
 
   async create(tx: Tx, user: CurrentUser, a: ComplaintInput): Promise<Complaint> {
-    if (!a.customer_id || !(await tx.customer.findUnique({ where: { id: a.customer_id } }))) throw new NotFound('客户');
     const description = text(a.description);
-    if (!description) throw new BizError('请填写投诉内容');
     const sn = text(a.sn);
     const serial = await this.bySn(tx, sn);
+    // 未选客户时按序列号带出（发货客户）；国家未填时按客户主数据带出
+    const customerId = a.customer_id || serial?.customer_id || null;
+    const cust = customerId ? await tx.customer.findUnique({ where: { id: customerId } }) : null;
+    if (!cust) throw new BizError(sn && serial ? `序列号 ${sn} 尚未发货给客户，请选择投诉客户` : '请选择投诉客户');
+    a = { ...a, customer_id: cust.id, country: a.country !== undefined && a.country !== null && a.country !== '' ? a.country : cust.country };
+    if (!description) throw new BizError('请填写投诉内容');
     if (a.material_id && !(await tx.material.findUnique({ where: { id: a.material_id } }))) throw new NotFound('物料');
     if (serial && a.material_id && serial.material_id !== a.material_id) throw new BizError(`序列号 ${sn} 不是所选产品`);
     const material_id = a.material_id ?? serial?.material_id ?? null;
     return tx.complaint.create({
       data: {
-        no: await this.numbering.nextNo(tx, 'KS'), customer_id: a.customer_id, received_date: a.received_date ?? today(),
+        no: await this.numbering.nextNo(tx, 'KS'), customer_id: cust.id, received_date: a.received_date ?? today(),
         material_id, sn, lot_no: text(a.lot_no) ?? serial?.lot_no ?? null, description, is_adverse_event: !!a.is_adverse_event,
         status: 'OPEN', created_by: user.username, ...this.regData(a, null),
       },
@@ -97,10 +118,14 @@ export class ComplaintService {
   private regData(a: ComplaintInput, cur: Complaint | null): Record<string, any> {
     const data: Record<string, any> = {};
     for (const k of REG_TEXT) if (a[k] !== undefined) data[k] = text(a[k]);
+    if (data.country !== undefined) data.country = normCountry(data.country);
     for (const k of REG_DATE) if (a[k] !== undefined) data[k] = a[k] ?? null;
     if (a.reportable !== undefined) data.reportable = a.reportable;
     const reportable = data.reportable !== undefined ? data.reportable : cur?.reportable;
-    const deadline = data.report_deadline !== undefined ? data.report_deadline : cur?.report_deadline;
+    let deadline = data.report_deadline !== undefined ? data.report_deadline : cur?.report_deadline;
+    // 国家变更且尚未上报、本次未手工指定期限 → 按新国家重算上报期限
+    const countryChanged = cur && data.country !== undefined && normCountry(cur.country) !== data.country;
+    if (countryChanged && a.report_deadline === undefined && !(data.report_no ?? cur?.report_no)) deadline = null;
     if (reportable && !deadline) {
       const base = a.received_date ?? cur?.received_date ?? today();
       data.report_deadline = addDays(base, reportDays(data.country !== undefined ? data.country : cur?.country));
@@ -180,6 +205,7 @@ export class ComplaintService {
         no: await this.numbering.nextNo(tx, 'CAPA'), status: 'OPEN', source: 'COMPLAINT', created_by: user.username,
         title: (text(o.title) ?? `客户投诉 ${c.no} 纠正预防`).slice(0, 128),
         description: `来源：客户投诉 ${c.no}（${cust?.name ?? ''}）${c.is_adverse_event ? '【不良事件】' : ''}\n${c.description}`,
+        due_date: capaDueDate('COMPLAINT'),
       },
     });
     if (c.ncr_id) {
@@ -213,6 +239,19 @@ export class ComplaintService {
     return tx.complaint.update({ where: { id }, data: { ...data, status: 'CLOSED', investigation: inv, closed_by: user.full_name, closed_at: new Date() } });
   }
 
+  /** 按序列号带出产品、批号、发货客户与客户国家（登记投诉时扫码/输入序列号） */
+  async lookupSn(tx: Tx, snText: string) {
+    const sn = text(snText);
+    const s = sn ? await tx.serialNumber.findUnique({ where: { sn }, include: { material: true, shipment: true } }) : null;
+    if (!s) return { found: false };
+    const cust = s.customer_id ? await tx.customer.findUnique({ where: { id: s.customer_id } }) : null;
+    return {
+      found: true, sn: s.sn, material_id: s.material_id, material_code: s.material.code, material_name: s.material.name, lot_no: s.lot_no,
+      customer_id: cust?.id ?? null, customer_name: cust?.name ?? null, country: normCountry(cust?.country),
+      shipment_no: s.shipment?.no ?? null, shipped_at: s.shipped_at,
+    };
+  }
+
   /** 上报倒计时：需上报（或不良事件尚未评估）且未上报时给出期限与剩余天数 */
   private reportDue(r: Complaint) {
     if (r.report_no || r.reportable === false || (!r.reportable && !r.is_adverse_event)) return { report_due: fmtDate(r.report_deadline), report_days_left: null };
@@ -226,6 +265,7 @@ export class ComplaintService {
   /** 序列化并补充关联名称 */
   async enrich(tx: Tx, rows: Complaint[]): Promise<any[]> {
     const ids = (f: (r: Complaint) => number | null | undefined) => [...new Set(rows.map(f).filter((x): x is number => !!x))];
+    const names = await fullNames(tx, rows.map((r) => r.created_by));
     const [customers, materials, ncrs, capas] = await Promise.all([
       tx.customer.findMany({ where: { id: { in: ids((r) => r.customer_id) } } }),
       tx.material.findMany({ where: { id: { in: ids((r) => r.material_id) } } }),
@@ -249,6 +289,8 @@ export class ComplaintService {
         ncr_status: ncr?.status ?? null,
         capa_no: capa?.no ?? null,
         capa_status: capa?.status ?? null,
+        created_by_name: r.created_by ? names.get(r.created_by) ?? r.created_by : null,
+        customer_country: c.get(r.customer_id)?.country ?? null,
         ...this.reportDue(r),
       };
     });

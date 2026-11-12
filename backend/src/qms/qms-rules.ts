@@ -1,9 +1,14 @@
 /**
- * 质量规则（无依赖的纯函数，供 presenter 与各服务共用）：
- *   NCR 处置期限（按严重度）、超期判断；检验项目逐件值解析与不良件数。
+ * 质量规则（供 presenter 与各服务共用，只依赖 common 工具）：
+ *   NCR 处置期限（按严重度）、超期判断；NCR 关闭条件检查与“可关闭 NCR”清单；检验项目逐件值解析与不良件数。
+ *
+ *   closableNcrIds(db)        已满足关闭条件（处置已执行完毕）、仍未关闭的 NCR id（QA 待办“可关闭的 NCR”、NCR 列表 ?closable=1）
+ *   ncrCloseBlocker(tx, ncr)  不能关闭的原因（可关闭返回 null）
  */
+import type { Ncr } from '@prisma/client';
 import { addDays, dateOnly, fmtDate, localDateStr, today } from '../common/dates';
-import { EPS } from '../common/num';
+import { EPS, g } from '../common/num';
+import type { Tx } from '../common/prisma.service';
 
 /** NCR 处置期限（自开具日起的天数，按严重度）：致命 3 天、严重 7 天、轻微 14 天 */
 export const NCR_DUE_DAYS: Record<string, number> = { CRITICAL: 3, MAJOR: 7, MINOR: 14 };
@@ -39,7 +44,11 @@ export function overdueWhere(t: Date = today()) {
   };
 }
 
-interface ItemLike { item_type?: string | null; sample_values?: string | null; lower?: number | null; upper?: number | null; result?: string | null }
+interface ItemLike {
+  item_type?: string | null; sample_values?: string | null; lower?: number | null; upper?: number | null; result?: string | null;
+  /** 本项不良件数（正式字段；旧数据可能存于 sample_values 的 {"defects": n}） */
+  defect_qty?: number | null;
+}
 
 export const outOf = (x: number, lo: number | null | undefined, up: number | null | undefined) =>
   (lo !== null && lo !== undefined && x < lo - EPS) || (up !== null && up !== undefined && x > up + EPS);
@@ -57,9 +66,69 @@ export function parseSamples(it: ItemLike): { values: number[]; defects: number 
   return { values: [], defects: null };
 }
 
-/** 检验项目的不良件数：定量项 = 超限件数；定性项 = 录入的不良数 */
+/** 检验项目的不良件数：定量项 = 超限件数；定性项 = 录入的不良数（defect_qty 字段，旧数据兼容 sample_values） */
 export function itemDefects(it: ItemLike): number {
   const s = parseSamples(it);
   if (it.item_type === 'QUANT') return s.values.filter((x) => outOf(x, it.lower, it.upper)).length;
-  return it.result === 'FAIL' ? s.defects ?? 0 : 0;
+  if (it.result !== 'FAIL') return 0;
+  return it.defect_qty ? it.defect_qty : s.defects ?? 0;
 }
+
+// ---------------------------------------------------------------- NCR 关闭条件
+/**
+ * NCR 关闭前检查：返回不能关闭的原因（可关闭时返回 null）
+ *   制程返工：该序列号须在不合格工序复测合格（批量报工：复测合格数量 ≥ NCR 数量）；
+ *   来料挑选重检：重新检验单须已判定；来料退货：退供应商单须已出库；客户来源：关联客户退货单须已关闭。
+ */
+export async function ncrCloseBlocker(tx: Tx, ncr: Ncr): Promise<string | null> {
+  if (ncr.status !== 'DISPOSITIONED') return ncr.status === 'OPEN' ? '尚未评审处置' : '已关闭';
+  const after = ncr.disposition_at ?? ncr.created_at;
+  if (ncr.source === 'PROCESS' && ncr.disposition === 'REWORK' && ncr.wo_id && ncr.op_seq !== null) {
+    const op = `工序 ${ncr.op_seq}${ncr.op_name ? ` ${ncr.op_name}` : ''}`;
+    if (ncr.sn) {
+      const sn = await tx.serialNumber.findUnique({ where: { sn: ncr.sn } });
+      if (!sn) return null;
+      const ok = await tx.operationRecord.findFirst({ where: { sn_id: sn.id, seq: ncr.op_seq, result: 'PASS', ts: { gt: after } } });
+      if (!ok) return `返工后尚未复测合格（序列号 ${ncr.sn} 需重新通过${op}）`;
+    } else {
+      const r = await tx.operationRecord.aggregate({ where: { wo_id: ncr.wo_id, sn_id: null, seq: ncr.op_seq, result: 'PASS', ts: { gt: after } }, _sum: { qty: true } });
+      const done = r._sum.qty ?? 0;
+      if (done + EPS < ncr.qty) return `返工数量 ${g(ncr.qty)} 尚未全部复测合格（${op}已复测合格 ${g(done)}）`;
+    }
+  }
+  if (ncr.source === 'IQC' && ncr.disposition === 'REWORK' && ncr.material_id) {
+    const re = await tx.inspection.findFirst({
+      where: { material_id: ncr.material_id, lot_no: ncr.lot_no || '', id: { gt: ncr.inspection_id ?? 0 } }, orderBy: { id: 'desc' },
+    });
+    if (re && re.status === 'PENDING') return `挑选后重新检验尚未完成（检验单 ${re.no} 待检验）`;
+  }
+  if (ncr.disposition === 'RETURN') {
+    const sr = await tx.supplierReturn.findFirst({ where: { ncr_id: ncr.id, status: { not: 'CANCELLED' } }, orderBy: { id: 'desc' } });
+    if (sr && sr.status === 'PENDING') return `退供应商单 ${sr.no} 尚未出库（仓管出库确认后才能关闭）`;
+  }
+  if (ncr.source === 'CUSTOMER') {
+    const rma = await tx.customerReturn.findFirst({ where: { ncr_id: ncr.id, status: { not: 'CLOSED' } } });
+    if (rma) return `关联客户退货单 ${rma.no} 尚未关闭`;
+  }
+  return null;
+}
+
+/** 已满足关闭条件（处置已执行完毕）、仍未关闭的 NCR id（按 id 升序） */
+export async function closableNcrIds(db: Tx): Promise<number[]> {
+  const rows = await db.ncr.findMany({ where: { status: 'DISPOSITIONED' }, orderBy: { id: 'asc' } });
+  const out: number[] = [];
+  for (const n of rows) if (!(await ncrCloseBlocker(db, n))) out.push(n.id);
+  return out;
+}
+
+/** 账号 → 姓名（列表显示“开具人/登记人”用姓名） */
+export async function fullNames(db: Tx, usernames: (string | null | undefined)[]): Promise<Map<string, string>> {
+  const list = [...new Set(usernames.filter((x): x is string => !!x))];
+  if (!list.length) return new Map();
+  const rows = await db.user.findMany({ where: { username: { in: list } }, select: { username: true, full_name: true } });
+  return new Map(rows.map((u) => [u.username, u.full_name]));
+}
+
+/** CAPA 默认完成期限（天，按来源）：客诉/NCR 30 天、审核发现 60 天、其他 30 天 */
+export const CAPA_DUE_DAYS: Record<string, number> = { COMPLAINT: 30, NCR: 30, AUDIT: 60, OTHER: 30 };
+export const capaDueDate = (source: string | null | undefined, from: Date = today()) => addDays(from, CAPA_DUE_DAYS[source || 'NCR'] ?? 30);

@@ -15,6 +15,7 @@ import { usePaged } from '../../components/usePaged';
 import { dictLabel } from '../../utils/dict';
 import { fmtDateTime, fmtQty } from '../../utils/format';
 import { CsTag, LotLink, MaterialCell } from './common';
+import { clearDraft, loadDraft, savedAgo, saveDraft, useLeaveGuard, type Draft } from './pda/kit';
 
 const STATUS_OPTIONS = [
   { value: 'OPEN', label: '进行中' },
@@ -73,6 +74,17 @@ function CountDrawer({ id, onClose, onChanged }: { id: number | null; onClose: (
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [edits, setEdits] = useState<Record<number, number | null>>({});
+  const { user } = useAuth();
+  const draftKind = `count-${id}`;
+  const [restore, setRestore] = useState<Draft<Record<number, number | null>> | null>(null);
+  // 未保存的实盘数暂存本机（刷新、锁屏后可恢复）
+  useEffect(() => {
+    if (!id || restore) return;
+    if (Object.keys(edits).length) saveDraft(draftKind, user?.username, edits);
+    else clearDraft(draftKind, user?.username);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [edits, id, restore]);
+  useLeaveGuard(Object.keys(edits).length > 0);
   const [onlyDiff, setOnlyDiff] = useState(false);
   const [review, setReview] = useState(false);
   const [adding, setAdding] = useState(false);
@@ -90,6 +102,8 @@ function CountDrawer({ id, onClose, onChanged }: { id: number | null; onClose: (
     setOnlyDiff(false);
     setReview(false);
     load(false);
+    const dr = id ? loadDraft<Record<number, number | null>>(`count-${id}`, user?.username) : null;
+    setRestore(dr && Object.keys(dr.data || {}).length ? dr : null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
@@ -143,12 +157,14 @@ function CountDrawer({ id, onClose, onChanged }: { id: number | null; onClose: (
       const chk = await get(`/stock-counts/${saved!.id}`, { review: 1 });
       const unc = (chk.lines as Rec[]).filter((l) => l.counted_qty === null || l.counted_qty === undefined).length;
       const diffs = (chk.lines as Rec[]).filter((l) => l.diff_qty).length;
-      if (chk.moved_count) {
-        const ok = await modal.confirm({
-          title: '盘点期间有库存变动', okText: '已确认，继续', cancelText: '返回',
-          content: `${chk.moved_count} 行在建单后发生过收发/调拨，账面已变化（表中“当前账面”橙色标记）。过账按“实盘 − 当前账面”调整，请确认这些行是在变动之后清点的，否则请重盘这些行。`,
+      const stale = (chk.lines as Rec[]).filter((l) => l.recount);
+      if (stale.length) {
+        modal.error({
+          title: `有 ${stale.length} 行须重新清点`,
+          content: <div>这些行录入实盘后又有收发/调拨，原录数已过时（表中红色“须重盘”）：<br />{stale.slice(0, 8).map((l) => `${l.location_code} ${l.material_code} ${l.lot_no || '-'}`).join('；')}</div>,
         });
-        if (!ok) return;
+        setD(await get(`/stock-counts/${saved!.id}`, review ? { review: 1 } : undefined));
+        return;
       }
       let asBook = false;
       if (unc) {
@@ -209,10 +225,10 @@ function CountDrawer({ id, onClose, onChanged }: { id: number | null; onClose: (
     { title: '质量状态', dataIndex: 'status', width: 100, render: (v) => <StatusTag dict="stock_status" value={v} /> },
     ...(hidden ? [] : [
       {
-        title: d?.status === 'OPEN' ? '当前账面' : '建单账面', key: 'book', width: 120, align: 'right' as const,
+        title: d?.status === 'OPEN' ? '当前账面' : '录入时账面', key: 'book', width: 130, align: 'right' as const,
         render: (_: unknown, r: Rec) => (d?.status === 'OPEN' ? (
-          <span title={r.moved ? `建单快照 ${fmtQty(r.system_qty)}，之后有收发/调拨` : undefined} style={{ color: r.moved ? '#d46b08' : undefined, fontWeight: r.moved ? 600 : undefined }}>
-            {fmtQty(r.current_qty)}{r.moved ? `（快照 ${fmtQty(r.system_qty)}）` : ''}
+          <span title={r.moved ? `建单/录入时 ${fmtQty(r.system_qty)}，之后有收发/调拨` : undefined} style={{ color: r.moved ? '#d46b08' : undefined, fontWeight: r.moved ? 600 : undefined }}>
+            {fmtQty(r.current_qty)}{r.moved ? `（原 ${fmtQty(r.system_qty)}）` : ''}
           </span>
         ) : fmtQty(r.system_qty)),
       },
@@ -230,6 +246,12 @@ function CountDrawer({ id, onClose, onChanged }: { id: number | null; onClose: (
           onPressEnter={() => nextRow(idx)}
         />
       ) : <b>{fmtQty(r._counted)}</b>),
+    },
+    {
+      title: '提示', key: 'flag', width: 150,
+      render: (_, r) => (r.recount && !(r.id in edits)
+        ? <Tag color="red">录入后有收发，须重盘</Tag>
+        : r.moved && (r.counted_qty === null || r.counted_qty === undefined) ? <Tag color="orange">建单后有收发</Tag> : null),
     },
     ...(hidden ? [] : [{ title: d?.status === 'OPEN' ? '差异' : '调整量', key: 'diff', width: 90, align: 'right' as const, render: (_: unknown, r: Rec) => <Diff v={r._diff} /> }]),
   ];
@@ -271,8 +293,21 @@ function CountDrawer({ id, onClose, onChanged }: { id: number | null; onClose: (
               {d.reversed_by && <Descriptions.Item label="冲销">{d.reversed_by} · {fmtDateTime(d.reversed_at)} · {d.reverse_reason}</Descriptions.Item>}
               {d.remark && <Descriptions.Item label="备注">{d.remark}</Descriptions.Item>}
             </Descriptions>
-            {editable && d.moved_count > 0 && !hidden && (
-              <Alert type="warning" showIcon style={{ marginBottom: 12 }} message={`${d.moved_count} 行在建单后有收发/调拨，账面已变化（橙色）。过账按“实盘 − 当前账面”调整，请确认这些行是在变动之后清点的。`} />
+            {editable && restore && (
+              <Alert type="warning" showIcon style={{ marginBottom: 12 }}
+                message={`有未保存的实盘数 ${Object.keys(restore.data).length} 行（暂存于 ${savedAgo(restore.saved_at)}）`}
+                action={(
+                  <Space>
+                    <Button type="primary" onClick={() => { setEdits(restore.data); setRestore(null); message.success('已恢复，请核对后“保存实盘”'); }}>恢复</Button>
+                    <Button onClick={() => { clearDraft(draftKind, user?.username); setRestore(null); }}>丢弃</Button>
+                  </Space>
+                )} />
+            )}
+            {editable && d.recount_count > 0 && (
+              <Alert type="error" showIcon style={{ marginBottom: 12 }} message={`${d.recount_count} 行录入实盘后又有收发/调拨，原录数已过时，请重新清点并录入（红色“须重盘”）。`} />
+            )}
+            {editable && d.moved_count > d.recount_count && (
+              <Alert type="warning" showIcon style={{ marginBottom: 12 }} message={`${d.moved_count - d.recount_count} 行在建单后有收发/调拨（橙色）：请按现在的实物清点${hidden ? '' : '；过账按“实盘 − 当前账面”调整'}。`} />
             )}
             {editable && (
               <Space wrap style={{ marginBottom: 12, width: '100%' }}>

@@ -15,6 +15,7 @@
 import { HttpException, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import ExcelJS from 'exceljs';
+import { config } from '../config';
 import { PERMISSIONS, ROLES, userPermissions } from '../auth/roles';
 import type { CurrentUser } from '../common/context';
 import { today } from '../common/dates';
@@ -218,8 +219,14 @@ export class ImportService {
       const cell = ws.getCell(1, i + 1);
       cell.font = { bold: true, color: { argb: m.required ? 'FFCF1322' : 'FF262626' } };
       cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: m.required ? 'FFFFF1F0' : 'FFF5F5F5' } };
-      const choices = Array.isArray(m.options) ? m.options : m.options ? await this.dynamicOptions(m.options) : null;
-      const noteText = [m.required ? '必填' : '选填', m.note, choices?.length ? `可选：${choices.slice(0, 30).join('、')}${choices.length > 30 ? '…' : ''}` : null].filter(Boolean).join('\n');
+      let choices = Array.isArray(m.options) ? m.options : m.options ? await this.dynamicOptions(m.options) : null;
+      let note = m.note;
+      // 金蝶登录未启用：登录方式只列“本系统”（否则导入时才报错）
+      if (entity === 'users' && f === 'auth_source' && !config.kingdee.enabled) {
+        choices = (choices ?? []).filter((x) => x !== '金蝶');
+        note = '留空 = 本系统账号（金蝶云星空登录未启用，暂不能导入金蝶账号）';
+      }
+      const noteText = [m.required ? '必填' : '选填', note, choices?.length ? `可选：${choices.slice(0, 30).join('、')}${choices.length > 30 ? '…' : ''}` : null].filter(Boolean).join('\n');
       cell.note = noteText;
       if (choices?.length) {
         listCol += 1;
@@ -231,8 +238,10 @@ export class ImportService {
         const colLetter = col.letter;
         (ws as any).dataValidations.add(`${colLetter}2:${colLetter}${ROWS}`, {
           type: 'list', allowBlank: true, formulae: [`'可选值'!$${letter}$2:$${letter}$${choices.length + 1}`],
-          showErrorMessage: m.strict !== false, errorStyle: 'stop', errorTitle: '不在可选值内', error: `请从下拉中选择${header[i]}`,
-          showInputMessage: true, promptTitle: header[i], prompt: (m.note ?? '').slice(0, 250),
+          // 非严格列（如“角色”可填多个，用逗号分隔）只给“警告”，可点“是”继续；严格列才“停止”
+          showErrorMessage: true, errorStyle: m.strict === false ? 'warning' : 'stop', errorTitle: m.strict === false ? '不在下拉可选值内' : '不在可选值内',
+          error: m.strict === false ? `${header[i]}不在下拉中。${(note ?? '').slice(0, 120)}。确认无误请点“是”继续` : `请从下拉中选择${header[i]}`,
+          showInputMessage: true, promptTitle: header[i], prompt: (note ?? '').slice(0, 250),
         });
       }
     }
@@ -244,8 +253,9 @@ export class ImportService {
     gh.font = { bold: true };
     for (const [f, aliases] of fields) {
       const m = spec.meta[f] ?? {};
-      const choices = Array.isArray(m.options) ? m.options.join('、') : m.options ? `见“可选值”页（${({ locations: '当前系统的库位编码', suppliers: '当前系统的供应商编码', roles: '系统角色', departments: '已有部门' } as Record<string, string>)[m.options]}）` : '';
-      guide.addRow([aliases[0], m.required ? '是' : '', m.note ?? '', choices, m.example ?? '', aliases.slice(1).join('、')]);
+      const kdOff = entity === 'users' && f === 'auth_source' && !config.kingdee.enabled;
+      const choices = kdOff ? '本系统（金蝶登录未启用）' : Array.isArray(m.options) ? m.options.join('、') : m.options ? `见“可选值”页（${({ locations: '当前系统的库位编码', suppliers: '当前系统的供应商编码', roles: '系统角色', departments: '已有部门' } as Record<string, string>)[m.options]}）` : '';
+      guide.addRow([aliases[0], m.required ? '是' : '', kdOff ? '留空 = 本系统账号（金蝶云星空登录未启用）' : m.note ?? '', choices, m.example ?? '', aliases.slice(1).join('、')]);
     }
     [16, 6, 48, 36, 22, 28].forEach((w, i) => (guide.getColumn(i + 1).width = w));
     guide.getColumn(3).alignment = { wrapText: true, vertical: 'top' };

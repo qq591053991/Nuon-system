@@ -28,6 +28,11 @@ export function QualifiedSupplierSelect(p: P) {
       noun="供应商"
       {...p}
       labelOf={(r) => `${r.code} ${r.name}（${supplierBadge(r)}）`}
+      // 合格供方排在前面，待评审/资质过期的排后并置灰（仍可选，便于先存草稿）
+      filterSort={(a: any, b: any) => {
+        const ok = (o: any) => (String(o?.label ?? '').endsWith('（合格供方）') ? 0 : 1);
+        return ok(a) - ok(b);
+      }}
       optionRender={(o: any) => {
         const text = String(o.label ?? '');
         const m = /^(.*)（([^（）]+)）$/.exec(text);
@@ -35,7 +40,7 @@ export function QualifiedSupplierSelect(p: P) {
         const badge = m ? m[2] : '';
         return (
           <span style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{name}</span>
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', color: badge && badge !== '合格供方' ? '#8c8c8c' : undefined }}>{name}</span>
             {badge && <Tag color={badge === '合格供方' ? 'green' : 'orange'} style={{ marginInlineEnd: 0 }}>{badge}</Tag>}
           </span>
         );

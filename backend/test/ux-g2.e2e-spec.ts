@@ -165,14 +165,14 @@ describe('G2 系统管理与数据导入', () => {
     const rows: (string | number | null)[][] = [
       ['登录账号', '姓名', '角色', '部门', '工牌号', '工位PIN', '邮箱', '初始密码'],
       ['wang1', '王一', '仓管员', '仓储部', null, null, null, null],
-      ['li2', '李二', '操作员,质检员', '生产部', 'E3001', null, null, null],
+      ['li2', '李二', '操作员,质检员', '生产部', 'E3801', null, null, null],
       ['zhao3', '赵三', 'qa', '品质部', null, null, null, 'Zhao2026abc'],
     ];
     const chk = await api.upload('/api/import/users?mode=check', 'users.xlsx', await xlsx(rows));
     expect(chk.body).toMatchObject({ ok: true, check: true, total: 3, created: 3, errors: [] });
     expect(chk.body.passwords).toBeUndefined();
     expect(await t.db.base.user.count({ where: { username: { in: ['wang1', 'li2', 'zhao3'] } } })).toBe(0);
-    const bad = await api.upload('/api/import/users', 'users.xlsx', await xlsx([...rows, ['wang1', '重复', '老板', null, 'E3001', '12', null, null]]));
+    const bad = await api.upload('/api/import/users', 'users.xlsx', await xlsx([...rows, ['wang1', '重复', '老板', null, 'E3801', '12', null, null]]));
     expect(bad.body.ok).toBe(false);
     expect(bad.body.errors[0].row).toBe(5);
     expect(bad.body.errors[0].message).toContain('与第 2 行重复');
@@ -181,11 +181,11 @@ describe('G2 系统管理与数据导入', () => {
     const res = await api.upload('/api/import/users', 'users.xlsx', await xlsx(rows));
     expect(res.body).toMatchObject({ ok: true, created: 3 });
     const pw: Record<string, any> = Object.fromEntries(res.body.passwords.map((p: any) => [p.username, p]));
-    expect(pw.li2).toMatchObject({ roles: '产线操作员、质检员', badge_no: 'E3001' });
+    expect(pw.li2).toMatchObject({ roles: '产线操作员、质检员', badge_no: 'E3801' });
     expect(pw.li2.temp_pin).toMatch(/^\d{4}$/);
     expect(pw.zhao3.temp_password).toBe('（文件中指定）');
     expect((await login('wang1', pw.wang1.temp_password)).body.must_change_password).toBe(true);
-    expect((await http().post('/api/auth/badge-login').send({ badge_no: 'E3001', pin: pw.li2.temp_pin })).status).toBe(200);
+    expect((await http().post('/api/auth/badge-login').send({ badge_no: 'E3801', pin: pw.li2.temp_pin })).status).toBe(200);
     // 非管理员不能导入用户
     expect((await api.as('wh').upload('/api/import/users', 'users.xlsx', await xlsx(rows))).status).toBe(403);
   });

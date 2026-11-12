@@ -1,16 +1,17 @@
-import { Button, Card, DatePicker, Input, Select, Space, Table, Typography, type TableColumnsType } from 'antd';
+import { Button, Card, DatePicker, Input, Select, Space, Tooltip, Typography } from 'antd';
 import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
+import dayjs from 'dayjs';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import type { Rec } from '../../api/http';
 import { useAuth } from '../../auth';
 import ExportButton from '../../components/ExportButton';
 import PageHeader from '../../components/PageHeader';
 import { CustomerSelect } from '../../components/RemoteSelect';
-import StatusTag from '../../components/StatusTag';
+import ResponsiveTable, { type RColumn } from '../../components/ResponsiveTable';
 import { usePaged } from '../../components/usePaged';
 import { dictLabel, dictOptions } from '../../utils/dict';
 import { fmtDate, fmtMoney, toDate } from '../../utils/format';
-import { DueDate, QtyProgress, isPast, sumBy } from './shared';
+import { QtyProgress, SoDelivery, SoStatusTag, isPast, sumBy } from './shared';
 
 const OPEN_STATUS = 'CONFIRMED,IN_PRODUCTION,PARTIAL_SHIPPED';
 const DONE = ['SHIPPED', 'CLOSED', 'CANCELLED'];
@@ -25,28 +26,39 @@ export default function SalesOrders() {
     customer_id: sp.get('customer_id') || undefined,
   });
 
-  const columns: TableColumnsType<Rec> = [
-    { title: '单号', dataIndex: 'no', fixed: 'left', sorter: true, render: (v, r) => <Link to={`/sales/orders/${r.id}`} className="mono">{v}</Link> },
-    { title: '客户', dataIndex: 'customer_name', ellipsis: true, width: 220 },
-    { title: '客户PO', dataIndex: 'customer_po', render: (v) => v || '-' },
-    { title: '下单日期', dataIndex: 'order_date', sorter: true, render: fmtDate },
+  /** 产品去重：同一产品多行（如正常件 + 备品）只列一次，显示合计数量 */
+  const products = (r: Rec) => {
+    const m = new Map<string, { name: string; qty: number }>();
+    for (const l of (r.lines || []) as Rec[]) {
+      const k = l.material_code;
+      const o = m.get(k) ?? { name: l.material_name, qty: 0 };
+      o.qty += Number(l.qty) || 0;
+      m.set(k, o);
+    }
+    return [...m.values()].map((x) => `${x.name} ×${x.qty}`).join('、');
+  };
+  // 1366 宽度下：单号、客户、交期、金额、状态、进度、产品都在首屏；手机上变卡片（单号为标题，客户为副标题）
+  const columns: RColumn<Rec>[] = [
+    { title: '单号', dataIndex: 'no', fixed: 'left', sorter: true, width: 130, mobile: 'title', render: (v, r) => <Link to={`/sales/orders/${r.id}`} className="mono">{v}</Link> },
+    { title: '客户', dataIndex: 'customer_name', ellipsis: true, width: 180, mobile: 'subtitle' },
+    { title: '客户PO', dataIndex: 'customer_po', width: 130, ellipsis: true, render: (v) => v || '-' },
+    { title: '下单日期', dataIndex: 'order_date', sorter: true, width: 100, mobile: 'hidden', render: fmtDate },
     {
-      title: '交期', dataIndex: 'delivery_date', sorter: true,
-      render: (v, r) => <DueDate value={v} overdue={isPast(v) && !DONE.includes(r.status)} hint="交期已过，订单尚未发完" />,
+      title: <Tooltip title="各行交期中最早的一个">交期</Tooltip>, dataIndex: 'delivery_date', sorter: true, width: 130,
+      render: (_, r) => <SoDelivery so={r} overdue={isPast(r.earliest_delivery ?? r.delivery_date) && !DONE.includes(r.status)} />,
     },
-    { title: '金额', dataIndex: 'total_amount', align: 'right', sorter: true, render: (v, r) => fmtMoney(v, r.currency) },
-    { title: '状态', dataIndex: 'status', sorter: true, render: (v) => <StatusTag dict="so_status" value={v} /> },
+    { title: '金额', dataIndex: 'total_amount', align: 'right', sorter: true, width: 120, render: (v, r) => fmtMoney(v, r.currency) },
+    { title: '状态', dataIndex: 'status', sorter: true, width: 90, render: (_, r) => <SoStatusTag so={r} /> },
     {
-      title: '发货进度', key: 'progress',
-      render: (_, r) => (r.status === 'CANCELLED' ? '-' : <QtyProgress done={sumBy(r.lines, 'shipped_qty')} total={sumBy(r.lines, 'qty')} />),
+      title: '发货进度', key: 'progress', width: 150, mobile: 'hidden',
+      render: (_, r) => (r.status === 'CANCELLED' ? '-' : <QtyProgress done={sumBy(r.lines, 'shipped_qty')} total={sumBy(r.lines, 'qty')} width={130} />),
     },
     {
-      title: '产品', key: 'products', ellipsis: true, width: 220,
-      render: (_, r) => (
-        <Typography.Text type="secondary" ellipsis>
-          {(r.lines || []).map((l: Rec) => l.material_name).join('、') || '-'}
-        </Typography.Text>
-      ),
+      title: '产品', key: 'products', ellipsis: { showTitle: false }, width: 200,
+      render: (_, r) => {
+        const t = products(r);
+        return <Tooltip title={t}><Typography.Text type="secondary" ellipsis style={{ maxWidth: 190 }}>{t || '-'}</Typography.Text></Tooltip>;
+      },
     },
   ];
 
@@ -77,6 +89,12 @@ export default function SalesOrders() {
           <CustomerSelect style={{ width: 240 }} placeholder="按客户筛选" onChange={(v) => setQuery({ customer_id: v })} />
           <DatePicker.RangePicker
             placeholder={['下单日期从', '到']}
+            presets={[
+              { label: '本月', value: [dayjs().startOf('month'), dayjs().endOf('month')] },
+              { label: '上月', value: [dayjs().subtract(1, 'month').startOf('month'), dayjs().subtract(1, 'month').endOf('month')] },
+              { label: '近 30 天', value: [dayjs().subtract(29, 'day'), dayjs()] },
+              { label: '今年', value: [dayjs().startOf('year'), dayjs()] },
+            ]}
             style={{ width: 260 }}
             onChange={(v) => setQuery({ date_from: toDate(v?.[0]), date_to: toDate(v?.[1]) })}
           />
@@ -100,7 +118,7 @@ export default function SalesOrders() {
             ]}
           />
         </Space>
-        <Table rowKey="id" size="middle" columns={columns} dataSource={rows} loading={loading} pagination={pagination} onChange={onTableChange} scroll={{ x: 'max-content' }} />
+        <ResponsiveTable rowKey="id" size="middle" columns={columns} dataSource={rows} loading={loading} pagination={pagination} onChange={onTableChange} scroll={{ x: 'max-content' }} />
       </Card>
     </>
   );

@@ -9,7 +9,11 @@ import ScanInput, { type ScanInputHandle } from '../../components/ScanInput';
 import { fmtDate, fmtQty } from '../../utils/format';
 import type { ScanResult } from '../../utils/scan';
 import { MaterialCell } from './common';
-import { FeedbackBar, useFeedback } from './pda/kit';
+import { useAuth } from '../../auth';
+import { clearDraft, confirmEnter, FeedbackBar, loadDraft, savedAgo, saveDraft, useFeedback, useLeaveGuard, type Draft } from './pda/kit';
+
+/** 本机暂存的未提交发货扫码 */
+interface ShipDraft { so_id: number; so_no: string; customer_name?: string | null; serials: string[]; carrier?: string; tracking_no?: string; remark?: string }
 
 interface ShipLine {
   line: Rec; // 销售订单行
@@ -31,6 +35,8 @@ export default function ShipmentCreate({ open, initialSoId, onClose, onCreated }
   onCreated: (sh: Rec) => void;
 }) {
   const narrow = useNarrow(768);
+  const { user } = useAuth();
+  const [restore, setRestore] = useState<Draft<ShipDraft> | null>(null);
   const [form] = Form.useForm();
   const [soId, setSoId] = useState<number | undefined>();
   const [so, setSo] = useState<Rec | null>(null);
@@ -44,7 +50,7 @@ export default function ShipmentCreate({ open, initialSoId, onClose, onCreated }
   const [modal, holder] = Modal.useModal();
   const soBox = useRef<HTMLDivElement>(null);
 
-  const loadSo = async (id?: number) => {
+  const loadSo = async (id?: number, restoreSerials?: string[]) => {
     const my = ++seq.current;
     setSoId(id);
     setSo(null);
@@ -70,17 +76,32 @@ export default function ShipmentCreate({ open, initialSoId, onClose, onCreated }
       if (my !== seq.current) return;
       const byMat = new Map(info.map((i) => [i.mid, i]));
       const used = new Map<number, number>();
-      setLines(openLines.map((l) => {
+      const built: ShipLine[] = openLines.map((l) => {
         const i = byMat.get(l.material_id)!;
         const remaining = Math.round((l.qty - (l.shipped_qty || 0)) * 10000) / 10000;
         const left = Math.max(0, i.stockQty - (used.get(l.material_id) || 0));
         const qty = Math.min(remaining, i.serial ? Math.floor(left) : left);
         used.set(l.material_id, (used.get(l.material_id) || 0) + qty);
         return { line: l, remaining, serial: i.serial, available: i.available, stockQty: i.stockQty, qty, serials: [] };
-      }));
+      });
+      // 恢复本机暂存的扫码：重新校验每一台，仍可发的放回对应行
+      const restored: string[] = [];
+      const dropped: string[] = [];
+      for (const sn of restoreSerials ?? []) {
+        const r = await get('/wms/serial-check', { sn, so_id: id }, true).catch(() => null);
+        const ln = r?.ok ? built.find((l) => l.serial && l.line.material_id === r.material_id && l.serials.length < l.remaining) : null;
+        if (ln) { ln.serials.push(sn); ln.qty = Math.max(ln.qty, ln.serials.length); restored.push(sn); } else dropped.push(sn);
+      }
+      if (my !== seq.current) return;
+      setLines(built);
+      setOrder([...restored].reverse());
       setSo(o);
       form.setFieldsValue({ ship_to: o.ship_to });
-      show('info', `订单 ${o.no}（${o.customer_name}）已带出 ${openLines.length} 行未发明细${info.some((i) => i.serial) ? '，请逐台扫整机 SN / UDI' : ''}`, false);
+      if (restoreSerials?.length) {
+        show(dropped.length ? 'warn' : 'ok', <>已恢复订单 {o.no} 未提交的扫码 {restored.length} 台{dropped.length ? `；${dropped.join('、')} 已不可发，已移除` : ''}</>);
+      } else {
+        show('info', `订单 ${o.no}（${o.customer_name}）已带出 ${openLines.length} 行未发明细${info.some((i) => i.serial) ? '，请逐台扫整机 SN / UDI' : ''}`, false);
+      }
       setTimeout(() => scanRef.current?.focus(), 100);
     } finally {
       if (my === seq.current) setLoading(false);
@@ -88,9 +109,37 @@ export default function ShipmentCreate({ open, initialSoId, onClose, onCreated }
   };
 
   useEffect(() => {
-    if (open) loadSo(initialSoId);
+    if (!open) return;
+    const d = loadDraft<ShipDraft>('ship', user?.username);
+    const usable = d?.data?.serials?.length && (!initialSoId || initialSoId === d.data.so_id) ? d : null;
+    setRestore(usable);
+    loadSo(usable ? undefined : initialSoId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, initialSoId]);
+
+  // 已扫序列号随时暂存本机（关闭弹窗、刷新、锁屏后可恢复）
+  useEffect(() => {
+    if (!open || restore || !so) return;
+    if (order.length) {
+      const v = form.getFieldsValue();
+      saveDraft<ShipDraft>('ship', user?.username, { so_id: so.id, so_no: so.no, customer_name: so.customer_name, serials: [...order].reverse(), carrier: v.carrier, tracking_no: v.tracking_no, remark: v.remark });
+    } else clearDraft('ship', user?.username);
+  }, [order, so, open, restore, form, user?.username]);
+  useLeaveGuard(open && order.length > 0);
+
+  const doRestore = async () => {
+    const d = restore?.data;
+    setRestore(null);
+    if (!d) return;
+    form.setFieldsValue({ carrier: d.carrier, tracking_no: d.tracking_no, remark: d.remark });
+    await loadSo(d.so_id, d.serials);
+  };
+  const dropRestore = async () => {
+    if (!(await confirmEnter('丢弃未提交的发货扫码？', `订单 ${restore?.data.so_no} 已扫的 ${restore?.data.serials.length} 台将不再保留（未生成发货单，不影响库存）。`, '丢弃', true, 'cancel'))) return;
+    clearDraft('ship', user?.username);
+    setRestore(null);
+    loadSo(initialSoId);
+  };
 
   const patch = (idx: number, p: Partial<ShipLine>) => setLines((ls) => ls.map((l, i) => (i === idx ? { ...l, ...p } : l)));
   const scannedCount = lines.reduce((s, l) => s + l.serials.length, 0);
@@ -98,6 +147,7 @@ export default function ShipmentCreate({ open, initialSoId, onClose, onCreated }
 
   /** 扫码：UDI（带括号或 GS1 原始串）/ 纯 SN；拒绝时给出具体原因并响提示音，扫码框自动清空、保持焦点 */
   const onScan = async (_code: string, p: ScanResult) => {
+    if (restore) return show('warn', '有未提交的发货扫码：请先点“恢复”或“丢弃”');
     const sn = (p.sn || p.code).trim();
     if (!sn) return;
     if (lines.some((l) => l.serials.includes(sn))) return show('err', `${sn} 已扫描过，请勿重复扫描`);
@@ -114,7 +164,10 @@ export default function ShipmentCreate({ open, initialSoId, onClose, onCreated }
     const serials = [...l.serials, sn];
     patch(idx, { serials, qty: Math.max(l.qty, serials.length) });
     setOrder((o) => [sn, ...o]);
-    show('ok', <>✓ <b>{sn}</b> → {l.line.material_code}（已扫 <b>{scannedCount + 1}</b> / 本次 {fmtQty(Math.max(planCount, scannedCount + 1))}）</>);
+    const after = lines.map((x, i) => (i === idx ? { ...x, serials, qty: Math.max(x.qty, serials.length) } : x));
+    const nowFull = after.filter((x) => x.serial).every((x) => x.serials.length >= x.qty && x.qty > 0);
+    if (nowFull) show('ok', <>✓ <b>{sn}</b>。已扫满本次 {fmtQty(scannedCount + 1)} 台 —— <b>再按一次回车生成发货单</b></>);
+    else show('ok', <>✓ <b>{sn}</b> → {l.line.material_code}（已扫 <b>{scannedCount + 1}</b> / 本次 {fmtQty(Math.max(planCount, scannedCount + 1))}）</>);
   };
 
   const removeSn = (sn: string) => {
@@ -143,6 +196,8 @@ export default function ShipmentCreate({ open, initialSoId, onClose, onCreated }
     setSaving(true);
     try {
       const sh = await post('/shipments', body);
+      clearDraft('ship', user?.username);
+      setOrder([]);
       form.resetFields();
       onCreated(sh);
     } finally {
@@ -152,6 +207,13 @@ export default function ShipmentCreate({ open, initialSoId, onClose, onCreated }
 
   const hasSerial = lines.some((l) => l.serial);
   const totalQty = lines.reduce((s, l) => s + (l.serials.length || l.qty || 0), 0);
+  const full = hasSerial && scannedCount > 0 && lines.filter((l) => l.serial).every((l) => l.serials.length >= l.qty && l.qty > 0);
+  /** 扫满后在空的扫码框里回车 = 生成发货单 */
+  const onScanBoxKey = (e: React.KeyboardEvent) => {
+    if (e.key !== 'Enter' || !full || saving) return;
+    const t = e.target as HTMLInputElement;
+    if (t.tagName === 'INPUT' && !t.value.trim()) { e.preventDefault(); submit(); }
+  };
 
   const qtyCell = (l: ShipLine, idx: number) => (
     <InputNumber min={0} max={l.remaining} precision={l.serial ? 0 : undefined} value={l.serials.length || l.qty} disabled={l.serials.length > 0}
@@ -200,19 +262,46 @@ export default function ShipmentCreate({ open, initialSoId, onClose, onCreated }
       title={<span><SendOutlined style={{ marginRight: 8 }} />新建发货单</span>}
       width={narrow ? '100%' : 1100}
       style={narrow ? { top: 0, maxWidth: '100vw', paddingBottom: 0 } : undefined}
-      onCancel={() => { form.resetFields(); onClose(); }}
+      onCancel={() => {
+        if (order.length) message.info(`已扫的 ${order.length} 台已暂存在本机，下次打开“新建发货单”可恢复`);
+        form.resetFields();
+        onClose();
+      }}
       onOk={submit}
       okText={`生成发货单${totalQty ? `（${fmtQty(totalQty)}）` : ''}`}
       cancelText="返回"
-      okButtonProps={{ disabled: !so || !lines.length, size: narrow ? 'large' : 'middle' }}
+      // 窄屏：正文区域内滚动，底部“生成发货单（N）”始终可见
+      styles={narrow ? { body: { maxHeight: 'calc(100vh - 140px)', overflowY: 'auto', overflowX: 'hidden' } } : undefined}
+      okButtonProps={{ disabled: !so || !lines.length, size: narrow ? 'large' : 'middle', style: narrow ? { minWidth: 200, height: 48, fontSize: 17 } : undefined }}
       cancelButtonProps={{ size: narrow ? 'large' : 'middle' }}
       confirmLoading={saving}
       destroyOnHidden
       maskClosable={false}
-      // 打开即聚焦“销售订单”（可直接扫订单号）
-      afterOpenChange={(o) => { if (o && !initialSoId) setTimeout(() => soBox.current?.querySelector('input')?.focus(), 60); }}
+      // 打开即聚焦“销售订单”（可直接扫订单号）；页面切换时渲染较慢，多试几次
+      afterOpenChange={(o) => {
+        if (!o || initialSoId) return;
+        for (const ms of [60, 250, 600, 1200]) {
+          setTimeout(() => {
+            const a = document.activeElement as HTMLElement | null;
+            if (!so && !(a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA'))) soBox.current?.querySelector('input')?.focus();
+          }, ms);
+        }
+      }}
     >
       {holder}
+      {restore && (
+        <Alert type="warning" showIcon style={{ marginBottom: 12 }}
+          message={<b>有未提交的发货扫码：订单 {restore.data.so_no}，已扫 {restore.data.serials.length} 台</b>}
+          description={(
+            <div>
+              <div>{restore.data.customer_name ?? ''} · 暂存于 {savedAgo(restore.saved_at)}</div>
+              <Space style={{ marginTop: 8 }}>
+                <Button type="primary" size="large" onClick={doRestore}>恢复 {restore.data.serials.length} 台</Button>
+                <Button size="large" onClick={dropRestore}>丢弃</Button>
+              </Space>
+            </div>
+          )} />
+      )}
       {!narrow && <Alert type="info" showIcon style={{ marginBottom: 16 }} message="只能发已 DHR 放行的合格成品，序列号逐台校验；支持扫描 UDI（带括号或 DataMatrix 原始串）。未扫码时系统按完工先后自动选取已放行的整机。" />}
       <Form form={form} layout="vertical">
         <Form.Item label="销售订单（可扫订单号 / 客户 PO）" required>
@@ -243,7 +332,7 @@ export default function ShipmentCreate({ open, initialSoId, onClose, onCreated }
           {lines.length > 0 && (
             <>
               {hasSerial && (
-                <div style={{ marginBottom: 12 }}>
+                <div style={{ marginBottom: 12 }} onKeyDownCapture={onScanBoxKey}>
                   <ScanInput ref={scanRef} onScan={onScan} autoFocus={false} captureGlobal placeholder="逐台扫描整机 SN 或 UDI 条码，回车添加" style={{ height: 52, fontSize: 18 }} />
                   <FeedbackBar fb={fb} />
                   {order.length > 0 && (

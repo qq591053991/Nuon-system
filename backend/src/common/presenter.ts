@@ -66,7 +66,7 @@ export const VIEWS: Record<string, View> = {
     props: { warehouse_name: (o) => nm(o.warehouse), warehouse_type: (o) => o.warehouse?.warehouse_type ?? null },
   },
   SalesOrder: { include: { customer: true }, props: { customer_name: (o) => nm(o.customer) }, order: { lines: { line_no: 'asc' } } },
-  SalesOrderLine: { include: matInclude, props: matProps },
+  SalesOrderLine: { include: matInclude, props: { ...matProps, material_name_en: (o) => o.material?.name_en ?? null } },
   PurchaseOrder: { include: { supplier: true }, props: { supplier_name: (o) => nm(o.supplier) }, order: { lines: { line_no: 'asc' } } },
   PurchaseOrderLine: { include: matInclude, props: matProps },
   MrpRun: { order: { suggestions: [{ level: 'asc' }, { id: 'asc' }] } },

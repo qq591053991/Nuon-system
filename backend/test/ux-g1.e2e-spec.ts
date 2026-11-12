@@ -49,7 +49,7 @@ describe('UX G1：平台与岗位工作台', () => {
     const so = await api.as('sales').find('/api/sales-orders', { q: 'LUM-PO-26-118' });
     await db.client.salesOrder.update({ where: { id: so.id }, data: { delivery_date: addDays(today(), -3) } });
     const sup = await api.as('buyer').find('/api/suppliers', { page_size: 1 });
-    await db.client.purchaseOrder.create({ data: { no: 'PO-BIG', supplier_id: sup.id, order_date: today(), status: 'DRAFT', currency: 'CNY', total_amount: 80000 } });
+    await db.client.purchaseOrder.create({ data: { no: 'PO-BIG', supplier_id: sup.id, order_date: today(), status: 'SUBMITTED', currency: 'CNY', total_amount: 80000 } }); // R2：大额单提交后为 SUBMITTED，待厂长审批
 
     const qa = await api.as('qa').ok('get', '/api/todos');
     expect(qa.find((x: any) => x.key === 'iqc')).toMatchObject({ count: 1, path: '/quality/inspections?status=PENDING&type=IQC' });
@@ -63,7 +63,9 @@ describe('UX G1：平台与岗位工作台', () => {
     const wh = await api.as('wh').ok('get', '/api/todos');
     expect(todoKeys(wh)).not.toContain('iqc');
     const buyer = await api.as('buyer').ok('get', '/api/todos');
-    expect(buyer.find((x: any) => x.key === 'po_draft')).toMatchObject({ count: 1, path: '/purchase/orders?status=DRAFT' });
+    expect(buyer.find((x: any) => x.key === 'po_draft')).toBeUndefined(); // 大额单已提交厂长，不在采购员“待审批”里
+    await db.client.purchaseOrder.create({ data: { no: 'PO-D1', supplier_id: sup.id, order_date: today(), status: 'DRAFT', currency: 'CNY', total_amount: 100 } });
+    expect((await api.as('buyer').ok('get', '/api/todos')).find((x: any) => x.key === 'po_draft')).toMatchObject({ count: 1, path: '/purchase/orders?status=DRAFT' });
     const sales = await api.as('sales').ok('get', '/api/todos');
     expect(sales.find((x: any) => x.key === 'so_draft')).toMatchObject({ count: 1, path: '/sales/orders?status=DRAFT' });
     // 操作员没有业务待办
@@ -115,6 +117,8 @@ describe('UX G1：平台与岗位工作台', () => {
     const { api, db } = t;
     const so = await api.as('sales').find('/api/sales-orders', { q: 'LUM-PO-26-118' });
     await db.client.salesOrder.update({ where: { id: so.id }, data: { delivery_date: addDays(today(), -2) } });
+    // R1：交期按未发完行的最早行交期（行交期优先），所以行交期一并改
+    await db.client.salesOrderLine.updateMany({ where: { order_id: so.id }, data: { delivery_date: addDays(today(), -2) } });
     const r = await api.as('manager').ok('get', '/api/workbench/delivery-risk');
     expect(r.items.map((x: any) => x.no)).toHaveLength(2); // 草稿不计
     const first = r.items[0];

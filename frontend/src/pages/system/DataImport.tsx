@@ -64,12 +64,20 @@ function ErrorTable({ errors }: { errors: ImportResult['errors'] }) {
  * 导入流程（数据导入页与“批量导入用户”共用）：选择文件 → 自动预检查（不写入）→ 确认导入 → 结果。
  * 期初库存可选“已有库存时：报错 / 覆盖为导入数”。
  */
-export function ImportFlow({ entity, title, disabled, disabledReason, onImported, renderSuccess }: {
+export function ImportFlow({ entity, title, disabled, disabledReason, onImported, renderSuccess, onBusyChange, busyHint }: {
   entity: string; title: string; disabled?: boolean; disabledReason?: ReactNode;
   onImported?: (r: ImportResult) => void; renderSuccess?: (r: ImportResult) => ReactNode;
+  /** 正在预检查/导入（导入期间外层弹窗应禁止关闭） */
+  onBusyChange?: (busy: 'check' | 'import' | null) => void;
+  /** 导入进行中的提示文字 */
+  busyHint?: ReactNode;
 }) {
   const [file, setFile] = useState<File | null>(null);
-  const [busy, setBusy] = useState<'check' | 'import' | null>(null);
+  const [busy, setBusyState] = useState<'check' | 'import' | null>(null);
+  const setBusy = (b: 'check' | 'import' | null) => {
+    setBusyState(b);
+    onBusyChange?.(b);
+  };
   const [check, setCheck] = useState<ImportResult | null>(null);
   const [result, setResult] = useState<ImportResult | null>(null);
   const [dup, setDup] = useState<'error' | 'overwrite'>('error');
@@ -169,6 +177,9 @@ export function ImportFlow({ entity, title, disabled, disabledReason, onImported
               action={<Button size="small" onClick={() => changeDup('overwrite')}>改为覆盖为导入数</Button>}
             />
           )}
+          {busy === 'import' && (
+            <Alert type="info" showIcon message={busyHint ?? `正在导入${title}，请勿关闭页面`} />
+          )}
           <Space>
             {check.ok && (
               <Button type="primary" icon={<CloudUploadOutlined />} loading={busy === 'import'} onClick={doImport}>
@@ -176,7 +187,7 @@ export function ImportFlow({ entity, title, disabled, disabledReason, onImported
               </Button>
             )}
             <Upload accept=".xlsx,.csv" showUploadList={false} customRequest={customRequest} disabled={!!busy}>
-              <Button icon={<ReloadOutlined />} loading={busy === 'check'}>{check.ok ? '换一个文件' : '修改后重新选择文件'}</Button>
+              <Button icon={<ReloadOutlined />} loading={busy === 'check'} disabled={busy === 'import'}>{check.ok ? '换一个文件' : '修改后重新选择文件'}</Button>
             </Upload>
           </Space>
         </>

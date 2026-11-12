@@ -13,6 +13,7 @@ import { dateOnly, fmtDate, localDateStr } from '../common/dates';
 import { NotFound } from '../common/errors';
 import { EPS, g, round } from '../common/num';
 import type { Tx } from '../common/prisma.service';
+import { ncrCloseBlocker } from './qms-rules';
 
 type Level = 'ok' | 'warn' | 'fail';
 interface Check { ok: boolean; level: Level; text: string }
@@ -40,6 +41,13 @@ export class ReleaseCheckService {
     const lastSeq = ops.length ? ops[ops.length - 1].seq : 0;
     const records = await tx.operationRecord.findMany({ where: { wo_id: wo.id }, orderBy: { id: 'asc' }, include: { equipment: true } });
     const ncrs = await tx.ncr.findMany({ where: { wo_id: wo.id }, orderBy: { id: 'asc' } });
+    // 已处置未关闭的 NCR 能否直接关闭（结论卡上提供“关闭 NCR”入口）
+    const blockOf = new Map<number, string | null>();
+    for (const n of ncrs) if (n.status === 'DISPOSITIONED') blockOf.set(n.id, await ncrCloseBlocker(tx, n));
+    const ncrBrief = (n: (typeof ncrs)[number]) => ({
+      id: n.id, no: n.no, status: n.status, disposition: n.disposition,
+      closable: n.status === 'DISPOSITIONED' && !blockOf.get(n.id), close_block: blockOf.get(n.id) ?? null,
+    });
 
     // ---------- 用料 IQC（工单级） ----------
     const lots = await this.lotChecks(tx, wo.id, ncrs.map((n) => n.id));
@@ -131,6 +139,8 @@ export class ReleaseCheckService {
         units.push({
           sn: s.sn, status: s.status, release_no: s.release?.no ?? null, release_status: s.release?.status ?? null,
           eligible, released, ok: Object.values(checks).every((c) => c.ok), checks,
+          warn: Object.values(checks).some((c) => c.level === 'warn'),
+          ncrs: mine.filter((n) => n.status !== 'CLOSED').map(ncrBrief),
         });
       }
     } else {
@@ -170,6 +180,7 @@ export class ReleaseCheckService {
       wo_level: woLevel,
       units,
       lots,
+      closable_ncrs: ncrs.filter((n) => n.status === 'DISPOSITIONED' && !blockOf.get(n.id)).map(ncrBrief),
       ncr_signatures: sigs.map((s) => ({ ts: s.ts, full_name: s.full_name, meaning: s.meaning, reason: s.reason, doc_no: s.doc_no })),
     };
   }

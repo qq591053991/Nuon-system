@@ -15,7 +15,7 @@ import { EPS, round } from '../common/num';
 import { like, paginate } from '../common/paginate';
 import { PrismaService, type Tx } from '../common/prisma.service';
 import { qInt } from './query';
-import { coverageFor, isDiscreteUom, OPEN_WO } from './so-plan';
+import { coverageFor, isDiscreteUom, OPEN_WO, woMismatches } from './so-plan';
 
 export interface OnOrder {
   type: 'PO' | 'WO' | 'IQC';
@@ -165,7 +165,7 @@ export class KittingService {
       incoming.get(mid)!.push(o);
     };
     const pls = await c.purchaseOrderLine.findMany({
-      where: { material_id: { in: mids }, order: { status: { in: ['DRAFT', 'APPROVED', 'PARTIAL_RECEIVED'] } } },
+      where: { material_id: { in: mids }, order: { status: { in: ['DRAFT', 'SUBMITTED', 'APPROVED', 'PARTIAL_RECEIVED'] } } },
       include: { order: { include: { supplier: true } } },
       orderBy: { id: 'asc' },
     });
@@ -189,9 +189,9 @@ export class KittingService {
       const list: (OnOrder & { left: number })[] = [];
       const iq = inspecting.get(ownerKey(mid)) ?? 0;
       if (iq > EPS) list.push({ type: 'IQC', open_qty: iq, date: fmtDate(today()), left: iq });
-      for (const o of (incoming.get(mid) ?? []).filter((x) => x.status !== 'DRAFT')) list.push({ ...o, left: o.open_qty });
-      for (const o of (incoming.get(mid) ?? []).filter((x) => x.status === 'DRAFT')) list.push({ ...o, left: o.open_qty });
-      list.sort((a, b) => (a.status === 'DRAFT' ? 1 : 0) - (b.status === 'DRAFT' ? 1 : 0) || String(a.date ?? '9999').localeCompare(String(b.date ?? '9999')));
+      const unapproved = (x: { status?: string }) => x.status === 'DRAFT' || x.status === 'SUBMITTED';
+      for (const o of incoming.get(mid) ?? []) list.push({ ...o, left: o.open_qty });
+      list.sort((a, b) => (unapproved(a) ? 1 : 0) - (unapproved(b) ? 1 : 0) || String(a.date ?? '9999').localeCompare(String(b.date ?? '9999')));
       incomingLeft.set(mid, list);
     }
 
@@ -220,7 +220,7 @@ export class KittingService {
             o.left = round(o.left - use);
             rest = round(rest - use);
             eta = o.date;
-            if (o.status === 'DRAFT') drafted = true;
+            if (o.status === 'DRAFT' || o.status === 'SUBMITTED') drafted = true;
             if (!o.date) eta = null;
           }
           if (rest > EPS) {
@@ -252,6 +252,26 @@ export class KittingService {
 
   private empty(): KitResult {
     return { lines: [], kitted: true, shortage_count: 0, eta: null };
+  }
+
+  /** 各物料的缺料工单（催货清单“影响工单”列）：{material_id → [{wo_id, wo_no, shortage, planned_start}]} */
+  async shortWorkOrdersByMaterial(materialIds?: number[]) {
+    const c = this.db.client;
+    const all = await this.compute(c);
+    const wos = new Map((await c.workOrder.findMany({ where: { status: { in: OPEN_WO } }, select: { id: true, no: true, planned_start: true } })).map((w) => [w.id, w]));
+    const out = new Map<number, { wo_id: number; wo_no: string; shortage: number; planned_start: string | null }[]>();
+    for (const [key, r] of all) {
+      if (!key.startsWith('WO:')) continue;
+      const w = wos.get(Number(key.slice(3)));
+      if (!w) continue;
+      for (const l of r.lines) {
+        if (l.shortage <= EPS || (materialIds && !materialIds.includes(l.material_id))) continue;
+        if (!out.has(l.material_id)) out.set(l.material_id, []);
+        out.get(l.material_id)!.push({ wo_id: w.id, wo_no: w.no, shortage: l.shortage, planned_start: fmtDate(w.planned_start) });
+      }
+    }
+    for (const list of out.values()) list.sort((a, b) => String(a.planned_start ?? '9999').localeCompare(String(b.planned_start ?? '9999')));
+    return out;
   }
 
   /** 工单齐套 */
@@ -291,13 +311,20 @@ export class KittingService {
     if (sid) where.so_id = sid;
     if (q.dhr_status) where.dhr_status = q.dhr_status;
     const all = await this.compute(c);
+    // 与订单不符（订单变更后待计划员处理）：?mismatch=1 只看这些工单
+    const mism = await woMismatches(c);
+    const mismOf = new Map<number, (typeof mism)[number]>();
+    for (const m of mism) for (const id of m.wo_ids) mismOf.set(id, m);
+    if (q.mismatch === '1' || q.mismatch === 'true') (where.AND = [...((where.AND as any[]) ?? []), { id: { in: [...mismOf.keys()] } }]);
     const kit = String(q.kitting || '').toUpperCase();
     if (kit === 'SHORT' || kit === 'KITTED') {
       const ids = [...all.entries()].filter(([, r]) => (kit === 'SHORT' ? !r.kitted : r.kitted)).map(([k]) => Number(k.slice(3)));
-      where.AND = [{ id: { in: ids } }];
+      where.AND = [...((where.AND as any[]) ?? []), { id: { in: ids } }];
     }
     const page = await paginate(c.workOrder, 'WorkOrder', { where, orderBy: { id: 'desc' } }, q);
     for (const w of page.items) {
+      const mm = mismOf.get(w.id);
+      w.mismatch = mm ? { so_id: mm.so_id, so_no: mm.so_no, line_no: mm.line_no, so_qty: mm.so_qty, wo_qty: mm.wo_qty, changed_at: mm.changed_at } : null;
       const r = all.get(`WO:${w.id}`);
       w.kitting = r
         ? {

@@ -81,16 +81,23 @@ export function diffIndex(d: DiffResult | null) {
   return m;
 }
 
-/** 变更原因是否提到了这些判定规格变化（按测试项/组件的编码，或名称的前两个字粗略判断） */
+/** 需要在变更原因里说明的变化（D-N13）：判定规格 / 用量、增删工序 / 测试项 / 组件 / 附件、工时、SOP、需设备、关键件、测试项顺序 */
+const IMPORTANT_FIELDS = new Set(['std_minutes', 'sop_no', 'requires_equipment', 'key_part_material_id', 'param_order', 'attachment', 'op_type', 'seq']);
+export const importantChange = (i: DiffItem) => !!i.limit || i.kind !== 'changed' || IMPORTANT_FIELDS.has(i.field ?? '');
+
+/** 变更原因是否提到了这些变化（按测试项/组件/工序的编码或名称、名称前两个字粗略判断；纯数字不算） */
 function uncovered(items: DiffItem[], reason?: string | null) {
   const r = (reason || '').toUpperCase();
   return items.filter((i) => {
-    if (!i.limit) return false;
-    const obj = i.title.split(' · ').pop() || i.title;
-    const words = obj.split(/\s+/).filter((w) => w.length >= 2 && !['工序', '测试项', '组件'].includes(w));
+    if (!importantChange(i)) return false;
+    const obj = i.title.split(' · ')[i.title.includes(' · 测试项') ? 1 : 0] || i.title;
+    const words = obj.split(/\s+/).filter((w) => w.length >= 2 && !/^\d+$/.test(w) && !['工序', '测试项', '组件', '附件'].includes(w));
     return !words.some((w) => r.includes(w.toUpperCase()) || (/[\u4e00-\u9fa5]/.test(w) && r.includes(w.slice(0, 2))));
   });
 }
+
+/** 关键变化的叫法：工艺 = 判定规格变化；BOM = 用量变化 */
+const limitName = (i: DiffItem) => (i.scope === 'line' ? '用量变化' : '判定规格变化');
 
 interface DiffProps {
   /** GET 差异地址（如 /routings/12/diff） */
@@ -109,7 +116,7 @@ interface DiffProps {
 /** 与上一版本的差异卡片 */
 export function DiffCard({ url, draft, reason, stamp, onResult, emphasize }: DiffProps) {
   const [d, setD] = useState<DiffResult | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const body = useMemo(() => (draft ? JSON.stringify(draft) : null), [draft]);
   const cb = useRef(onResult);
   cb.current = onResult;
@@ -150,11 +157,11 @@ export function DiffCard({ url, draft, reason, stamp, onResult, emphasize }: Dif
             <span style={r.limit ? { background: '#fff1f0', padding: '2px 6px', borderRadius: 4 } : undefined}>
               {r.limit && <WarningOutlined style={{ color: '#cf1322', marginRight: 4 }} />}
               {r.label}：<del style={{ color: '#cf1322' }}>{shown(r.before, r.field)}</del> → <b style={{ color: '#237804' }}>{shown(r.after, r.field)}</b>
-              {r.limit && <Tag color="red" style={{ marginLeft: 8 }}>判定规格变化</Tag>}
+              {r.limit && <Tag color="red" style={{ marginLeft: 8 }}>{limitName(r)}</Tag>}
             </span>
           );
         }
-        return <span style={{ color: r.kind === 'added' ? '#237804' : '#cf1322' }}>{r.text}{r.limit && <Tag color="red" style={{ marginLeft: 8 }}>影响判定</Tag>}</span>;
+        return <span style={{ color: r.kind === 'added' ? '#237804' : '#cf1322' }}>{r.text}{r.limit && <Tag color="red" style={{ marginLeft: 8 }}>{r.scope === 'line' ? '用量变化' : '影响判定'}</Tag>}</span>;
       },
     },
   ];
@@ -173,14 +180,16 @@ export function DiffCard({ url, draft, reason, stamp, onResult, emphasize }: Dif
               <Tag color="green">新增 {count('added')}</Tag>
               <Tag color="red">删除 {count('removed')}</Tag>
               <Tag color="blue">修改 {count('changed')}</Tag>
-              {limits.length > 0 && <Tag color="red" icon={<WarningOutlined />}>判定规格变化 {limits.length}</Tag>}
+              {limits.length > 0 && <Tag color="red" icon={<WarningOutlined />}>{limitName(limits[0])} {limits.length}</Tag>}
             </>
           )}
         </Space>
       }
     >
-      {!d?.base ? (
-        <Typography.Text type="secondary">{d?.summary || '首个版本，没有可对比的上一版本'}</Typography.Text>
+      {!d ? (
+        <Typography.Text type="secondary">{loading ? '正在与上一版本对比…' : '暂时无法对比'}</Typography.Text>
+      ) : !d.base ? (
+        <Typography.Text type="secondary">{d.summary || '首个版本，没有可对比的上一版本'}</Typography.Text>
       ) : !items.length ? (
         <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="与上一版本相比没有内容变化" />
       ) : (
@@ -190,7 +199,7 @@ export function DiffCard({ url, draft, reason, stamp, onResult, emphasize }: Dif
               type="warning"
               showIcon
               style={{ marginBottom: 8 }}
-              message={`以下 ${miss.length} 处判定规格 / 用量变化未在“变更原因”中说明：${miss.map((i) => i.title).slice(0, 5).join('；')}${miss.length > 5 ? '…' : ''}`}
+              message={`以下 ${miss.length} 处变化未在“变更原因”中说明：${[...new Set(miss.map((i) => `${i.title}${i.label && i.kind === 'changed' ? `（${i.label}）` : i.kind === 'added' ? '（新增）' : i.kind === 'removed' ? '（删除）' : ''}`))].slice(0, 6).join('；')}${miss.length > 6 ? '…' : ''}`}
             />
           )}
           <Table<DiffItem>

@@ -80,7 +80,7 @@ export interface NewUserInput {
   must_change_password?: boolean;
   badge_no?: string | null;
   pin?: string | null;
-  /** 有工牌但未给 PIN 时随机生成 PIN（批量导入用） */
+  /** 有工牌但未给 PIN 时随机生成 PIN（默认 true：单个新建与批量导入规则一致；仅显式 false 时不生成） */
   generate_pin?: boolean;
 }
 
@@ -101,11 +101,14 @@ export async function checkBadge(tx: Tx, badge: string | null, selfId?: number) 
   }
 }
 
-/** 设置工位 PIN：直接写库，PIN 哈希不进入审计追踪内容（dryRun = 预检查，不计算哈希） */
+/**
+ * 管理员设置/重置工位 PIN：直接写库，PIN 哈希不进入审计追踪内容（dryRun = 预检查，不计算哈希）。
+ * 管理员知道这个 PIN，所以同时标记 must_change_pin：本人首次刷卡后须设置自己的 PIN（PIN 也用于工位身份确认）。
+ */
 export async function setPin(tx: Tx, user: DbUser, pin: string, admin: CurrentUser, dryRun = false) {
   if (!PIN_PATTERN.test(pin)) throw new BizError('工位 PIN 须为 4–8 位数字');
   const hash = dryRun ? '!check' : await hashPasswordAsync(pin);
-  await tx.$executeRaw`UPDATE "sys_user" SET "pin_hash" = ${hash} WHERE "id" = ${user.id}`;
+  await tx.$executeRaw`UPDATE "sys_user" SET "pin_hash" = ${hash}, "must_change_pin" = true WHERE "id" = ${user.id}`;
   await tx.auditLog.create({
     data: {
       username: admin.username, full_name: admin.full_name, entity: 'sys_user', entity_id: user.id, action: 'UPDATE',
@@ -117,7 +120,7 @@ export async function setPin(tx: Tx, user: DbUser, pin: string, admin: CurrentUs
 /** 清除工位 PIN（停用/离职） */
 export async function clearPin(tx: Tx, user: DbUser, admin: CurrentUser) {
   if (!user.pin_hash) return;
-  await tx.$executeRaw`UPDATE "sys_user" SET "pin_hash" = NULL WHERE "id" = ${user.id}`;
+  await tx.$executeRaw`UPDATE "sys_user" SET "pin_hash" = NULL, "must_change_pin" = false WHERE "id" = ${user.id}`;
   await tx.auditLog.create({
     data: {
       username: admin.username, full_name: admin.full_name, entity: 'sys_user', entity_id: user.id, action: 'UPDATE',
@@ -153,7 +156,7 @@ export async function createUserTx(tx: Tx, b: NewUserInput, admin: CurrentUser, 
   await checkBadge(tx, badge);
   let pin = b.pin?.trim() || null;
   let tempPin: string | null = null;
-  if (!pin && badge && b.generate_pin) pin = tempPin = generatePin();
+  if (!pin && badge && b.generate_pin !== false) pin = tempPin = generatePin();
   let u = await tx.user.create({
     data: {
       username, full_name: fullName, password_hash: kingdee ? NO_LOCAL_PASSWORD : dryRun ? '!check' : await hashPasswordAsync(password!), roles: b.roles.join(','),
@@ -196,4 +199,12 @@ export async function deactivateTx(tx: Tx, cur: DbUser, admin: CurrentUser, rele
     u = (await tx.user.findUnique({ where: { id: cur.id } }))!;
   }
   return u;
+}
+
+/** 重置工位 PIN（管理员）：生成随机 PIN（仅本次返回），本人首次刷卡后须修改；没有工牌的账号不能设 PIN */
+export async function resetPinTx(tx: Tx, cur: DbUser, admin: CurrentUser): Promise<string> {
+  if (!cur.badge_no) throw new BizError(`${cur.full_name}（${cur.username}）没有工牌号，不需要工位 PIN`);
+  const pin = generatePin();
+  await setPin(tx, cur, pin, admin);
+  return pin;
 }

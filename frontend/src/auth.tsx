@@ -21,6 +21,8 @@ export interface CurrentUser {
   password_change_reason?: 'INITIAL' | 'EXPIRED' | null;
   /** 密码到期时间（ISO），到期前 7 天提醒 */
   password_expires_at?: string | null;
+  /** 工位 PIN 由管理员生成/重置、本人尚未修改（刷卡后须先设置自己的 PIN） */
+  must_change_pin?: boolean;
 }
 
 /** 记住上次登录的账号（登录页预填） */
@@ -95,6 +97,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       /* 存储不可用时不记住 */
     }
     loginPassword = r.user.must_change_password ? password : null;
+    try {
+      localStorage.removeItem('nuon_screen_locked'); // 新会话：清除上次的空闲锁屏状态
+    } catch {
+      /* ignore */
+    }
     return apply(r);
   }, [apply]);
 

@@ -6,7 +6,7 @@
  *   scan(tx, code)                                  扫码解析：库位 / 批号 / 原厂批号 / 序列号 / 物料编码 → 库存行
  *   pickLine / replaceLine                          拣料模式：录实拣数（短缺自动从下一 FEFO 批次补足）、扫到其他批次时替换
  *   reverseIssue / reverseShipment / reverseCount   冲销（反向库存流水 + 电子签名 + 原因；被后续单据引用时拦截）
- *   enrichCount / countCheck / addCountLine / cancelCount   盘点：当前账面、快照后流水提示、盘盈新增行、作废
+ *   enrichCount / saveCountLines / addCountLine / cancelCount   盘点：当前账面、建单/录入后有收发提示（须重新清点）、盘盈新增行、作废
  *   serialCheck / rmaScan                           发货 / 客户退货扫码校验（具体拒绝原因）
  *   updateTracking                                  运单号补录
  *   fgReceiptSerials                                完工入库逐台扫码核对
@@ -149,6 +149,33 @@ export class WmsOpsService {
     const m = await tx.material.findFirst({ where: { OR: [{ code: ci }, ...(opts.gtin || /^\d{14}$/.test(code) ? [{ gtin: opts.gtin || code }] : [])] } });
     if (m) return { kind: 'MATERIAL', code: m.code, material: { id: m.id, code: m.code, name: m.name, uom: m.uom }, rows: await stockOf({ material_id: m.id }) };
     return { kind: 'UNKNOWN', code, rows: [] as any[] };
+  }
+
+  /** 已下达、仍有未领物料且没有待过账领料单覆盖的工单（拣料列表为空时提示“从工单生成”） */
+  async issueCandidates(tx: Tx) {
+    const wos = await tx.workOrder.findMany({
+      where: { status: { in: ['RELEASED', 'IN_PROGRESS'] } },
+      include: { material: true, materials: { include: { material: true } } },
+      orderBy: [{ planned_start: 'asc' }, { id: 'asc' }],
+    });
+    const pendingBy = new Map<string, number>();
+    for (const w of wos) {
+      const rows = await tx.materialIssueLine.groupBy({ by: ['material_id'], where: { issue: { status: 'DRAFT', issue_type: 'ISSUE', wo_id: w.id } }, _sum: { qty: true } });
+      for (const r of rows) pendingBy.set(`${w.id}|${r.material_id}`, r._sum.qty ?? 0);
+    }
+    const out = [];
+    for (const w of wos) {
+      const short = w.materials
+        .map((m) => ({ code: m.material.code, need: round(m.required_qty - (m.issued_qty || 0) - (pendingBy.get(`${w.id}|${m.material_id}`) ?? 0)) }))
+        .filter((x) => x.need > EPS);
+      const hasDraft = w.materials.some((m) => (pendingBy.get(`${w.id}|${m.material_id}`) ?? 0) > EPS);
+      if (!short.length) continue;
+      out.push({
+        id: w.id, no: w.no, status: w.status, material_code: w.material.code, material_name: w.material.name, planned_qty: w.planned_qty,
+        planned_start: w.planned_start, lines: short.length, materials: short.slice(0, 6).map((x) => x.code), has_draft: hasDraft,
+      });
+    }
+    return out;
   }
 
   // ---------------- 拣料模式 ----------------
@@ -430,19 +457,14 @@ export class WmsOpsService {
       const locIds = [...new Set(lines.map((l) => l.location_id))];
       const stocks = await tx.stock.findMany({ where: { location_id: { in: locIds } } });
       const cur = new Map(stocks.map((s) => [`${s.material_id}|${s.location_id}|${s.lot_no}|${s.status}|${s.owner_customer_id ?? ''}`, s.qty]));
-      const moves = await tx.stockMove.findMany({
-        where: { ts: { gt: sc.created_at }, OR: [{ from_location_id: { in: locIds } }, { to_location_id: { in: locIds } }] },
-        select: { material_id: true, lot_no: true, from_location_id: true, to_location_id: true },
-      });
-      const moved = new Set<string>();
-      for (const mv of moves) {
-        if (mv.from_location_id) moved.add(`${mv.material_id}|${mv.from_location_id}|${mv.lot_no}`);
-        if (mv.to_location_id) moved.add(`${mv.material_id}|${mv.to_location_id}|${mv.lot_no}`);
-      }
       for (const l of lines) {
         l.current_qty = round(cur.get(`${l.material_id}|${l.location_id}|${l.lot_no}|${l.status}|${l.owner_customer_id ?? ''}`) ?? 0);
-        l.moved = moved.has(`${l.material_id}|${l.location_id}|${l.lot_no}`);
-        l.diff_qty = l.counted_qty === null || l.counted_qty === undefined ? null : round(l.counted_qty - l.current_qty);
+        const counted = l.counted_qty !== null && l.counted_qty !== undefined;
+        // system_qty = 建单时账面，录入实盘时更新为录入时账面；与当前账面不同 = 期间有收发
+        const changed = Math.abs(l.current_qty - (l.system_qty ?? 0)) > EPS;
+        l.moved = changed; // 建单（或录入）后有收发
+        l.recount = changed && counted; // 录入实盘后又有收发：实盘数已过时，须重新清点
+        l.diff_qty = counted ? round(l.counted_qty - l.current_qty) : null;
       }
     } else {
       const adj = await tx.stockMove.findMany({ where: { ref_type: 'STOCK_COUNT', ref_id: sc.id, move_type: 'ADJUST' } });
@@ -458,11 +480,28 @@ export class WmsOpsService {
           : l.diff_qty;
       }
     }
-    if (hide) for (const l of lines) { l.system_qty = null; l.current_qty = null; l.diff_qty = null; l.moved = false; }
+    // 盲盘：不返回账面与差异，但保留“有收发 / 须重新清点”标记（不泄露数量）
+    if (hide) for (const l of lines) { l.system_qty = null; l.current_qty = null; l.diff_qty = null; }
     o.book_hidden = hide;
     o.moved_count = lines.filter((l) => l.moved).length;
+    o.recount_count = lines.filter((l) => l.recount).length;
     o.counted_count = lines.filter((l) => l.counted_qty !== null && l.counted_qty !== undefined).length;
     return o;
+  }
+
+  /** 录入实盘数：同时记下录入时的当前账面（system_qty），之后再有收发即标记“须重新清点” */
+  async saveCountLines(tx: Tx, id: number, body: { id: number; counted_qty: number }[]) {
+    const c = await tx.stockCount.findUnique({ where: { id }, include: { lines: true } });
+    if (!c) throw new NotFound('盘点单');
+    if (c.status !== 'OPEN') throw new BizError(c.status === 'CANCELLED' ? '盘点单已作废，不能录入' : '盘点单已过账，不能再录入实盘');
+    const byId = new Map(c.lines.map((l) => [l.id, l]));
+    for (const ln of body) {
+      const l = byId.get(ln.id);
+      if (!l) continue;
+      const book = await this.inv.lockedQty(tx, { material_id: l.material_id, location_id: l.location_id, lot_no: l.lot_no, status: l.status, owner_customer_id: l.owner_customer_id });
+      await tx.stockCountLine.update({ where: { id: l.id }, data: { counted_qty: ln.counted_qty, system_qty: round(book) } });
+    }
+    return this.enrichCount(tx, id);
   }
 
   /** 盘点中新增行（盘盈 / 账上没有的批次）：库位须在盘点范围内，放置规则同收货；同一库存键不能重复 */
