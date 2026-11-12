@@ -1,7 +1,7 @@
 import { Button, message } from 'antd';
 import { DownloadOutlined } from '@ant-design/icons';
 import { useState } from 'react';
-import { get, http, type Rec } from '../api/http';
+import { get, http, saveBlob, type Rec } from '../api/http';
 
 export interface ExportColumn {
   title: string;
@@ -61,11 +61,7 @@ export default function ExportButton({ url, params, rows, columns, filename, tit
         columns: keyed.map(({ title: t, key, type, width }) => ({ title: t, key, type, width })),
         rows: out,
       }, { responseType: 'blob' });
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(resp.data);
-      a.download = `${filename}.xlsx`;
-      a.click();
-      URL.revokeObjectURL(a.href);
+      saveBlob(resp.data, `${filename}.xlsx`);
       message.success(`已导出 ${out.length} 条`);
     } finally {
       setBusy(false);

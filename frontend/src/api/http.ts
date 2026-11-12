@@ -47,12 +47,22 @@ export async function del<T = any>(url: string): Promise<T> {
   return (await http.delete<T>(url)).data;
 }
 
+/** 保存 Blob 为文件：链接挂到页面上再点击，延迟释放（立即释放会导致部分浏览器丢失文件名） */
+export function saveBlob(blob: Blob, filename: string) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    URL.revokeObjectURL(a.href);
+    a.remove();
+  }, 2000);
+}
+
 /** 下载文件（带鉴权） */
 export async function download(url: string, filename: string) {
   const r = await http.get(url, { responseType: 'blob' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(r.data);
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(a.href);
+  saveBlob(r.data, filename);
 }

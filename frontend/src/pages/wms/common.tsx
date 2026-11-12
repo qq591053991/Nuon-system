@@ -4,6 +4,7 @@ import dayjs from 'dayjs';
 import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { fmtDate, fmtQty } from '../../utils/format';
+import { saveBlob } from '../../api/http';
 
 export const traceLotUrl = (code?: string | null, lot?: string | null) =>
   `/trace?material_code=${encodeURIComponent(code || '')}&lot_no=${encodeURIComponent(lot || '')}`;
@@ -99,9 +100,5 @@ export function exportCsv(filename: string, header: string[], rows: (string | nu
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   const text = '﻿' + [header, ...rows].map((r) => r.map(esc).join(',')).join('\r\n');
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([text], { type: 'text/csv;charset=utf-8' }));
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(a.href);
+  saveBlob(new Blob([text], { type: 'text/csv;charset=utf-8' }), filename);
 }
