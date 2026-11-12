@@ -252,7 +252,7 @@ export async function seedBase(db: PrismaService, opts: SeedBaseOptions = {}): P
       where: { username: { in: USERS.map(([u]) => u) }, created_by: 'system', auth_source: 'LOCAL', password_changed_at: null },
       data: { password_changed_at: new Date() },
     });
-    for (const [username, badge, pin] of [['op1', 'E1001', '1234'], ['op2', 'E1002', '5678'], ['leader', 'E2001', '2468']]) {
+    for (const [username, badge, pin] of [['op1', 'E1001', '1234'], ['op2', 'E1002', '5678'], ['leader', 'E3001', '1357']]) {
       const u = await tx.user.findUnique({ where: { username } });
       if (!u || u.badge_no || u.pin_hash || (await tx.user.findUnique({ where: { badge_no: badge } }))) continue;
       await tx.user.update({ where: { id: u.id }, data: { badge_no: badge } });

@@ -11,6 +11,7 @@ export const PERMISSIONS: Record<string, string> = {
   qc: '质量检验（IQC/FQC、开具NCR）',
   qa: '质量保证（NCR评审处置、CAPA、产品放行、BOM/工艺批准）',
   finance: '财务（应收应付、收付款）',
+  po_big_approve: '大额采购单审批（金额 ≥ PO_APPROVAL_THRESHOLD，厂长）',
   admin: '系统管理（用户、权限、审计）',
   audit: '审计追踪与电子签名台账查阅',
 };

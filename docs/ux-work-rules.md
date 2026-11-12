@@ -91,3 +91,36 @@
 2. 未完成/部分完成的条目及原因；需要协调者处理的事项（结构变更、共享组件缺陷、与其他组的接口问题）；
 3. 改动文件列表；新增测试文件与结果（完整套件通过数/失败项及原因）；类型检查结果；
 4. 关键页面截图路径（修复前后对比更好）。
+
+---
+
+# 第二轮修复（5 个代理，2026-11-12）
+
+任务清单：`docs/ux-review.md` 第五节“第二轮修复清单”（R1–R5）；原始复测报告 `scratchpad/retest-A.txt … retest-E.txt`。第一节“硬性规则”、第三节“通用组件”全部继续适用。数据库结构已由协调者加好并迁移（`20261112150000_ux_round2`，字段见第五节清单），**不得修改 schema**。
+
+## 分工、数据库、端口与文件归属
+
+| 组 | 范围 | 测试库 | 演示库（已按新种子重建） | 后端/前端端口 | 文件归属（= 第一轮对应组的文件） |
+|---|---|---|---|---|---|
+| R1 平台/系统/账号 | 清单 R1 | nuon_e2e_a | nuon_fix_g1 | 8211 / 5311 | 第一轮 G1 + G2 的全部文件；新建系统设置相关文件 |
+| R2 销售/计划/采购/财务 | 清单 R2 | nuon_e2e_b | nuon_fix_g2 | 8212 / 5312 | 第一轮 G3 + G4 的全部文件（含 `pages/mes/WorkOrders.tsx`、`WorkOrderDetail.tsx`、`PurchaseOrderDetail.tsx`） |
+| R3 质量 | 清单 R3 | nuon_e2e_c | nuon_fix_g3 | 8213 / 5313 | 第一轮 G6 的全部文件 |
+| R4 工位/工程 | 清单 R4 | nuon_e2e_d | nuon_fix_g4 | 8214 / 5314 | 第一轮 G5 的全部文件 |
+| R5 仓储/PDA | 清单 R5 | nuon_e2e_e | nuon_fix_g5 | 8215 / 5315 | 第一轮 G7 的全部文件 |
+
+共享文件规则同第一轮（presenter.ts、*.module.ts、app.module.ts、config.ts、routes.tsx、dict.ts、MasterPages.tsx 各改自己的部分；`auth/roles.ts` 由协调者维护，已加 `mes_lead`、`po_big_approve` 权限点与 leader/station 角色，**不要再改**）。
+
+新增演示账号（密码同为 `Nuon@2026`）：`leader` 赵班长（班组长，工牌 **E3001 / PIN 1357**，全部工序资质）、`station1` 总装线工位终端（设备账号，只有 mes）。
+
+## 第二轮跨组接口约定
+
+- **订单与工单不符（R2 实现，R1 待办调用）**：R2 在 `erp/so-plan.ts` 导出 `woMismatches(db): Promise<{ so_id, so_no, line_id, material_code, so_qty, wo_qty, wo_ids: number[] }[]>`（订单行数量 − 已发 与 关联未关闭工单计划量不一致的行）；工单列表支持 `?mismatch=1`。R1 待办“订单变更待处理（N）”给 planner/manager，链接 `/mes/work-orders?mismatch=1`。
+- **可关闭 NCR（R3 实现，R1 待办调用）**：R3 在 `qms/qms-rules.ts` 导出 `closableNcrIds(db): Promise<number[]>`（已满足关闭条件、仍未关闭）；NCR 列表支持 `?closable=1`。R1 给 QA 待办“可关闭的 NCR（N）”。
+- **返工换件（R3 设置，R4 使用）**：NCR 处置 DTO 增加 `require_part_change: boolean`，写入 `Ncr.require_part_change`；R4 工位改为按该字段判断是否必须先登记换件（不再按处置意见关键词）。
+- **大额采购单（R2 实现，R1 拍板卡调用）**：金额（本位币）≥ `PO_APPROVAL_THRESHOLD` 时，采购员只能“提交审批”（状态 `SUBMITTED`），审批须 `po_big_approve` 权限（厂长）并电子签名；厂长可“退回”（回 DRAFT，填原因）。R1 拍板卡链接 `/purchase/orders?status=SUBMITTED`，并在卡片上提供批准/退回（调用 R2 的 `POST /api/purchase-orders/:id/approve`、`POST /api/purchase-orders/:id/reject`，均带 `signature`）。
+- **公司信息（R1 实现，R2/R3/R5 打印使用）**：`/api/auth/options` 的 `company` 字段改为读 `sys_setting`（键 `company`，JSON：`{name, name_en, address, phone, tax_no, bank, swift}`），环境变量作默认值；前端继续用 `utils/company.ts` 的 `useCompany()`（R1 给接口加 `swift` 字段并更新类型）。
+- **工位授权与 PIN（R4 实现后端授权接口；R1 负责 PIN 规则）**：R4 新增 `POST /api/mes/station/authorize { badge_no, pin }` → 校验该工牌用户启用、PIN 正确、拥有 `mes_lead`，返回 `{ user: { username, full_name } }`（不切换会话，失败计入锁定）；工位设定/退出/终端设置一律用它。R1：管理员设置/重置 PIN 时置 `must_change_pin = true`，`badge-login` 响应的 `user.must_change_pin` 透出，`POST /api/auth/change-pin` 成功后清除（R4 读 `auth.controller.ts` 中该接口的请求格式，在刷卡后若须改 PIN 引导两次输入新 PIN）。
+- **空闲锁屏（R1）**：MainLayout 空闲超时改为锁屏（保留页面状态），同一账号密码解锁，或有工牌的用户刷工牌 + PIN 解锁；换人则退出重新登录。**`/mes/station` 不适用**（工位有自己的 IdleGuard）。
+- **PDA 九宫格（R5 定义，R1 复用）**：R5 在 `pages/wms/pda/tiles.ts` 导出 `PDA_TILES`（key、title、icon、path、badgeKey），R1 仓管工作台九宫格改为复用它（角标数据仍由工作台接口提供）。
+- **湿敏收货确认（R5 后端，R2 前端）**：`WmsService.receive` 对湿敏物料放非防潮库位的行，要求请求体 `confirm_placement: true`，否则 400，`detail` 以 `【需确认】` 开头并写明物料与库位；R5 同步改 PDA 收货与“其他/客供收货”页面，R2 改采购单详情收货弹窗（先调 `POST /api/wms/placement-check`，弹确认后带 `confirm_placement: true` 提交）。
+- **税率（R2）**：`Customer.tax_rate` / `Supplier.tax_rate` 为空时用 `DEFAULT_VAT_RATE`（环境变量，默认 0.13）；客户、供应商主数据页加税率字段（MasterPages 中客户段落归 R2，供应商段落归 R2）。
