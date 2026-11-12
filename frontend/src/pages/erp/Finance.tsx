@@ -545,6 +545,7 @@ function docExportColumns(kind: Kind): ExportColumn[] {
     { title: '单号', key: 'no' },
     { title: '单据日期', key: 'doc_date', type: 'date' },
     { title: '到期日', key: 'due_date', type: 'date' },
+    ...(kind === 'AR' ? [{ title: '发票号', key: 'invoice_no' }, { title: '开票日期', key: 'invoice_date', type: 'date' as const }] : []),
     { title: `${t.partner}编码`, key: 'partner_code' },
     { title: `${t.partner}名称`, key: 'partner_name', width: 30 },
     { title: '币别', key: 'currency' },
@@ -657,7 +658,7 @@ function FinDocs({ kind, totals, base, rateOf, onChanged }: { kind: Kind; totals
     ...(kind === 'AR'
       ? [{
           title: '发票号', dataIndex: 'invoice_no', width: 140, mobile: 'hidden' as const,
-          render: (v: string | null, r: Rec) => <InvoiceCell doc={r} editable={can('finance')} onDone={reload} />,
+          render: (_v: string | null, r: Rec) => <InvoiceCell doc={r} editable={can('finance')} onDone={reload} />,
         }]
       : []),
     ...(kind === 'AP' ? [{ title: '来料检验', key: 'iqc', width: 110, render: (_: unknown, r: Rec) => <IqcTag iqc={r.iqc} /> }] : []),
@@ -815,6 +816,10 @@ const PAY_EXPORT: ExportColumn[] = [
   { title: '币别', key: 'currency' },
   { title: '核销金额（原币）', key: 'amount', type: 'money' },
   { title: '手续费（原币）', key: 'fee_amount', type: 'money' },
+  { title: '银行到账（原币）', key: 'bank_amount', type: 'money' },
+  { title: '转预收/预付单', key: 'advance_no' },
+  { title: '转预收/预付金额', key: 'advance_amount', type: 'money' },
+  { title: '银行账户', key: 'bank_account' },
   { title: '实际汇率', key: 'exchange_rate', type: 'number' },
   { title: '本位币', key: 'base_amount', type: 'money' },
   { title: '记账汇率', key: 'booking_rate', type: 'number' },
@@ -846,6 +851,16 @@ function PaymentsLedger({ base, onChanged }: { base: string; onChanged: () => vo
     { title: '币别', dataIndex: 'currency', render: (v) => <Tag>{v}</Tag> },
     { title: '核销金额', dataIndex: 'amount', sorter: true, align: 'right', render: (v, r) => cur(v, r.currency) },
     { title: '手续费', dataIndex: 'fee_amount', align: 'right', render: (v) => amt(v) },
+    {
+      title: <Tooltip title="银行实际到账/付出金额：收款 = 核销 − 手续费，付款 = 核销 + 手续费；含超额转入预收/预付的部分。冲抵不经银行">银行到账</Tooltip>,
+      dataIndex: 'bank_amount', align: 'right',
+      render: (v, r) => (
+        <div>
+          <b>{v ? cur(v, r.currency) : '-'}</b>
+          {r.advance_no && <div><Tag color="blue" style={{ marginInlineEnd: 0 }}>含转{r.kind === 'AP' ? '预付' : '预收'} {r.advance_no} {amt(r.advance_amount)}</Tag></div>}
+        </div>
+      ),
+    },
     { title: '实际汇率', dataIndex: 'exchange_rate', align: 'right', render: (v, r) => (r.currency === base ? '-' : rateText(v)) },
     { title: `本位币（${base}）`, dataIndex: 'base_amount', sorter: true, align: 'right', render: (v) => amt(v) },
     {
@@ -854,6 +869,7 @@ function PaymentsLedger({ base, onChanged }: { base: string; onChanged: () => vo
     },
     { title: '结算方式', dataIndex: 'method', render: (v) => v || '-' },
     { title: '流水号', dataIndex: 'reference', render: (v) => v || '-' },
+    { title: '银行账户', dataIndex: 'bank_account', render: (v) => v || '-' },
     { title: '登记人', dataIndex: 'created_by' },
   ];
   if (can('finance')) {
@@ -1137,7 +1153,7 @@ function MonthEnd() {
           <Card size="small" title="科目映射（引入前请与贵司金蝶科目表核对）">
             <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
               应收：借 应收账款 / 贷 主营业务收入；应付：借 原材料 / 贷 应付账款；收款：借 银行存款、手续费 / 贷 应收账款（按记账汇率）、预收账款，差额记汇兑损益（收益贷方、损失借方）；付款反之。
-              金额为价税合计（未拆分增值税）；本期作废的以前期间收付款生成红字冲销凭证。科目可由管理员用环境变量 KINGDEE_ACCOUNTS 调整。
+              应收/应付已按客户/供应商税率拆分增值税（销项 2221.01.05 / 进项 2221.01.01；未设税率时人民币按 13%、外币出口客户按 0%，可在客户/供应商主数据维护）；制单人为导出人；本期作废的以前期间收付款生成红字冲销凭证。科目可由管理员用环境变量 KINGDEE_ACCOUNTS 调整。
             </Typography.Paragraph>
             <Space wrap>
               {(v.accounts as Rec[]).map((a) => <Tag key={a.key}>{a.code} {a.name}{a.aux ? `（核算：${a.aux}）` : ''}</Tag>)}

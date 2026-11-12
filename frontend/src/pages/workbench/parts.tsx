@@ -401,7 +401,7 @@ export function ExpiryCard({ data }: { data: Record<string, Rec[]> }) {
   const total = groups.reduce((n, g) => n + (data[g.key]?.length ?? 0), 0);
   const dayTag = (d: number | null) => (d === null ? null : d < 0 ? <Tag color="red">已过期 {-d} 天</Tag> : d === 0 ? <Tag color="red">今天到期</Tag> : <Tag color={d <= 7 ? 'orange' : 'gold'}>剩 {d} 天</Tag>);
   return (
-    <Card id="expiry" size="small" title={<Space><Badge count={total} size="small" offset={[6, -2]}><span>到期预警</span></Badge></Space>}>
+    <Card id="expiry" size="small" title={<Space>到期预警<Typography.Text type={total ? 'danger' : 'secondary'} style={{ fontSize: 12, fontWeight: 400 }}>{total} 项</Typography.Text></Space>}>
       <Row gutter={[16, 8]}>
         {groups.map((g) => (
           <Col key={g.key} xs={24} md={12} xl={groups.length > 2 ? 6 : 12}>

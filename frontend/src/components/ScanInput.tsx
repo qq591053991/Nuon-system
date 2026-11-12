@@ -43,13 +43,20 @@ const ScanInput = forwardRef<ScanInputHandle, Props>(function ScanInput(
 
   useImperativeHandle(ref, () => ({ focus: () => inputRef.current?.focus(), clear: () => setValue('') }), []);
 
+  // 始终调用最新的 onScan / busy（全局键盘监听只注册一次，不能闭包住旧回调）
+  const onScanRef = useRef(onScan);
+  onScanRef.current = onScan;
+  const busyRef = useRef(false);
+
   const fire = async (text: string) => {
     const code = text.trim();
-    if (!code || busy) return;
+    if (!code || busyRef.current) return;
+    busyRef.current = true;
     setBusy(true);
     try {
-      await onScan(parseScan(code).code, parseScan(code));
+      await onScanRef.current(parseScan(code).code, parseScan(code));
     } finally {
+      busyRef.current = false;
       setBusy(false);
       setValue('');
       setTimeout(() => {
