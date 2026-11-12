@@ -1187,7 +1187,7 @@ export default function Finance() {
         <Tabs
           activeKey={tab}
           onChange={(k) => setSp({ tab: k }, { replace: true })}
-          destroyInactiveTabPane
+          destroyOnHidden
           items={[
             { key: 'AR', label: '应收账款', children: <FinDocs kind="AR" totals={totals.AR || BLANK} base={base} rateOf={rateOf} onChanged={loadSummary} /> },
             { key: 'AP', label: '应付账款', children: <FinDocs kind="AP" totals={totals.AP || BLANK} base={base} rateOf={rateOf} onChanged={loadSummary} /> },

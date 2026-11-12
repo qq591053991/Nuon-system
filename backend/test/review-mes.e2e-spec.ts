@@ -111,7 +111,7 @@ describe('评审改进：生产（资质 / 返工换件 / 分批放行）', () =
     const got = await api.ok('get', `/api/qualifications/${q.id}`);
     expect([got.is_active, got.valid, got.expires_at]).toEqual([false, false, null]);
     expect((await api.ok('get', '/api/qualifications', { op_code: 'ASM' })).items.map((x: any) => x.id)).toEqual([q.id]);
-    expect((await api.ok('get', '/api/qualifications', { valid: 1 })).items.map((x: any) => x.username).sort()).toEqual(['op1', 'op2']);
+    expect((await api.ok('get', '/api/qualifications', { valid: 1 })).items.map((x: any) => x.username).sort()).toEqual(['leader', 'op1', 'op2']); // 第二轮：演示班组长 leader 种子自带全部工序资质
     expect((await api.ok('get', '/api/qualifications', { q: '王厂长' })).total).toBe(1);
 
     // 批量报工同样校验
