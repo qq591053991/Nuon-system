@@ -34,12 +34,13 @@ async function passFrom(api: Api, sn: string, ref: Ref, from = 10) {
 }
 
 async function rlWo(api: Api, ref: Ref, qty: number) {
-  const so = await api.ok('get', `/api/sales-orders/${(await api.find('/api/sales-orders', { q: 'LUM-PO-26-118' })).id}`);
+  const pmc = api.as('pmc');
+  const so = await pmc.ok('get', `/api/sales-orders/${(await pmc.find('/api/sales-orders', { q: 'LUM-PO-26-118' })).id}`);
   let wo = await api.as('pmc').ok('post', '/api/work-orders', { material_id: ref.m['FG-RL300'], planned_qty: qty, so_id: so.id, so_line_id: so.lines[0].id });
   wo = await api.as('pmc').ok('post', `/api/work-orders/${wo.id}/release`);
   const iss = await api.as('wh').ok('post', `/api/work-orders/${wo.id}/issues`, {});
   await api.as('wh').ok('post', `/api/issues/${iss.id}/confirm`);
-  const sns: string[] = (await api.ok('get', `/api/work-orders/${wo.id}/serials`)).map((s: any) => s.sn);
+  const sns: string[] = (await pmc.ok('get', `/api/work-orders/${wo.id}/serials`)).map((s: any) => s.sn);
   return { wo, sns };
 }
 

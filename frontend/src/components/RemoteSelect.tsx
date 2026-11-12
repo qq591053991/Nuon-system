@@ -114,7 +114,7 @@ export default function RemoteSelect({ url, params, labelOf, valueKey = 'id', on
         placeholder="输入编码或名称搜索（可扫码）"
         searchValue={text}
         open={open}
-        onDropdownVisibleChange={(o) => {
+        onOpenChange={(o) => {
           setOpen(o);
           if (!o) setText('');
         }}

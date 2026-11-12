@@ -176,7 +176,7 @@ describe('生产流程', () => {
     let tr = await api.ok('get', `/api/trace/serial/${sns[0]}`);
     expect(tr.shipment.customer_name).toBe('Lumina Health Inc.');
     expect(tr.records.some((x: any) => x.is_rework)).toBe(true);
-    expect(tr.key_parts[0].lot_no).toBe('HY2609A');
+    expect(tr.key_parts.find((k: any) => k.action === 'BIND').lot_no).toBe('HY2609A');
     expect(tr.materials.some((m: any) => m.lot_no === 'HY2609A')).toBe(true);
     tr = await api.ok('get', '/api/trace/lot', { material_code: 'PSU-24V-5A', lot_no: 'HY2609A' });
     expect(tr.summary.shipped).toBe(2);

@@ -64,7 +64,7 @@ function fkGuard(e: unknown): never {
 function bomLines(materialId: number, lines: BomLineDto[]) {
   const seen = new Map<number, number>();
   return lines.map((ln, i) => {
-    if (ln.component_id === materialId) throw new BizError(`第 ${i + 1} 行：BOM 组件不能是父项自身`);
+    if (ln.component_id === materialId) throw new BizError('BOM 组件不能是父项自身');
     if (seen.has(ln.component_id)) throw new BizError(`同一组件在 BOM 中重复出现（第 ${seen.get(ln.component_id)} 行和第 ${i + 1} 行），请合并为一行`);
     seen.set(ln.component_id, i + 1);
     return {

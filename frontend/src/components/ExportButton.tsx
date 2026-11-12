@@ -25,6 +25,9 @@ interface Props {
   size?: 'small' | 'middle' | 'large';
 }
 
+const PAGE = 1000;
+const MAX_ROWS = 50000;
+
 /** 导出 Excel：按当前筛选条件导出全部数据（不只是当前页） */
 export default function ExportButton({ url, params, rows, columns, filename, title, text = '导出 Excel', size }: Props) {
   const [busy, setBusy] = useState(false);
@@ -33,13 +36,23 @@ export default function ExportButton({ url, params, rows, columns, filename, tit
     try {
       let data = rows;
       if (!data && url) {
-        const q: Rec = { page: 1, page_size: 5000 };
+        const base: Rec = {};
         Object.entries(params || {}).forEach(([k, v]) => {
-          if (v !== undefined && v !== null && v !== '') q[k] = v;
+          if (v !== undefined && v !== null && v !== '' && k !== 'page' && k !== 'page_size') base[k] = v;
         });
-        const res = await get(url, q);
-        data = Array.isArray(res) ? res : res.items;
-        if (!Array.isArray(res) && res.total > (data?.length ?? 0)) message.warning(`数据较多，仅导出前 ${data?.length} 条，请缩小筛选范围`);
+        // 逐页拉取（后端单页上限 1000 行），最多导出 MAX_ROWS 行
+        const all: Rec[] = [];
+        for (let page = 1; ; page++) {
+          const res = await get(url, { ...base, page, page_size: PAGE });
+          if (Array.isArray(res)) { all.push(...res); break; }
+          all.push(...res.items);
+          if (!res.items.length || all.length >= res.total) break;
+          if (all.length >= MAX_ROWS) {
+            message.warning(`数据较多（共 ${res.total} 条），仅导出前 ${MAX_ROWS} 条，请缩小筛选范围`);
+            break;
+          }
+        }
+        data = all.slice(0, MAX_ROWS);
       }
       const keyed = columns.map((c, i) => ({ ...c, key: c.key ?? `c${i}` }));
       const out = (data || []).map((r) => Object.fromEntries(keyed.map((c) => [c.key, c.value ? c.value(r) : r[c.key!]])));

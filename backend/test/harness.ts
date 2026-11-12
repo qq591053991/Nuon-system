@@ -66,7 +66,9 @@ export class Api {
 
   /** 列表第一条 */
   async find(url: string, query: Record<string, unknown>) {
-    const items = (await this.ok('get', url, query)).items;
+    // 查找辅助（非权限测试）：admin 只管账号与审计、读不到业务单据，此时改用厂长账号查
+    const reader = this.user === 'admin' ? this.as('manager') : this;
+    const items = (await reader.ok('get', url, query)).items;
     if (!items.length) throw new Error(`no items for ${url} ${JSON.stringify(query)}`);
     return items[0];
   }
