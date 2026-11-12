@@ -53,7 +53,7 @@ export interface SeedContext {
   customers: any[];
 }
 
-/** 基础数据 + 12 个演示账号（密码均为 DEMO_PASSWORD）：演示初始化与端到端测试共用 */
+/** 基础数据 + 14 个演示账号（密码均为 DEMO_PASSWORD）：演示初始化与端到端测试共用 */
 export async function seedBase(db: PrismaService, opts: SeedBaseOptions = {}): Promise<SeedContext> {
   const numbering = new NumberingService();
   const inv = new InventoryService();
@@ -252,7 +252,7 @@ export async function seedBase(db: PrismaService, opts: SeedBaseOptions = {}): P
       where: { username: { in: USERS.map(([u]) => u) }, created_by: 'system', auth_source: 'LOCAL', password_changed_at: null },
       data: { password_changed_at: new Date() },
     });
-    for (const [username, badge, pin] of [['op1', 'E1001', '1234'], ['op2', 'E1002', '5678']]) {
+    for (const [username, badge, pin] of [['op1', 'E1001', '1234'], ['op2', 'E1002', '5678'], ['leader', 'E2001', '2468']]) {
       const u = await tx.user.findUnique({ where: { username } });
       if (!u || u.badge_no || u.pin_hash || (await tx.user.findUnique({ where: { badge_no: badge } }))) continue;
       await tx.user.update({ where: { id: u.id }, data: { badge_no: badge } });
@@ -261,7 +261,7 @@ export async function seedBase(db: PrismaService, opts: SeedBaseOptions = {}): P
     }
 
     // 人员上岗资质（评审 P1-7）：产线操作员 op1、op2 已培训考核合格，可在全部工序（*）上岗
-    for (const username of ['op1', 'op2']) {
+    for (const username of ['op1', 'op2', 'leader']) {
       const u = await tx.user.findUnique({ where: { username } });
       if (!u || (await tx.qualification.findFirst({ where: { user_id: u.id, op_code: '*' } }))) continue;
       await tx.qualification.create({

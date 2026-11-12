@@ -7,6 +7,7 @@ export const PERMISSIONS: Record<string, string> = {
   plan: '生产计划（MRP/工单）',
   wms: '仓储作业（收货/领料/发货/调拨/盘点）',
   mes: '车间报工（工位过站/测试数据录入）',
+  mes_lead: '班组长：工位终端设定/退出授权、本线人员管理',
   qc: '质量检验（IQC/FQC、开具NCR）',
   qa: '质量保证（NCR评审处置、CAPA、产品放行、BOM/工艺批准）',
   finance: '财务（应收应付、收付款）',
@@ -29,6 +30,9 @@ export const ROLES: Record<string, { name: string; perms: string[] }> = {
   engineer: { name: '工艺/研发工程师', perms: ['engineering', 'master'] },
   warehouse: { name: '仓管员', perms: ['wms'] },
   operator: { name: '产线操作员', perms: ['mes'] },
+  leader: { name: '班组长', perms: ['mes', 'mes_lead'] },
+  /** 工位终端专用账号：只用于在车间工位电脑上打开工位终端（操作员刷工牌作业），不能做设定与退出（须班组长刷卡授权） */
+  station: { name: '工位终端（设备账号）', perms: ['mes'] },
   qc: { name: '质检员', perms: ['qc'] },
   qa: { name: '质量工程师/QA', perms: ['qa', 'qc', 'audit'] },
   finance: { name: '财务', perms: ['finance'] },

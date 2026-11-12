@@ -43,15 +43,15 @@ describe('G2 系统管理与数据导入', () => {
 
     // 管理员首页提示：仍有 N 个初始密码账号
     const sum = await t.api.ok('get', '/api/system/users/summary');
-    expect(sum.initial_password).toBe(12);
-    expect(sum.demo_password.length).toBe(12);
-    expect(sum.departments.find((d: any) => d.name === '生产部').count).toBe(2);
+    expect(sum.initial_password).toBe(14);
+    expect(sum.demo_password.length).toBe(14);
+    expect(sum.departments.find((d: any) => d.name === '生产部').count).toBe(4);
     // 一个账号改了密码后不再算“初始密码”
     const tok = (await login('finance', DEMO_PASSWORD)).body.access_token;
     await http().post('/api/auth/change-password').set(bearer(tok)).send({ old_password: DEMO_PASSWORD, new_password: 'Finance2026x' }).expect(200);
-    expect((await t.api.ok('get', '/api/system/users/summary')).initial_password).toBe(11);
+    expect((await t.api.ok('get', '/api/system/users/summary')).initial_password).toBe(13);
     const listed = await t.api.ok('get', '/api/system/users', { status: 'initial_password', page_size: 100 });
-    expect(listed.total).toBe(11);
+    expect(listed.total).toBe(13);
     expect(listed.items.every((u: any) => u.initial_password && u.demo_password)).toBe(true);
 
     // 生产初始化：清空后只建 admin，首次登录须改密

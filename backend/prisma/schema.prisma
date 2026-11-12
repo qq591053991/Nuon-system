@@ -37,6 +37,8 @@ model User {
 
   qualifications Qualification[]
 
+  must_change_pin Boolean @default(false) // 工位 PIN 首次使用后须本人重设
+
   @@map("sys_user")
 }
 
@@ -120,6 +122,8 @@ model Customer {
   serials         SerialNumber[]
   ncrs            Ncr[]
 
+  tax_rate Decimal? @db.Decimal(6, 4) // 增值税税率（如 0.13；出口零税率填 0；空 = 按系统默认）
+
   @@map("md_customer")
 }
 
@@ -153,6 +157,8 @@ model Supplier {
   receipts        Receipt[]
   inspections     Inspection[]
   ncrs            Ncr[]
+
+  tax_rate Decimal? @db.Decimal(6, 4) // 进项税率（如 0.13；空 = 按系统默认）
 
   @@map("md_supplier")
 }
@@ -219,6 +225,8 @@ model Material {
   key_parts        KeyPartBinding[]
   inspections      Inspection[]
   ncrs             Ncr[]
+
+  name_en String? @db.VarChar(200) // 英文品名（形式发票、装箱单）
 
   @@map("md_material")
 }
@@ -580,6 +588,9 @@ model MrpSuggestion {
   supplier Supplier? @relation(fields: [supplier_id], references: [id])
   customer Customer? @relation(fields: [customer_id], references: [id])
 
+  notified_by String?   @db.VarChar(64) // 客供料：已通知客户的人
+  notified_at DateTime?
+
   @@index([run_id])
   @@map("erp_mrp_suggestion")
 }
@@ -610,6 +621,9 @@ model FinanceDoc {
   supplier Supplier? @relation(fields: [supplier_id], references: [id])
   payments Payment[]
 
+  invoice_no   String?   @db.VarChar(64) // 发票号
+  invoice_date DateTime? @db.Date // 开票日期
+
   @@map("fin_doc")
 }
 
@@ -635,6 +649,8 @@ model Payment {
   created_by    String?   @db.VarChar(64)
 
   doc FinanceDoc @relation(fields: [doc_id], references: [id], onDelete: Cascade)
+
+  bank_account String? @db.VarChar(128) // 收/付款银行账户
 
   @@index([doc_id])
   @@map("fin_payment")
@@ -1141,6 +1157,8 @@ model InspectionItem {
 
   inspection Inspection @relation(fields: [inspection_id], references: [id], onDelete: Cascade)
 
+  defect_qty Int @default(0) // 本检验项不良件数
+
   @@index([inspection_id])
   @@map("qms_inspection_item")
 }
@@ -1182,6 +1200,8 @@ model Ncr {
   customer   Customer?   @relation(fields: [customer_id], references: [id])
   capa       Capa?       @relation(fields: [capa_id], references: [id])
 
+  require_part_change Boolean @default(false) // QA 处置要求返工时更换零件（工位须先登记换件）
+
   @@index([sn])
   @@index([wo_id])
   @@index([status])
@@ -1209,6 +1229,8 @@ model Capa {
   created_by        String?   @db.VarChar(64)
 
   ncrs Ncr[]
+
+  owner_user_id Int? // 负责人（账号）
 
   @@map("qms_capa")
 }
@@ -1268,6 +1290,10 @@ model Qualification {
   created_by   String?   @db.VarChar(64)
 
   user User @relation(fields: [user_id], references: [id])
+
+  voided_by   String?   @db.VarChar(64)
+  voided_at   DateTime?
+  void_reason String?   @db.VarChar(256)
 
   @@index([user_id])
   @@map("hr_qualification")
@@ -1403,4 +1429,14 @@ model SupplierReturn {
 
   @@index([ncr_id])
   @@map("wms_supplier_return")
+}
+
+/// 系统设置（键值）：公司抬头与银行信息等，由管理员在“系统设置”维护
+model SystemSetting {
+  key        String   @id @db.VarChar(64)
+  value      String   @db.Text
+  updated_by String?  @db.VarChar(64)
+  updated_at DateTime @updatedAt
+
+  @@map("sys_setting")
 }
