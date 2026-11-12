@@ -1,9 +1,11 @@
 /** ERP 请求体：销售订单、采购订单、采购收货、MRP 转单、收付款 */
 import { Type } from 'class-transformer';
-import { IsArray, IsInt, IsNumber, IsOptional, IsPositive, IsString, Min, ValidateNested } from 'class-validator';
+import { IsArray, IsBoolean, IsInt, IsNumber, IsOptional, IsPositive, IsString, Min, ValidateNested } from 'class-validator';
 
 // ============ 销售订单 ============
 export class SoLineDto {
+  /** 原订单行 id（修改草稿/订单变更时保留行；不传 = 新增行） */
+  @IsOptional() @Type(() => Number) @IsInt() id?: number | null;
   @Type(() => Number) @IsInt() material_id: number;
   @Type(() => Number) @IsNumber() @IsPositive() qty: number;
   @IsOptional() @Type(() => Number) @IsNumber() unit_price: number | null = 0;
@@ -24,6 +26,35 @@ export class SoDto {
   @IsOptional() @IsString() ship_to?: string | null;
   @IsOptional() @IsString() remark?: string | null;
   @IsArray() @ValidateNested({ each: true }) @Type(() => SoLineDto) lines: SoLineDto[];
+}
+
+/** 已确认订单变更：preview=true 只分析影响不保存；保存时 reason 必填。表头字段未传 = 不改 */
+export class SoChangeDto {
+  @IsOptional() @IsString() reason?: string | null;
+  @IsOptional() @IsBoolean() preview?: boolean;
+  @IsOptional() @IsString() delivery_date?: string | null;
+  @IsOptional() @IsString() customer_po?: string | null;
+  @IsOptional() @IsString() ship_to?: string | null;
+  @IsOptional() @IsString() remark?: string | null;
+  @IsArray() @ValidateNested({ each: true }) @Type(() => SoLineDto) lines: SoLineDto[];
+}
+
+/** 撤销确认 / 工单调整等需要填写原因的操作 */
+export class ReasonDto {
+  @IsString() reason: string;
+}
+
+export class SoWoLineDto {
+  @Type(() => Number) @IsInt() so_line_id: number;
+  @Type(() => Number) @IsNumber() @Min(0) qty: number;
+  @IsOptional() @IsString() planned_start?: string | null;
+  @IsOptional() @IsString() planned_end?: string | null;
+}
+
+/** 订单生成工单：lines 不传 = 按未覆盖数量自动生成；link_wo_ids = 关联已有的未关联订单工单 */
+export class SoWorkOrdersDto {
+  @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => SoWoLineDto) lines?: SoWoLineDto[];
+  @IsOptional() @IsArray() @Type(() => Number) @IsInt({ each: true }) link_wo_ids?: number[];
 }
 
 // ============ 采购订单 ============
@@ -72,6 +103,8 @@ export class ReceiveDto {
 // ============ MRP ============
 export class ConvertDto {
   @IsArray() @Type(() => Number) @IsInt({ each: true }) suggestion_ids: number[];
+  /** MRP 结果已过期（之后订单/工单/采购/库存有变化）时仍要转单 */
+  @IsOptional() @IsBoolean() force?: boolean;
 }
 
 // ============ 应收应付 ============
@@ -81,4 +114,10 @@ export class PaymentDto {
   @IsOptional() @IsString() method: string | null = '银行转账';
   @IsOptional() @IsString() reference?: string | null;
   @IsOptional() @IsString() remark?: string | null;
+  /** 银行手续费（原币）：应收从货款中扣除（核销金额含手续费）；应付为我方另付 */
+  @IsOptional() @Type(() => Number) @IsNumber() @Min(0) fee_amount?: number | null;
+  /** 实收/实付汇率（1 原币 = ? 本位币），不填按收付款日适用汇率 */
+  @IsOptional() @Type(() => Number) @IsNumber() @IsPositive() exchange_rate?: number | null;
+  /** 超出未结余额的部分转为预收/预付款 */
+  @IsOptional() @IsBoolean() as_advance?: boolean;
 }

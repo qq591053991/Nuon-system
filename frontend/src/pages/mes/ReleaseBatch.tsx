@@ -69,10 +69,15 @@ interface Props {
   open: boolean;
   onClose: () => void;
   onDone: () => void;
+  /** 预先勾选的序列号（如 DHR 放行结论中全部检查通过的产品）；不传则默认勾选全部可放行 */
+  preselect?: string[] | null;
 }
 
+/** 签名说明中的序列号清单（过多时截断） */
+export const snText = (sns: string[], max = 30) => (sns.length > max ? `${sns.slice(0, max).join('、')} 等 ${sns.length} 台` : sns.join('、'));
+
 /** 分批放行弹窗：选择序列号 / 数量 → 批准或拒绝（电子签名） */
-export function ReleaseBatchModal({ wo, open, onClose, onDone }: Props) {
+export function ReleaseBatchModal({ wo, open, onClose, onDone, preselect }: Props) {
   const { message } = App.useApp();
   const [sign, signHolder] = useESign();
   const [sum, setSum] = useState<Rec | null>(null);
@@ -90,7 +95,8 @@ export function ReleaseBatchModal({ wo, open, onClose, onDone }: Props) {
     get(`/work-orders/${wo.id}/releasable`)
       .then((d) => {
         setSum(d);
-        setSelected((d.serials || []).map((s: Rec) => s.sn));
+        const all: string[] = (d.serials || []).map((s: Rec) => s.sn);
+        setSelected(preselect ? all.filter((sn) => preselect.includes(sn)) : all);
         setQty(d.releasable_qty || null);
       })
       .finally(() => setLoading(false));
@@ -105,22 +111,24 @@ export function ReleaseBatchModal({ wo, open, onClose, onDone }: Props) {
       message.warning('拒绝放行须填写原因');
       return;
     }
+    const unit = serial ? '台' : ` ${sum.uom ?? ''}`;
+    const sns = serial ? [...selected].sort() : [];
+    const list = sns.length ? ` 序列号：${snText(sns)}。` : '';
+    setBusy(true);
     try {
-      const unit = serial ? '台' : ` ${sum.uom ?? ''}`;
-      const signature = await sign({
+      const r = await sign({
         meaning: approve ? '产品放行（分批）' : '产品放行（分批拒绝）',
         description: approve
-          ? `批准工单 ${wo.no}（批号 ${wo.lot_no}）本批 ${fmtQty(count)}${unit} 放行：成品由“待放行”转为“合格”，可以发货。`
-          : `拒绝放行工单 ${wo.no} 本批 ${fmtQty(count)}${unit}：成品将被冻结（HOLD），不能发货。`,
-        defaultReason: reason.trim() || (approve ? '本批记录完整，批准放行' : undefined),
+          ? `批准工单 ${wo.no}（批号 ${wo.lot_no}）本批 ${fmtQty(count)}${unit} 放行：成品由“待放行”转为“合格”，可以发货。${list}`
+          : `拒绝放行工单 ${wo.no} 本批 ${fmtQty(count)}${unit}：成品将被冻结（HOLD），不能发货。${list}`,
+        defaultReason: reason.trim() || (approve ? `本批记录完整，批准放行${sns.length && sns.length <= 6 ? `（${sns.join('、')}）` : ''}` : undefined),
         reasonRequired: !approve,
-      });
-      setBusy(true);
-      const r = await post(`/work-orders/${wo.id}/releases`, {
-        ...(serial ? { serials: selected } : { qty }),
-        approve,
-        reason: signature.reason || reason.trim() || undefined,
-        signature,
+        submit: (signature) => post(`/work-orders/${wo.id}/releases`, {
+          ...(serial ? { serials: selected } : { qty }),
+          approve,
+          reason: signature.reason || reason.trim() || undefined,
+          signature,
+        }, true),
       });
       if (approve) {
         message.success(`放行批 ${r.release.no} 已放行 ${fmtQty(r.release.qty)}${unit}${r.dhr_status === 'RELEASED' ? '；该工单已全部放行并关闭' : ''}`);
@@ -183,7 +191,7 @@ export function ReleaseBatchModal({ wo, open, onClose, onDone }: Props) {
                   ]}
                 />
               ) : <Empty description="没有可放行的产品（需已完工入库、完成全部工序且尚未放行）" />}
-              <Typography.Text type="secondary">已选 <b>{selected.length}</b> / {sum.serials?.length ?? 0} 台</Typography.Text>
+              <Typography.Text type="secondary">已选 <b>{selected.length}</b> / {sum.serials?.length ?? 0} 台{selected.length > 0 && selected.length <= 12 ? `：${[...selected].sort().join('、')}` : ''}</Typography.Text>
             </>
           ) : (
             <Space align="center" wrap style={{ marginBottom: 8 }}>

@@ -47,10 +47,10 @@ export interface ReturnableLot {
   returnable_qty: number;
 }
 
-const keyOf = (materialId: number, lot: string, owner: number | null | undefined) => `${materialId}\u0000${lot}\u0000${owner ?? ''}`;
+export const keyOf = (materialId: number, lot: string, owner: number | null | undefined) => `${materialId}\u0000${lot}\u0000${owner ?? ''}`;
 
 /** 工单各物料批次的领退汇总（按 物料 + 批次 + 货主） */
-async function lotLedger(tx: Tx, woId: number) {
+export async function lotLedger(tx: Tx, woId: number) {
   const lines = await tx.materialIssueLine.findMany({
     where: { issue: { wo_id: woId, status: { in: ['CONFIRMED', 'DRAFT'] } } },
     orderBy: { id: 'asc' },
@@ -81,12 +81,16 @@ async function lotLedger(tx: Tx, woId: number) {
   return map;
 }
 
-/** 退回库位必须是合格品库位（不合格品仓/区不接收退料；不良物料请开具 NCR） */
-async function checkReturnLocation(tx: Tx, locationId: number) {
+/** 退回库位必须是合格品库位（不合格品仓/区不接收退料；不良物料请开具 NCR），且货主与仓库匹配（自有料不进客供料仓、客供料不进自有仓） */
+async function checkReturnLocation(tx: Tx, locationId: number, inv?: InventoryService, materialId?: number, owner?: number | null) {
   const loc = await tx.location.findUnique({ where: { id: locationId }, include: { warehouse: true } });
   if (!loc || !loc.is_active) throw new BizError('退料库位不存在或已停用');
   if (loc.location_type === 'REJECT' || loc.warehouse?.warehouse_type === 'REJECT') {
     throw new BizError(`库位 ${loc.code} 为不合格品区：退料只退回合格品库位，不良物料请开具 NCR 处理`);
+  }
+  if (inv && materialId) {
+    const place = await inv.checkPlacement(tx, { material_id: materialId, location_id: locationId, owner_customer_id: owner ?? null });
+    if (place.errors.length) throw new BizError(place.errors.join('；'));
   }
   return loc;
 }
@@ -125,7 +129,7 @@ export async function confirmMaterialReturn(tx: Tx, inv: InventoryService, user:
   for (const ln of issue.lines) {
     const wm = woMats.get(ln.material_id);
     if (!wm) throw new BizError(`${ln.material.code} 不是本工单物料`);
-    await checkReturnLocation(tx, ln.location_id);
+    await checkReturnLocation(tx, ln.location_id, inv, ln.material_id, ln.owner_customer_id);
     // 批次属性（生产日期/有效期/供应商批次）取自来料记录，退回后与原批次一致
     const rl = await tx.receiptLine.findFirst({
       where: { material_id: ln.material_id, lot_no: ln.lot_no }, orderBy: { id: 'asc' }, include: { receipt: true },
@@ -185,7 +189,7 @@ export class ReturnsService {
       }
       const m = await tx.material.findUnique({ where: { id: ln.material_id } });
       if (!r || r.issued_qty <= EPS) throw new BizError(`${m?.code ?? ln.material_id} 批次[${lot || '-'}] 未领用到本工单，不能退料`);
-      await checkReturnLocation(tx, ln.location_id);
+      await checkReturnLocation(tx, ln.location_id, this.inv, ln.material_id, owner);
       const k = keyOf(ln.material_id, lot, owner);
       const total = round((want.get(k) ?? 0) + qty);
       if (total > r.returnable_qty + EPS) {

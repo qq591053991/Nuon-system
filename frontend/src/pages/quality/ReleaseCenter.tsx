@@ -4,9 +4,11 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { get, type Rec } from '../../api/http';
 import { useAuth } from '../../auth';
+import ExportButton from '../../components/ExportButton';
 import PageHeader from '../../components/PageHeader';
 import StatusTag from '../../components/StatusTag';
 import { usePaged } from '../../components/usePaged';
+import { dictLabel } from '../../utils/dict';
 import { fmtDateTime, fmtQty } from '../../utils/format';
 import { ReleaseBatchModal, WoReleaseHistory } from '../mes/ReleaseBatch';
 
@@ -28,6 +30,8 @@ const TABS: Record<TabKey, { label: string; query: Rec; hint: string }> = {
   rejected: { label: '已拒绝', query: { status: undefined, dhr_status: 'REJECTED', releasable: undefined }, hint: 'QA 整单拒绝放行的批次，剩余成品已冻结（HOLD），需调查处理。' },
 };
 const KEYS = Object.keys(TABS) as TabKey[];
+/** 待放行数量 = 已入库 − 已放行（整单拒绝的批次为 0） */
+const pendingQty = (r: Rec) => (r.dhr_status === 'OPEN' ? Math.max(0, (r.received_qty || 0) - (r.released_qty || 0)) : 0);
 
 export default function ReleaseCenter() {
   const nav = useNavigate();
@@ -36,7 +40,7 @@ export default function ReleaseCenter() {
   const [counts, setCounts] = useState<Partial<Record<TabKey, number>>>({});
   const [batchWo, setBatchWo] = useState<Rec | null>(null);
   const [historyKey, setHistoryKey] = useState(0);
-  const { rows, loading, setQuery, reload, pagination } = usePaged('/work-orders', TABS.partial.query);
+  const { rows, loading, setQuery, reload, pagination, query, onTableChange } = usePaged('/work-orders', TABS.partial.query);
 
   const loadCounts = useCallback(() => {
     Promise.all(KEYS.map((k) => get('/work-orders', { ...TABS[k].query, page_size: 1 }, true).then((d) => [k, d.total] as const).catch(() => [k, undefined] as const)))
@@ -48,7 +52,14 @@ export default function ReleaseCenter() {
   }, [loadCounts]);
 
   const columns: any[] = [
-    { title: '工单号', dataIndex: 'no', fixed: 'left', render: (v: string, r: Rec) => <Link to={`/mes/work-orders/${r.id}`}>{v}</Link> },
+    { title: '工单号', dataIndex: 'no', fixed: 'left', sorter: true, render: (v: string, r: Rec) => <Link to={`/mes/work-orders/${r.id}`}>{v}</Link> },
+    {
+      title: '待放行', key: 'pending', align: 'right',
+      render: (_: any, r: Rec) => {
+        const n = pendingQty(r);
+        return n > 0 ? <b style={{ color: '#d4380d', fontSize: 15 }}>{fmtQty(n)}</b> : <span style={{ color: '#bfbfbf' }}>0</span>;
+      },
+    },
     {
       title: '产品', dataIndex: 'material_name',
       render: (v: string, r: Rec) => (
@@ -68,15 +79,15 @@ export default function ReleaseCenter() {
       render: (_: any, r: Rec) => <span>{fmtQty(r.planned_qty)} / <b>{fmtQty(r.completed_qty)}</b> / <span style={{ color: r.scrap_qty > 0 ? '#cf1322' : undefined }}>{fmtQty(r.scrap_qty)}</span></span>,
     },
     {
-      title: '已入库', dataIndex: 'received_qty', align: 'right',
+      title: '已入库', dataIndex: 'received_qty', align: 'right', sorter: true,
       render: (v: number, r: Rec) => <span style={{ color: v < r.completed_qty ? '#d48806' : undefined }}>{fmtQty(v)}</span>,
     },
     {
-      title: '已放行', dataIndex: 'released_qty', align: 'right',
+      title: '已放行', dataIndex: 'released_qty', align: 'right', sorter: true,
       render: (v: number, r: Rec) => <span style={{ color: v > 0 ? '#389e0d' : undefined, fontWeight: v > 0 && v < r.received_qty ? 600 : undefined }}>{fmtQty(v)}</span>,
     },
     { title: '进度', dataIndex: 'progress', width: 140, render: (v: number) => <Progress percent={v} size="small" /> },
-    { title: '实际完工', dataIndex: 'actual_end', render: (v: string) => fmtDateTime(v) },
+    { title: '实际完工', dataIndex: 'actual_end', sorter: true, render: (v: string) => fmtDateTime(v) },
     { title: '工单状态', dataIndex: 'status', render: (v: string) => <StatusTag dict="wo_status" value={v} /> },
     { title: 'DHR 状态', dataIndex: 'dhr_status', render: (v: string) => <StatusTag dict="dhr_status" value={v} /> },
     {
@@ -96,7 +107,14 @@ export default function ReleaseCenter() {
 
   return (
     <>
-      <PageHeader title="DHR 审核与放行" sub="器械生产记录（DHR）汇集了一个生产批的用料批次、工序与测试数据、设备校准、不合格处置与签名记录。" />
+      <PageHeader title="DHR 审核与放行" sub="器械生产记录（DHR）汇集了一个生产批的用料批次、工序与测试数据、设备校准、不合格处置与签名记录。"
+        extra={<ExportButton url="/work-orders" params={query} filename={`放行中心_${TABS[tab].label}`} columns={[
+          { title: '工单号', key: 'no' }, { title: '产品编码', key: 'material_code' }, { title: '产品名称', key: 'material_name' }, { title: '客户', key: 'customer_name' },
+          { title: '生产批号', key: 'lot_no' }, { title: '计划', key: 'planned_qty', type: 'number' }, { title: '完工', key: 'completed_qty', type: 'number' },
+          { title: '报废', key: 'scrap_qty', type: 'number' }, { title: '已入库', key: 'received_qty', type: 'number' }, { title: '已放行', key: 'released_qty', type: 'number' },
+          { title: '待放行', value: pendingQty, type: 'number' }, { title: '实际完工', key: 'actual_end', type: 'datetime' },
+          { title: '工单状态', value: (r) => dictLabel('wo_status', r.status) }, { title: 'DHR 状态', value: (r) => dictLabel('dhr_status', r.dhr_status) },
+        ]} />} />
       <Alert type="info" showIcon style={{ marginBottom: 16 }} message="成品完工入库后为“待放行”，QA 审核 DHR 并电子签名放行后才能发货；大工单可按“放行批”分批放行，只有已放行批中的产品可以发货。" />
       <Card styles={{ body: { paddingTop: 8 } }}>
         <Tabs
@@ -124,7 +142,7 @@ export default function ReleaseCenter() {
           }))}
         />
         <Typography.Paragraph type="secondary">{TABS[tab].hint}</Typography.Paragraph>
-        <Table<Rec> rowKey="id" size="middle" columns={columns} dataSource={rows} loading={loading} pagination={pagination} scroll={{ x: 'max-content' }}
+        <Table<Rec> rowKey="id" size="middle" columns={columns} dataSource={rows} loading={loading} pagination={pagination} onChange={onTableChange} scroll={{ x: 'max-content' }}
           expandable={{
             rowExpandable: (r) => (r.released_qty || 0) > 0 || r.dhr_status !== 'OPEN',
             expandedRowRender: (r) => (

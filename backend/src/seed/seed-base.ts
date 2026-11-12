@@ -1,21 +1,40 @@
 /** 基础数据：用户、客户、供应商、物料、BOM、工艺（含测试规格）、设备、仓库库位、期初库存、销售订单。 */
 import { Prisma } from '@prisma/client';
-import { hashPassword } from '../auth/password';
+import { DEMO_PASSWORD, DEMO_USERS } from '../auth/demo';
+import { generateTempPassword, hashPassword } from '../auth/password';
 import { addDays, today } from '../common/dates';
 import { PrismaService, type Tx } from '../common/prisma.service';
 import { InventoryService } from '../core/inventory.service';
 import { NumberingService } from '../core/numbering.service';
 import { makeGtin14 } from '../core/udi';
 
-export const DEMO_PASSWORD = 'Nuon@2026';
+export { DEMO_PASSWORD };
 
-const USERS: [string, string, string, string][] = [
-  ['admin', '系统管理员', 'admin', '信息部'], ['manager', '王厂长', 'manager', '总经办'],
-  ['sales', '李销售', 'sales', '销售部'], ['buyer', '陈采购', 'purchaser', '采购部'],
-  ['pmc', '周计划', 'planner', 'PMC'], ['engineer', '吴工艺', 'engineer', '工程部'],
-  ['wh', '郑仓管', 'warehouse', '仓储部'], ['op1', '刘操作', 'operator', '生产部'], ['op2', '黄操作', 'operator', '生产部'],
-  ['qc', '孙质检', 'qc', '品质部'], ['qa', '赵QA', 'qa', '品质部'], ['finance', '钱财务', 'finance', '财务部'],
-];
+const USERS = DEMO_USERS;
+
+export interface SeedBaseOptions {
+  /** 预置演示账号首次登录须修改密码（演示环境默认 false，便于体验；DEMO_FORCE_PASSWORD_CHANGE=1 或 --force-change 开启） */
+  forcePasswordChange?: boolean;
+}
+
+/**
+ * 生产初始化（npm run seed，无 --demo）：只建系统管理员 admin，首次登录强制修改密码。
+ * 初始密码取 initialPassword（环境变量 INITIAL_ADMIN_PASSWORD），未提供则随机生成并返回（由调用方打印一次）。
+ * admin 已存在时不做任何修改，返回 null。
+ */
+export async function seedAdmin(db: PrismaService, initialPassword?: string | null): Promise<{ username: string; password: string } | null> {
+  return db.tx(async (tx: Tx) => {
+    if (await tx.user.findUnique({ where: { username: 'admin' } })) return null;
+    const password = initialPassword?.trim() || generateTempPassword(12);
+    await tx.user.create({
+      data: {
+        username: 'admin', full_name: '系统管理员', roles: 'admin', department: '信息部', password_hash: hashPassword(password),
+        password_changed_at: new Date(), must_change_password: true, created_by: 'system',
+      },
+    });
+    return { username: 'admin', password };
+  });
+}
 
 /** 清空所有业务表（仅测试/重置使用） */
 export async function resetDatabase(db: PrismaService) {
@@ -34,7 +53,8 @@ export interface SeedContext {
   customers: any[];
 }
 
-export async function seedBase(db: PrismaService): Promise<SeedContext> {
+/** 基础数据 + 12 个演示账号（密码均为 DEMO_PASSWORD）：演示初始化与端到端测试共用 */
+export async function seedBase(db: PrismaService, opts: SeedBaseOptions = {}): Promise<SeedContext> {
   const numbering = new NumberingService();
   const inv = new InventoryService();
   return db.tx(async (tx: Tx) => {
@@ -42,7 +62,9 @@ export async function seedBase(db: PrismaService): Promise<SeedContext> {
     const pwd = hashPassword(DEMO_PASSWORD);
     for (const [username, full_name, roles, department] of USERS) {
       if (!(await tx.user.findUnique({ where: { username } }))) {
-        await tx.user.create({ data: { username, full_name, roles, department, password_hash: pwd, created_by: 'system' } });
+        await tx.user.create({
+          data: { username, full_name, roles, department, password_hash: pwd, created_by: 'system', must_change_password: !!opts.forcePasswordChange },
+        });
       }
     }
 

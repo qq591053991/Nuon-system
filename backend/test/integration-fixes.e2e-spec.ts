@@ -40,7 +40,7 @@ describe('评审改进集成修复', () => {
 
   test('MRP 建议的需求日期与周次存于独立字段', async () => {
     const { api } = t;
-    const so = await api.find('/api/sales-orders', { q: 'LUM-PO-26-131' });
+    const so = await api.as('sales').find('/api/sales-orders', { q: 'LUM-PO-26-131' });
     await api.as('sales').ok('post', `/api/sales-orders/${so.id}/confirm`);
     const run = await api.as('pmc').ok('post', '/api/mrp/run');
     expect(run.suggestions.length).toBeGreaterThan(0);

@@ -11,15 +11,17 @@ export const PERMISSIONS: Record<string, string> = {
   qa: '质量保证（NCR评审处置、CAPA、产品放行、BOM/工艺批准）',
   finance: '财务（应收应付、收付款）',
   admin: '系统管理（用户、权限、审计）',
+  audit: '审计追踪与电子签名台账查阅',
 };
 
 /**
  * 角色 → 权限点。职责分离（GMP / ISO 13485）：
- *  - admin 只管账号、权限与审计，不含任何业务写权限（所有登录用户都可查看业务数据）；
- *  - manager 可做各业务操作，但不含 qa —— 质量签名（产品放行、NCR 处置、让步接收、CAPA 关闭、BOM/工艺批准）只能由 QA 角色完成。
+ *  - admin 只管账号、权限与审计，不含任何业务写权限；业务数据按 READ_PERMS 读权限矩阵可见（财务、审计、价格、库存金额不对所有人开放）；
+ *  - manager 可做各业务操作，但不含 qa —— 质量签名（产品放行、NCR 处置、让步接收、CAPA 关闭、BOM/工艺批准）只能由 QA 角色完成；
+ *  - audit（审计追踪/电子签名台账查阅）：admin、manager、qa。
  */
 export const ROLES: Record<string, { name: string; perms: string[] }> = {
-  admin: { name: '系统管理员', perms: ['admin'] },
+  admin: { name: '系统管理员', perms: ['admin', 'audit'] },
   manager: { name: '厂长/管理层', perms: Object.keys(PERMISSIONS).filter((p) => p !== 'admin' && p !== 'qa') },
   sales: { name: '销售/客服', perms: ['sales'] },
   purchaser: { name: '采购', perms: ['purchase'] },
@@ -28,7 +30,7 @@ export const ROLES: Record<string, { name: string; perms: string[] }> = {
   warehouse: { name: '仓管员', perms: ['wms'] },
   operator: { name: '产线操作员', perms: ['mes'] },
   qc: { name: '质检员', perms: ['qc'] },
-  qa: { name: '质量工程师/QA', perms: ['qa', 'qc'] },
+  qa: { name: '质量工程师/QA', perms: ['qa', 'qc', 'audit'] },
   finance: { name: '财务', perms: ['finance'] },
 };
 
@@ -39,3 +41,25 @@ export function userPermissions(user: { roles: string }): Set<string> {
   for (const r of roleList(user.roles)) for (const p of ROLES[r]?.perms ?? []) s.add(p);
   return s;
 }
+
+/**
+ * 业务数据读权限矩阵（后端 GET 接口的 @Perms 与前端菜单共用同一口径）：
+ *  - 财务数据（应收应付、收付款、账龄、汇兑）：finance（manager 已含）
+ *  - 审计追踪、电子签名台账：audit / admin
+ *  - 销售订单、采购订单：见下
+ *  - 金额/单价（库存金额、标准成本）：finance / purchase（manager 已含）；在手订单金额：sales / finance
+ */
+export const READ_PERMS = {
+  finance: ['finance'],
+  audit: ['audit', 'admin'],
+  salesOrder: ['sales', 'plan', 'wms', 'finance', 'qa'],
+  purchaseOrder: ['purchase', 'plan', 'wms', 'qc', 'qa', 'finance'],
+  stockValue: ['finance', 'purchase'],
+  salesAmount: ['sales', 'finance'],
+} as const;
+
+/** 是否拥有任一权限点 */
+export const hasAnyPerm = (user: { roles: string }, perms: readonly string[]) => {
+  const mine = userPermissions(user);
+  return perms.some((p) => mine.has(p));
+};

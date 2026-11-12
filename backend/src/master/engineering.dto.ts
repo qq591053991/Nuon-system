@@ -1,6 +1,6 @@
 /** 工程数据（BOM / 工艺路线）与设备校准的请求体 */
 import { Type } from 'class-transformer';
-import { IsArray, IsBoolean, IsInt, IsNotEmpty, IsNumber, IsOptional, IsPositive, IsString, ValidateNested } from 'class-validator';
+import { IsArray, IsBoolean, IsIn, IsInt, IsNotEmpty, IsNumber, IsOptional, IsPositive, IsString, Max, Min, ValidateNested } from 'class-validator';
 import { SignatureDto } from '../core/esign.service';
 
 // ---------------- 设备校准 ----------------
@@ -63,6 +63,14 @@ export class ParamDto {
   @IsOptional() @Type(() => Number) @IsNumber() lower?: number | null;
   @IsOptional() @Type(() => Number) @IsNumber() upper?: number | null;
   @IsOptional() @Type(() => Number) @IsNumber() target?: number | null;
+  /** NUMBER = 数值（按上下限判定）；OKNG = 合格判定（工位点 OK / NG） */
+  @IsOptional() @IsIn(['NUMBER', 'OKNG'], { message: '测试项类型只能是“数值”或“OK/NG 判定”' }) param_type?: string | null;
+  /** 小数位数（工位录入时限制） */
+  @IsOptional() @Type(() => Number) @IsInt({ message: '小数位数须为 0–6 的整数' }) @Min(0, { message: '小数位数须为 0–6 的整数' }) @Max(6, { message: '小数位数须为 0–6 的整数' })
+  decimals?: number | null;
+  /** 合理输入范围（超出视为录入错误，工位当场拦截，不判不合格） */
+  @IsOptional() @Type(() => Number) @IsNumber() min_valid?: number | null;
+  @IsOptional() @Type(() => Number) @IsNumber() max_valid?: number | null;
 }
 
 export class OperationDto {

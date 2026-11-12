@@ -1,0 +1,80 @@
+/* G1 外壳与工作台样式：窄屏（< 768px，手机/PDA）侧栏改抽屉、顶栏只留菜单/扫码条/铃铛/头像、触控目标 ≥ 44px */
+
+.user-chip-name { white-space: nowrap; }
+.user-chip-role { font-size: 12px; white-space: nowrap; }
+.app-header .hdr-btn { width: 44px; height: 44px; min-width: 44px; display: inline-flex; align-items: center; justify-content: center; }
+.todo-item { cursor: pointer; gap: 8px; }
+.todo-item:hover { background: #fafafa; }
+
+/* 全局搜索下拉 */
+.gs-opt { display: flex; flex-direction: column; gap: 2px; padding: 2px 0; }
+.gs-opt-main { display: flex; align-items: center; gap: 6px; }
+.gs-opt-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gs-opt-sub { display: flex; align-items: center; gap: 10px; font-size: 12px; }
+.gs-opt-sub a { white-space: nowrap; }
+
+/* —— 窄屏外壳 —— */
+.shell-narrow .app-header { gap: 4px; padding: 0 4px !important; height: 56px; line-height: 56px; }
+.shell-narrow .app-header .global-search .ant-input-affix-wrapper { height: 40px; }
+.shell-narrow .app-content { padding: 12px; overflow-x: hidden; }
+.shell-narrow .route-wrap { min-width: 0; max-width: 100%; }
+/* 触控目标：按钮最小 44px 高（小号按钮、表格内链接除外） */
+.shell-narrow .app-content .ant-btn:not(.ant-btn-sm):not(.ant-btn-link):not(.ant-btn-text) { min-height: 44px; }
+.shell-narrow .ant-pagination .ant-pagination-item, .shell-narrow .ant-pagination .ant-pagination-prev, .shell-narrow .ant-pagination .ant-pagination-next { min-width: 40px; height: 40px; line-height: 38px; }
+.shell-narrow .ant-modal { max-width: calc(100vw - 16px) !important; margin: 8px auto; }
+.shell-narrow .ant-drawer-content-wrapper { max-width: 100vw; }
+.shell-narrow .page-header .ant-typography { word-break: break-word; }
+
+/* 抽屉菜单：每项 48px 高 */
+.nav-drawer .ant-menu-dark .ant-menu-item, .nav-drawer .ant-menu-dark .ant-menu-submenu-title { height: 48px; line-height: 48px; }
+.nav-drawer .ant-drawer-body .brand { height: 64px; }
+
+/* —— 登录页窄屏：登录框在首屏 —— */
+@media (max-width: 767px) {
+  .login-bg { flex-direction: column-reverse; gap: 16px; padding: 16px; justify-content: flex-start; }
+  .login-hero { display: none; }
+  .login-card { width: 100%; }
+}
+/* —— 工作台 —— */
+.wb-banner { background: linear-gradient(110deg, #2a1b5e, #5b3cc4 60%, #c2417a); color: #fff; border-radius: 8px; padding: 18px 22px; }
+.wb-banner h3 { color: #fff !important; margin: 0 !important; }
+.wb-banner .wb-sub { color: rgba(255, 255, 255, 0.82); }
+.shell-narrow .wb-banner { padding: 12px 14px; }
+.shell-narrow .wb-banner h3 { font-size: 18px !important; }
+
+.kpi-card { height: 100%; }
+.kpi-card.clickable { cursor: pointer; }
+.kpi-card .kpi-title { color: #595959; font-size: 13px; display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.kpi-card .kpi-value { font-size: 26px; font-weight: 600; line-height: 1.3; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kpi-card .kpi-value small { font-size: 13px; font-weight: 400; margin-left: 4px; color: #8c8c8c; }
+.kpi-card .kpi-hint { color: #8c8c8c; font-size: 12px; margin-top: 2px; }
+.kpi-card.lv-error { border-left: 3px solid #ff4d4f; }
+.kpi-card.lv-error .kpi-value { color: #cf1322; }
+.kpi-card.lv-warning { border-left: 3px solid #faad14; }
+.kpi-card.lv-warning .kpi-value { color: #d46b08; }
+.kpi-card.lv-success { border-left: 3px solid #52c41a; }
+.kpi-card.lv-success .kpi-value { color: #389e0d; }
+.shell-narrow .kpi-card .kpi-value { font-size: 22px; }
+
+/* 仓管九宫格 */
+.wh-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.wh-tile { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; min-height: 104px;
+  background: #fff; border: 1px solid #ece9f6; border-radius: 10px; cursor: pointer; user-select: none; padding: 10px 4px; transition: box-shadow .15s; }
+.wh-tile:hover { box-shadow: 0 4px 14px rgba(91, 60, 196, 0.15); }
+.wh-tile:active { background: #f4f0ff; }
+.wh-tile .anticon { font-size: 30px; color: #5b3cc4; }
+.wh-tile .wh-label { font-size: 15px; font-weight: 600; color: #262626; text-align: center; }
+.wh-tile .wh-badge { position: absolute; top: 6px; right: 8px; }
+.wh-tile .wh-sub { font-size: 12px; color: #8c8c8c; }
+@media (min-width: 1000px) { .wh-grid { grid-template-columns: repeat(5, 1fr); } }
+
+/* 交付风险 */
+.risk-dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; vertical-align: middle; }
+.risk-red { background: #ff4d4f; }
+.risk-yellow { background: #faad14; }
+.risk-green { background: #52c41a; }
+.risk-reasons .ant-tag { margin: 2px 4px 2px 0; }
+.shell-narrow .todo-item .ant-list-item-action { display: none; }
+.shell-narrow .todo-item { padding: 14px 4px !important; }
+/* 窄屏搜索下拉：铺满屏宽（左右各留 8px），不再超出屏幕 */
+.gs-popup-narrow { left: 8px !important; width: calc(100vw - 16px) !important; min-width: 0 !important; }

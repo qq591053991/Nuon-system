@@ -6,14 +6,15 @@
  *   receive(tx, user, { receipt_type, lines, supplier_id?, customer_id?, po?, delivery_note?, remark? })
  *       → Receipt & { lines }                      收货（采购/客供料/期初/其他）；采购收货更新订单状态并生成应付
  *   createIssue(tx, user, wo, lines?)            → { issue, shortages }   生成领料单（lines 为空 = 按 FEFO 自动分配）
- *   confirmIssue(tx, user, issue)                → MaterialIssue & { lines }  领料过账（扣库存、更新工单已领数量）
+ *   confirmIssue(tx, user, issue, { partial }?)  → MaterialIssue & { lines }  领料过账（扣库存、更新工单已领数量；拣料模式只过账已拣行，partial 时未拣行转新单）
  *   availableSerials(tx, materialId, limit=500)  → SerialNumber[]（含 work_order） 可发货序列号（已入库且属于已放行的放行批）
  *   createShipment(tx, user, so, lines, { carrier, tracking_no, ship_to, remark }?)
  *       → Shipment & { lines }                     创建发货单（序列号逐台校验放行状态，非序列号产品按 FEFO 分配合格库存）
  *   confirmShipment(tx, user, sh)                → Shipment & { lines }   发货过账（扣库存、序列号出库、更新订单、生成应收）
- *   transfer(tx, user, stockId, qty, toLocationId, remark?) → Stock   库位调拨
- *   createCount(tx, user, warehouseId, remark?)  → StockCount & { lines }  创建盘点单（账面快照）
- *   postCount(tx, user, sc)                      → StockCount & { lines }  盘点过账（差异调整）
+ *   transfer(tx, user, stockId, qty?, toLocationId, remark?, confirm?) → Stock   库位调拨/上架（库位放置规则校验；qty 空 = 全部）
+ *   createCount(tx, user, warehouseId, remark?, { location_ids, blind }?) → StockCount & { lines }  创建盘点单（账面快照，同一范围仅一张进行中）
+ *   postCount(tx, user, sc, { uncounted_as_book }?) → StockCount & { lines }  盘点过账（实盘 − 过账时当前账面）
+ * 拣料、冲销、盘点辅助、扫码校验见 ops.service.ts；库位建议见 placement.ts。
  * 返回的记录已按 presenter 视图 include，可直接 ser('Receipt', rc, ['lines']) 等。
  *
  * 在 Nest 容器外（如演示数据脚本）手工构造：
@@ -32,10 +33,13 @@ import type { Tx } from '../common/prisma.service';
 import { InventoryService, STATUS_TEXT, type Ref } from '../core/inventory.service';
 import { NumberingService } from '../core/numbering.service';
 import { QualityService } from '../qms/quality.service';
+import { suggestLocation } from './placement';
 import { confirmMaterialReturn } from './returns.service';
 
 type IdRef = number | { id: number };
 const idOf = (x: IdRef) => (typeof x === 'number' ? x : x.id);
+/** 盘点范围（逗号分隔的库位 ID）→ 数组；为空 = 整仓 */
+export const parseIds = (s?: string | null): number[] => String(s ?? '').split(',').map(Number).filter((x) => Number.isInteger(x) && x > 0);
 
 export interface ReceiveLineInput {
   material_id: number;
@@ -134,8 +138,11 @@ export class WmsService {
         ap.add(poReceiptAmount(pl, qty)); // 有采购单位时按采购单价折算，整行收齐 = 订单行金额
         poLineId = pl.id;
       }
-      const locId = ln.location_id;
+      const locId = ln.location_id || (await suggestLocation(tx, m))?.id;
       if (!locId || !(await tx.location.findUnique({ where: { id: locId } }))) throw new BizError(`${m.code} 请选择收货库位`);
+      // 库位放置规则：自有料不能进客供料仓、客供料不能进自有仓（按货主判断）
+      const place = await this.inv.checkPlacement(tx, { material_id: m.id, location_id: locId, owner_customer_id: owner });
+      if (place.errors.length) throw new BizError(`第 ${i} 行：${place.errors.join('；')}`);
       const status = m.iqc_required && receipt_type !== 'OPENING' ? 'QUARANTINE' : 'AVAILABLE';
       const lot = await this.lotFor(tx, m.lot_control, ln.lot_no);
       const mfg = dateOnly(ln.mfg_date);
@@ -234,7 +241,15 @@ export class WmsService {
       }
     }
     if (!out.length) {
-      throw new BizError('没有可领用的合格库存' + (shortages.length ? `（缺料：${shortages.map((s) => s.material_code).join('、')}）` : '，物料已领齐'));
+      const drafts = await tx.materialIssue.findMany({ where: { wo_id: wo.id, status: 'DRAFT', issue_type: 'ISSUE' }, orderBy: { id: 'asc' } });
+      if (drafts.length && !shortages.length) {
+        throw new BizError(`工单 ${wo.no} 已有待过账领料单 ${drafts.map((d) => d.no).join('、')}，未领物料都已在单上。请到“生产领料”拣料过账，或作废后重新生成`);
+      }
+      if (shortages.length) {
+        throw new BizError(`没有可领用的合格库存（缺料：${shortages.map((s) => s.material_code).join('、')}）` +
+          (drafts.length ? `；已有待过账领料单 ${drafts.map((d) => d.no).join('、')}` : ''));
+      }
+      throw new BizError(`工单 ${wo.no} 的物料已全部领齐（已过账），无需再生成领料单`);
     }
     const issue = await tx.materialIssue.create({
       data: { no, wo_id: wo.id, status: 'DRAFT', created_by: user.username, lines: { create: out } },
@@ -243,9 +258,29 @@ export class WmsService {
     return { issue: issue as any, shortages };
   }
 
-  /** 领料过账：按领料单批次扣减合格库存（WO_ISSUE），累加工单已领数量 */
-  async confirmIssue(tx: Tx, user: CurrentUser, issueRef: IdRef): Promise<MaterialIssue & { lines: MaterialIssueLine[] }> {
+  /**
+   * 领料过账：按领料单批次扣减合格库存（WO_ISSUE），累加工单已领数量。
+   * 拣料模式（行已录实拣数 picked_qty）：只过账已拣行；仍有未拣行时须 partial=true（部分过账），未拣行转入新的待过账领料单。
+   */
+  async confirmIssue(tx: Tx, user: CurrentUser, issueRef: IdRef, opts: { partial?: boolean } = {}): Promise<MaterialIssue & { lines: MaterialIssueLine[] }> {
     const id = idOf(issueRef);
+    await tx.$queryRaw`SELECT id FROM wms_issue WHERE id = ${id} FOR UPDATE`; // 防止并发重复过账
+    const head = await tx.materialIssue.findUnique({ where: { id }, include: { lines: { orderBy: { id: 'asc' }, include: { location: true } } } });
+    if (head && head.issue_type !== 'RETURN' && head.status === 'DRAFT' && head.lines.some((l) => l.picked_qty !== null)) {
+      const unpicked = head.lines.filter((l) => l.picked_qty === null);
+      if (unpicked.length && !opts.partial) {
+        throw new BizError(`还有 ${unpicked.length} 行未拣（库位 ${[...new Set(unpicked.map((l) => l.location?.code))].join('、')}），请继续拣料；或选择“部分过账”，未拣行转入新领料单`);
+      }
+      if (unpicked.length) {
+        const rest = await tx.materialIssue.create({
+          data: { no: await this.numbering.nextNo(tx, 'LL'), wo_id: head.wo_id, status: 'DRAFT', created_by: user.username, remark: `由 ${head.no} 部分过账转入的未拣行` },
+        });
+        await tx.materialIssueLine.updateMany({ where: { id: { in: unpicked.map((l) => l.id) } }, data: { issue_id: rest.id } });
+        await tx.materialIssue.update({ where: { id }, data: { remark: [head.remark, `部分过账：未拣 ${unpicked.length} 行转入 ${rest.no}`].filter(Boolean).join('；') } });
+      }
+    } else if (opts.partial && head?.status === 'DRAFT') {
+      throw new BizError('还没有已拣的行：请先扫码拣料（录入实拣数量），再部分过账');
+    }
     const issue = await tx.materialIssue.findUnique({
       where: { id },
       include: { lines: { orderBy: { id: 'asc' } }, work_order: { include: { materials: true } } },
@@ -347,6 +382,7 @@ export class WmsService {
   /** 发货过账：扣减合格库存（SHIPMENT）、序列号出库（SHIPPED，记录客户）、更新订单已发数量/状态、生成应收 */
   async confirmShipment(tx: Tx, user: CurrentUser, shRef: IdRef): Promise<Shipment & { lines: ShipmentLine[] }> {
     const id = idOf(shRef);
+    await tx.$queryRaw`SELECT id FROM wms_shipment WHERE id = ${id} FOR UPDATE`; // 防止并发重复过账
     const sh = await tx.shipment.findUnique({
       where: { id },
       include: { lines: { orderBy: { id: 'asc' }, include: { material: true } }, sales_order: { include: { customer: true } } },
@@ -403,12 +439,22 @@ export class WmsService {
 
   // ---------------- 调拨 / 盘点 ----------------
 
-  /** 库位调拨/上架：保持批次、质量状态、货主不变 */
-  async transfer(tx: Tx, user: CurrentUser, stockId: number, qty: number, toLocationId: number, remark?: string | null): Promise<Stock> {
-    const st = await tx.stock.findUnique({ where: { id: stockId } });
-    if (!st) throw new NotFound('库存');
+  /**
+   * 库位调拨/上架：保持批次、质量状态、货主不变。qty 为空 = 整行全部。
+   * 库位规则：自有料/客供料与仓库不匹配直接拒绝；湿敏物料放非防潮柜须 confirm=true（操作人已确认）。
+   */
+  async transfer(tx: Tx, user: CurrentUser, stockId: number, qty: number | null | undefined, toLocationId: number, remark?: string | null, confirm = false): Promise<Stock> {
+    const st = await tx.stock.findUnique({ where: { id: stockId }, include: { location: true } });
+    if (!st) throw new BizError('该库存行已不存在（可能已被领用或调走），请重新扫码');
+    const loc = await tx.location.findUnique({ where: { id: toLocationId } });
+    if (!loc) throw new NotFound('目标库位');
     if (st.location_id === toLocationId) throw new BizError('目标库位与原库位相同');
-    if (!(await tx.location.findUnique({ where: { id: toLocationId } }))) throw new NotFound('目标库位');
+    const q = qty === null || qty === undefined ? st.qty : Number(qty);
+    if (!(q > 0)) throw new BizError('调拨数量必须大于 0');
+    const place = await this.inv.checkPlacement(tx, { material_id: st.material_id, location_id: toLocationId, owner_customer_id: st.owner_customer_id });
+    if (place.errors.length) throw new BizError(place.errors.join('；'));
+    if (place.warnings.length && !confirm) throw new BizError(`${place.warnings.join('；')}。如确需放入，请确认后再提交`);
+    qty = q;
     const no = await this.numbering.nextNo(tx, 'DB');
     return this.inv.moveStock(tx, {
       material_id: st.material_id, lot_no: st.lot_no, qty, from_location_id: st.location_id, to_location_id: toLocationId,
@@ -417,40 +463,85 @@ export class WmsService {
     });
   }
 
-  /** 创建盘点单：按仓库生成账面快照（物料+库位+批次+状态+货主） */
-  async createCount(tx: Tx, user: CurrentUser, warehouseId: number, remark?: string | null): Promise<StockCount & { lines: StockCountLine[] }> {
-    if (!(await tx.warehouse.findUnique({ where: { id: warehouseId } }))) throw new NotFound('仓库');
+  /**
+   * 创建盘点单：按仓库（或仓库内指定库位范围）生成账面快照（物料+库位+批次+状态+货主），明细按 库位→物料→批号 排序。
+   * 同一仓库内盘点范围不能与另一张“进行中”的盘点单重叠（整仓与任何范围都重叠），防止重复调账。
+   */
+  async createCount(tx: Tx, user: CurrentUser, warehouseId: number, remark?: string | null, opts: { location_ids?: number[] | null; blind?: boolean } = {}): Promise<StockCount & { lines: StockCountLine[] }> {
+    // 锁定仓库行：并发建单在此排队，保证“同一范围只有一张进行中盘点单”
+    const [wh] = await tx.$queryRaw<{ id: number; name: string }[]>`SELECT id, name FROM md_warehouse WHERE id = ${warehouseId} FOR UPDATE`;
+    if (!wh) throw new NotFound('仓库');
+    const locIds = [...new Set((opts.location_ids ?? []).map(Number).filter((x) => Number.isInteger(x) && x > 0))].sort((a, b) => a - b);
+    if (locIds.length) {
+      const locs = await tx.location.findMany({ where: { id: { in: locIds } } });
+      const bad = locs.filter((l) => l.warehouse_id !== warehouseId);
+      if (locs.length !== locIds.length) throw new BizError('盘点范围中有不存在的库位');
+      if (bad.length) throw new BizError(`库位 ${bad.map((l) => l.code).join('、')} 不属于仓库 ${wh.name}`);
+    }
+    const open = await tx.stockCount.findMany({ where: { warehouse_id: warehouseId, status: 'OPEN' }, orderBy: { id: 'asc' } });
+    for (const o of open) {
+      const theirs = parseIds(o.location_ids);
+      const overlap = !theirs.length || !locIds.length ? (theirs.length ? theirs : locIds) : theirs.filter((x) => locIds.includes(x));
+      if (!theirs.length || !locIds.length || overlap.length) {
+        const codes = overlap.length ? (await tx.location.findMany({ where: { id: { in: overlap } }, orderBy: { code: 'asc' } })).map((l) => l.code) : [];
+        throw new BizError(
+          `仓库 ${wh.name} 已有进行中的盘点单 ${o.no}（范围：${theirs.length ? '指定库位' : '整仓'}${codes.length ? `，重叠库位 ${codes.join('、')}` : ''}）。` +
+            '同一库位同时只能有一张盘点单，请先过账或作废该盘点单',
+        );
+      }
+    }
     const no = await this.numbering.nextNo(tx, 'PD');
-    const stocks = await tx.stock.findMany({ where: { location: { warehouse_id: warehouseId }, qty: { gt: 0 } }, orderBy: { id: 'asc' } });
-    return (await tx.stockCount.create({
+    const stocks = await tx.stock.findMany({
+      where: { location: { warehouse_id: warehouseId }, qty: { gt: 0 }, ...(locIds.length ? { location_id: { in: locIds } } : {}) },
+      include: { location: true, material: true },
+    });
+    stocks.sort((a, b) => a.location.code.localeCompare(b.location.code) || a.material.code.localeCompare(b.material.code) || a.lot_no.localeCompare(b.lot_no) || a.id - b.id);
+    const sc = await tx.stockCount.create({
       data: {
         no, warehouse_id: warehouseId, status: 'OPEN', remark: remark ?? null, created_by: user.username,
-        lines: {
-          create: stocks.map((st) => ({
-            material_id: st.material_id, location_id: st.location_id, lot_no: st.lot_no, status: st.status,
-            owner_customer_id: st.owner_customer_id, system_qty: st.qty,
-          })),
-        },
+        location_ids: locIds.length ? locIds.join(',') : null, blind: !!opts.blind,
       },
-      include: inc('StockCount', ['lines']),
-    })) as any;
+    });
+    // 逐行按排序插入（id 递增 = 库位路线顺序）
+    for (const st of stocks) {
+      await tx.stockCountLine.create({
+        data: {
+          count_id: sc.id, material_id: st.material_id, location_id: st.location_id, lot_no: st.lot_no, status: st.status,
+          owner_customer_id: st.owner_customer_id, system_qty: st.qty,
+        },
+      });
+    }
+    return (await tx.stockCount.findUnique({ where: { id: sc.id }, include: inc('StockCount', ['lines']) })) as any;
   }
 
-  /** 盘点过账：所有行必须已录入实盘数量；盘盈入库 / 盘亏出库（ADJUST） */
-  async postCount(tx: Tx, user: CurrentUser, scRef: IdRef): Promise<StockCount & { lines: StockCountLine[] }> {
+  /**
+   * 盘点过账：调整量 = 实盘数 − 过账时的当前账面（不是建单快照），避免快照后的收发料被重复调整；盘盈入库 / 盘亏出库（ADJUST）。
+   * uncounted_as_book = true：未录实盘的行按当前账面处理（不调整，需操作人确认）；否则所有行必须已录实盘。
+   */
+  async postCount(tx: Tx, user: CurrentUser, scRef: IdRef, opts: { uncounted_as_book?: boolean } = {}): Promise<StockCount & { lines: StockCountLine[] }> {
     const id = idOf(scRef);
-    const sc = await tx.stockCount.findUnique({ where: { id }, include: { lines: { orderBy: { id: 'asc' }, include: { material: true } } } });
+    await tx.$queryRaw`SELECT id FROM wms_stock_count WHERE id = ${id} FOR UPDATE`; // 防止并发重复过账
+    const sc = await tx.stockCount.findUnique({ where: { id }, include: { lines: { orderBy: { id: 'asc' }, include: { material: true, location: true } } } });
     if (!sc) throw new NotFound('盘点单');
-    if (sc.status !== 'OPEN') throw new BizError('盘点单已过账');
+    if (sc.status !== 'OPEN') throw new BizError(sc.status === 'CANCELLED' ? '盘点单已作废，不能过账' : '盘点单已过账');
     const ref: Ref = { ref_type: 'STOCK_COUNT', ref_id: sc.id, ref_no: sc.no, username: user.username, remark: '盘点差异调整' };
-    for (const ln of sc.lines) {
-      if (ln.counted_qty === null || ln.counted_qty === undefined) throw new BizError(`${ln.material.code} 批次 ${ln.lot_no || '-'} 未录入实盘数量`);
+    const uncounted = sc.lines.filter((ln) => ln.counted_qty === null || ln.counted_qty === undefined);
+    if (uncounted.length && !opts.uncounted_as_book) {
+      const ln = uncounted[0];
+      throw new BizError(`还有 ${uncounted.length} 行未录入实盘数量（如 ${ln.location.code} ${ln.material.code} 批次 ${ln.lot_no || '-'}）。请盘完，或确认“未盘行按账面”后过账`);
     }
     for (const ln of sc.lines) {
-      const diff = round(ln.counted_qty! - ln.system_qty);
-      const k = { material_id: ln.material_id, location_id: ln.location_id, lot_no: ln.lot_no, status: ln.status, owner_customer_id: ln.owner_customer_id, move_type: 'ADJUST', ref };
-      if (diff > 0) await this.inv.addStock(tx, { ...k, qty: diff });
-      else if (diff < 0) await this.inv.removeStock(tx, { ...k, qty: -diff });
+      const k = { material_id: ln.material_id, location_id: ln.location_id, lot_no: ln.lot_no, status: ln.status, owner_customer_id: ln.owner_customer_id };
+      const book = await this.inv.lockedQty(tx, k);
+      if (ln.counted_qty === null || ln.counted_qty === undefined) {
+        // 未盘行按当前账面：记录实盘 = 账面，不产生调整
+        await tx.stockCountLine.update({ where: { id: ln.id }, data: { counted_qty: book } });
+        continue;
+      }
+      const diff = round(ln.counted_qty - book);
+      const mk = { ...k, move_type: 'ADJUST', ref };
+      if (diff > EPS) await this.inv.addStock(tx, { ...mk, qty: diff });
+      else if (diff < -EPS) await this.inv.removeStock(tx, { ...mk, qty: -diff });
     }
     return (await tx.stockCount.update({
       where: { id },

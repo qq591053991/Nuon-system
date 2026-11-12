@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import request from 'supertest';
 import { DEMO_PASSWORD } from '../src/seed/seed-base';
+import { today } from '../src/common/dates';
 import { bootApp, SIG, type Api } from './harness';
 
 type T = Awaited<ReturnType<typeof bootApp>>;
@@ -265,6 +266,10 @@ describe('评审改进：检验规范、退料、客户退货、客诉、附件'
     expect([capa.source, capa.title]).toEqual(['COMPLAINT', '面板过热纠正预防']);
     expect((await api.ok('get', `/api/ncrs/${c.ncr_id}`)).capa_id).toBe(c.capa_id);
 
+    // 结案：不良事件须先完成上报评估（G6 法规字段）
+    r = await api.as('qa').post(`/api/complaints/${c.id}/close`, { investigation: '结论', signature: SIG });
+    expect(r.body.detail).toContain('上报评估');
+    c = await api.as('qa').ok('put', `/api/complaints/${c.id}`, { reportable: true, report_no: 'CN-ADR-0001', reported_at: today().toISOString().slice(0, 10) });
     // 关闭：缺调查结论 / 缺签名 / 密码错误 / 非 QA
     r = await api.as('qa').post(`/api/complaints/${c.id}/close`, { signature: SIG });
     expect(r.body.detail).toContain('调查结论');
@@ -277,9 +282,9 @@ describe('评审改进：检验规范、退料、客户退货、客诉、附件'
     expect([c.status, c.closed_by]).toEqual(['CLOSED', '赵QA']);
     expect(c.investigation).toContain('HY2609F');
     const sigs = (await api.ok('get', '/api/system/esignatures', { entity: 'qms_complaint' })).items;
-    expect([sigs[0].meaning, sigs[0].username, sigs[0].doc_no]).toEqual(['客诉关闭', 'qa', c.no]);
-    // 已关闭不能修改；列表筛选不良事件
-    expect((await api.as('sales').put(`/api/complaints/${c.id}`, { description: '改' })).body.detail).toContain('已关闭');
+    expect([sigs[0].meaning, sigs[0].username, sigs[0].doc_no]).toEqual(['客诉结案', 'qa', c.no]);
+    // 已结案不能修改；列表筛选不良事件
+    expect((await api.as('sales').put(`/api/complaints/${c.id}`, { description: '改' })).body.detail).toContain('已结案');
     expect((await api.ok('get', '/api/complaints', { is_adverse_event: 'true' })).total).toBe(1);
     expect((await api.ok('get', '/api/complaints', { is_adverse_event: 'false' })).total).toBe(0);
   });

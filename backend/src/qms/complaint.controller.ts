@@ -1,21 +1,32 @@
-/** 客户投诉 / 不良事件接口：登记、修改、开始调查、开具 NCR、发起 CAPA、关闭（QA 电子签名“客诉关闭”）。投诉为质量记录，不提供删除。 */
+/**
+ * 客户投诉 / 不良事件接口：登记、修改、开始调查、开具 NCR、发起 CAPA、结案（QA 电子签名“客诉结案”）。投诉为质量记录，不提供删除。
+ * 法规字段：投诉人/联系方式、事件日期、国家、是否需上报（评估结论）、上报期限、上报编号与日期、给客户的回复与日期。
+ */
 import { Body, Controller, Get, Param, ParseIntPipe, Post, Put, Query } from '@nestjs/common';
 import { Type } from 'class-transformer';
-import { IsBoolean, IsInt, IsNumber, IsOptional, IsString, ValidateNested } from 'class-validator';
+import { IsBoolean, IsInt, IsNumber, IsOptional, IsString, MaxLength, ValidateNested } from 'class-validator';
 import { Perms, User } from '../auth';
 import type { CurrentUser } from '../common/context';
 import { dateOnly } from '../common/dates';
 import { NotFound } from '../common/errors';
-import { like, pageArgs } from '../common/paginate';
+import { like, pageArgs, sortArg } from '../common/paginate';
 import { PrismaService } from '../common/prisma.service';
 import { SignatureDto } from '../core/esign.service';
-import { ComplaintService } from './complaint.service';
+import { ComplaintService, type ComplaintInput } from './complaint.service';
 
 const int = (v?: string): number | undefined => {
   if (v === undefined || v === null || v === '') return undefined;
   const n = Number(v);
   return Number.isFinite(n) ? n : undefined;
 };
+
+const REG_DATES = ['event_date', 'report_deadline', 'reported_at', 'replied_at'] as const;
+/** 法规字段中的纯日期转 Date（未出现的字段保持 undefined，空串/null → null） */
+function regDates(b: Record<string, any>): ComplaintInput {
+  const out: Record<string, any> = { ...b };
+  for (const k of REG_DATES) if (out[k] !== undefined) out[k] = dateOnly(out[k]);
+  return out as ComplaintInput;
+}
 
 class ComplaintCreateDto {
   @Type(() => Number) @IsInt() customer_id: number;
@@ -25,6 +36,15 @@ class ComplaintCreateDto {
   @IsOptional() @IsString() lot_no?: string | null;
   @IsString() description: string;
   @IsOptional() @IsBoolean() is_adverse_event?: boolean;
+  @IsOptional() @IsString() @MaxLength(128) reporter_contact?: string | null;
+  @IsOptional() @IsString() event_date?: string | null;
+  @IsOptional() @IsString() @MaxLength(32) country?: string | null;
+  @IsOptional() @IsBoolean() reportable?: boolean | null;
+  @IsOptional() @IsString() report_deadline?: string | null;
+  @IsOptional() @IsString() @MaxLength(64) report_no?: string | null;
+  @IsOptional() @IsString() reported_at?: string | null;
+  @IsOptional() @IsString() customer_reply?: string | null;
+  @IsOptional() @IsString() replied_at?: string | null;
 }
 
 /** 修改：只更新请求中出现的字段 */
@@ -38,6 +58,15 @@ class ComplaintUpdateDto {
   @IsOptional() @IsBoolean() is_adverse_event?: boolean;
   @IsOptional() @IsString() investigation?: string | null;
   @IsOptional() @Type(() => Number) @IsInt() capa_id?: number | null;
+  @IsOptional() @IsString() @MaxLength(128) reporter_contact?: string | null;
+  @IsOptional() @IsString() event_date?: string | null;
+  @IsOptional() @IsString() @MaxLength(32) country?: string | null;
+  @IsOptional() @IsBoolean() reportable?: boolean | null;
+  @IsOptional() @IsString() report_deadline?: string | null;
+  @IsOptional() @IsString() @MaxLength(64) report_no?: string | null;
+  @IsOptional() @IsString() reported_at?: string | null;
+  @IsOptional() @IsString() customer_reply?: string | null;
+  @IsOptional() @IsString() replied_at?: string | null;
 }
 
 class InvestigateDto {
@@ -55,6 +84,16 @@ class ComplaintCapaDto {
 
 class ComplaintCloseDto {
   @IsOptional() @IsString() investigation?: string | null;
+  @IsOptional() @IsString() @MaxLength(128) reporter_contact?: string | null;
+  @IsOptional() @IsString() event_date?: string | null;
+  @IsOptional() @IsString() @MaxLength(32) country?: string | null;
+  @IsOptional() @IsBoolean() reportable?: boolean | null;
+  @IsOptional() @IsString() report_deadline?: string | null;
+  @IsOptional() @IsString() @MaxLength(64) report_no?: string | null;
+  @IsOptional() @IsString() reported_at?: string | null;
+  @IsOptional() @IsString() customer_reply?: string | null;
+  @IsOptional() @IsString() replied_at?: string | null;
+
   @IsOptional() @ValidateNested() @Type(() => SignatureDto) signature?: SignatureDto | null;
 }
 
@@ -72,10 +111,13 @@ export class ComplaintController {
     if (q.status) where.status = { in: q.status.split(',') };
     if (int(q.customer_id)) where.customer_id = int(q.customer_id);
     if (q.is_adverse_event !== undefined && q.is_adverse_event !== '') where.is_adverse_event = ['1', 'true', 'yes'].includes(q.is_adverse_event.toLowerCase());
+    if (q.reportable === 'pending') Object.assign(where, { reportable: true, report_no: null });
+    else if (q.reportable !== undefined && q.reportable !== '') where.reportable = ['1', 'true', 'yes'].includes(q.reportable.toLowerCase());
+    if (q.date_from || q.date_to) where.received_date = { ...(q.date_from ? { gte: dateOnly(q.date_from) } : {}), ...(q.date_to ? { lte: dateOnly(q.date_to) } : {}) };
     const { page, page_size, skip, take } = pageArgs(q);
     const [total, rows] = await Promise.all([
       this.db.client.complaint.count({ where }),
-      this.db.client.complaint.findMany({ where, orderBy: { id: 'desc' }, skip, take }),
+      this.db.client.complaint.findMany({ where, orderBy: sortArg('Complaint', q, { id: 'desc' }), skip, take }),
     ]);
     return { items: await this.svc.enrich(this.db.client, rows), total, page, page_size };
   }
@@ -92,7 +134,7 @@ export class ComplaintController {
   @Perms('qa', 'sales')
   create(@Body() b: ComplaintCreateDto, @User() user: CurrentUser) {
     return this.db.tx(async (tx) => {
-      const c = await this.svc.create(tx, user, { ...b, received_date: dateOnly(b.received_date) });
+      const c = await this.svc.create(tx, user, { ...regDates(b), received_date: dateOnly(b.received_date) });
       return (await this.svc.enrich(tx, [c]))[0];
     });
   }
@@ -101,7 +143,7 @@ export class ComplaintController {
   @Perms('qa', 'sales')
   update(@Param('id', ParseIntPipe) id: number, @Body() b: ComplaintUpdateDto) {
     return this.db.tx(async (tx) => {
-      const c = await this.svc.update(tx, id, { ...b, received_date: b.received_date === undefined ? undefined : dateOnly(b.received_date) });
+      const c = await this.svc.update(tx, id, { ...regDates(b), received_date: b.received_date === undefined ? undefined : dateOnly(b.received_date) });
       return (await this.svc.enrich(tx, [c]))[0];
     });
   }
@@ -127,10 +169,11 @@ export class ComplaintController {
     return this.db.tx(async (tx) => (await this.svc.enrich(tx, [await this.svc.createCapa(tx, user, id, b ?? {})]))[0]);
   }
 
-  /** 关闭投诉（须填写调查结论，QA 电子签名“客诉关闭”） */
+  /** 结案（须填写调查结论；不良事件须完成上报评估，需上报的须填写上报编号与日期；QA 电子签名“客诉结案”） */
   @Post(':id/close')
   @Perms('qa')
   close(@Param('id', ParseIntPipe) id: number, @Body() b: ComplaintCloseDto, @User() user: CurrentUser) {
-    return this.db.tx(async (tx) => (await this.svc.enrich(tx, [await this.svc.close(tx, user, id, b?.investigation, b?.signature)]))[0]);
+    const { investigation, signature, ...rest } = b ?? ({} as ComplaintCloseDto);
+    return this.db.tx(async (tx) => (await this.svc.enrich(tx, [await this.svc.close(tx, user, id, investigation, signature, regDates(rest))]))[0]);
   }
 }

@@ -2,27 +2,29 @@ import {
   Alert, Button, Card, Col, DatePicker, Descriptions, Empty, Form, Input, InputNumber, Modal, Popconfirm, Result, Row, Select, Space, Spin,
   Steps, Table, Tag, Typography, message, type TableColumnsType,
 } from 'antd';
-import { ArrowLeftOutlined, AuditOutlined, ImportOutlined, SaveOutlined } from '@ant-design/icons';
+import { ArrowLeftOutlined, AuditOutlined, EditOutlined, HistoryOutlined, ImportOutlined, SaveOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { get, post, put, type Rec } from '../../api/http';
 import { useAuth } from '../../auth';
 import PageHeader from '../../components/PageHeader';
-import { LocationSelect, SupplierSelect } from '../../components/RemoteSelect';
+import { PrintButton, PrintHeader, PrintSignatures } from '../../components/Print';
+import { LocationSelect } from '../../components/RemoteSelect';
 import StatusTag from '../../components/StatusTag';
 import { dictLabel } from '../../utils/dict';
 import { fmtDate, fmtDateTime, fmtMoney, fmtQty, toDate } from '../../utils/format';
 import {
   CURRENCY_OPTIONS, DueDate, OrderLinesEditor, QtyProgress, checkLines, isPast, linesBody, sumBy, toDayjs, uid, type LineRow,
 } from './shared';
+import { QualifiedSupplierSelect } from './purchaseKit';
 
 const RECEIVABLE = ['APPROVED', 'PARTIAL_RECEIVED'];
 const STEP_OF: Record<string, number> = { DRAFT: 0, APPROVED: 1, PARTIAL_RECEIVED: 2, RECEIVED: 3, CLOSED: 3 };
 const NEXT_HINT: Record<string, string> = {
   DRAFT: '确认无误后点击【保存并审批】。GMP 采购控制：只有“合格供方”且资质在有效期内的供应商才能审批通过，不符合时系统会拒绝并提示原因；客供料不能采购。',
-  APPROVED: '订单已审批，可发送给供应商。到货后点击【收货】，登记批号、库位与生产/有效期。',
-  PARTIAL_RECEIVED: '部分到货。剩余数量到货后继续【收货】；供应商不再供货时可【关闭】订单。',
+  APPROVED: '订单已审批：点【打印 / 导出 PDF】发给供应商。供应商回复交期或调价时点【变更】登记（需填原因，留痕）。到货后点击【收货】。',
+  PARTIAL_RECEIVED: '部分到货。剩余数量到货后继续【收货】；交期/单价有变点【变更】；供应商不再供货时可【关闭】订单。',
   RECEIVED: '已全部到货。来料检验结果见下方收货记录中的 IQC 检验单。',
   CLOSED: '订单已关闭，不再收货。',
 };
@@ -41,6 +43,19 @@ const fmtPrice = (v: number | null | undefined, currency: string) =>
   v === null || v === undefined
     ? '-'
     : `${currency === 'USD' ? '$' : currency === 'EUR' ? '€' : '¥'}${Number(v).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 6 })}`;
+
+/** 按采购单位（卷/包/箱）录入的行只允许整包：小数向上取整，并同步库存单位数量 */
+function wholePacks(rows: LineRow[]): LineRow[] {
+  return rows.map((r) => {
+    if (!r.purchase_uom || r.purchase_qty === null || r.purchase_qty === undefined) return r;
+    const q = Number(r.purchase_qty);
+    if (!(q > 0) || Math.abs(q - Math.round(q)) < 1e-6) return r;
+    const whole = Math.ceil(q - 1e-9);
+    const f = Number(r.purchase_factor) || (r.qty && q ? Number(r.qty) / q : 0);
+    message.info(`${r.material_code ?? ''} 按${r.purchase_uom}整包下单：${fmtQty(q)} ${r.purchase_uom} → ${whole} ${r.purchase_uom}`, 3);
+    return { ...r, purchase_qty: whole, qty: f ? Math.round(whole * f * 10000) / 10000 : r.qty };
+  });
+}
 
 function PoSteps({ po }: { po: Rec | null }) {
   const st = po?.status || 'DRAFT';
@@ -88,8 +103,8 @@ function SupplierCheck({ supplierId }: { supplierId?: number }) {
       style={{ marginTop: 4 }}
       message={
         expired
-          ? `该供应商资质已于 ${fmtDate(sup.qualification_expiry)} 过期，订单可保存草稿，但无法审批。请先完成供应商再评价。`
-          : `该供应商当前为“${dictLabel('supplier_status', sup.status)}”，不在合格供方名录内，订单可保存草稿，但无法审批。`
+          ? `该供应商资质已于 ${fmtDate(sup.qualification_expiry)} 过期：订单可保存草稿，但无法审批。请联系质量部完成供应商再评价（更新资质有效期），或改选合格供应商。`
+          : `该供应商当前为“${dictLabel('supplier_status', sup.status)}”，不在合格供方名录内：订单可保存草稿，但无法审批。请联系质量部完成供应商评审，或改选合格供应商。`
       }
     />
   );
@@ -198,7 +213,7 @@ function PoEditor({ po, onSaved }: { po: Rec | null; onSaved: (d: Rec) => void }
             <Row gutter={16}>
               <Col xs={24} md={12} lg={8}>
                 <Form.Item name="supplier_id" label="供应商" rules={[{ required: true, message: '请选择供应商' }]} style={{ marginBottom: 4 }}>
-                  <SupplierSelect onPick={(s) => s && form.setFieldsValue({ currency: s.currency || 'CNY' })} />
+                  <QualifiedSupplierSelect onPick={(s) => s && form.setFieldsValue({ currency: s.currency || 'CNY' })} />
                 </Form.Item>
                 <div style={{ marginBottom: 16 }}><SupplierCheck supplierId={supplierId} /></div>
               </Col>
@@ -220,11 +235,16 @@ function PoEditor({ po, onSaved }: { po: Rec | null; onSaved: (d: Rec) => void }
         <Card
           title="采购明细"
           size="small"
-          extra={<Typography.Text type="secondary">选择物料后自动带出标准成本作为参考单价；设置了采购单位的物料（如 LED 按卷）默认按采购单位下单，系统自动换算为库存单位</Typography.Text>}
+          extra={
+            <Typography.Text type="secondary">
+              设置了采购单位的物料（如 LED 按卷）默认按整卷/整包下单，系统自动换算为库存单位；
+              <Link to="/purchase/materials">设置采购单位</Link>
+            </Typography.Text>
+          }
         >
           <OrderLinesEditor
             value={lines}
-            onChange={setLines}
+            onChange={(rows) => setLines(wholePacks(rows))}
             dateField="expected_date"
             dateLabel="预计到货"
             currency={currency}
@@ -385,12 +405,173 @@ function ReceiveModal({ po, open, onClose, onDone }: { po: Rec; open: boolean; o
   );
 }
 
+
+// ---------------- 审批后变更（交期 / 回复交期 / 单价 / 数量） ----------------
+const REASONS = ['供应商回复交期', '供应商推迟交货', '价格调整', '数量调整', '需求变更'];
+
+function ChangeModal({ po, open, onClose, onDone }: { po: Rec; open: boolean; onClose: () => void; onDone: () => void }) {
+  const [rows, setRows] = useState<Rec[]>([]);
+  const [head, setHead] = useState<string | null>(po.expected_date ?? null);
+  const [reason, setReason] = useState('');
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    setHead(po.expected_date ?? null);
+    setReason('');
+    setRows(
+      (po.lines as Rec[]).map((l) => {
+        const f = factorOf(l);
+        return {
+          ...l, _f: f, n_qty: f ? l.purchase_qty : l.qty, n_price: f ? l.purchase_price : l.unit_price,
+          n_expected: l.expected_date ?? null, n_promised: l.promised_date ?? null,
+        };
+      }),
+    );
+  }, [open, po]);
+  const patch = (id: number, p: Rec) => setRows((old) => old.map((r) => (r.id === id ? { ...r, ...p } : r)));
+  const body = () => {
+    const lines = rows
+      .map((r) => {
+        const x: Rec = { id: r.id };
+        if ((r.n_expected ?? null) !== (r.expected_date ?? null)) x.expected_date = r.n_expected;
+        if ((r.n_promised ?? null) !== (r.promised_date ?? null)) x.promised_date = r.n_promised;
+        const q0 = r._f ? r.purchase_qty : r.qty;
+        const p0 = r._f ? r.purchase_price : r.unit_price;
+        if (Number(r.n_qty) !== Number(q0)) x[r._f ? 'purchase_qty' : 'qty'] = r.n_qty;
+        if (Number(r.n_price) !== Number(p0)) x[r._f ? 'purchase_price' : 'unit_price'] = r.n_price;
+        return x;
+      })
+      .filter((x) => Object.keys(x).length > 1);
+    return { reason: reason.trim(), lines, ...((head ?? null) !== (po.expected_date ?? null) ? { expected_date: head } : {}) };
+  };
+  const submit = async () => {
+    const b = body();
+    if (!b.lines.length && b.expected_date === undefined) {
+      message.warning('没有修改任何内容');
+      return;
+    }
+    if (b.reason.length < 2) {
+      message.error('请填写变更原因（可点下方常用原因）');
+      return;
+    }
+    setSaving(true);
+    try {
+      const d = await post(`/purchase-orders/${po.id}/change`, b);
+      Modal.success({
+        title: '采购订单已变更',
+        content: (
+          <div>
+            <div>原因：{d.change.reason}</div>
+            <ul style={{ paddingLeft: 18, margin: '8px 0 0' }}>{(d.change.items as string[]).map((t) => <li key={t}>{t}</li>)}</ul>
+          </div>
+        ),
+      });
+      onDone();
+    } finally {
+      setSaving(false);
+    }
+  };
+  const date = (v: string | null, on: (v: string | null) => void, placeholder?: string) => (
+    <DatePicker style={{ width: 140 }} placeholder={placeholder} value={v ? dayjs(v) : null} onChange={(d) => on(d ? d.format('YYYY-MM-DD') : null)} />
+  );
+  const cols: TableColumnsType<Rec> = [
+    { title: '行', dataIndex: 'line_no', width: 50 },
+    { title: '物料', key: 'm', width: 220, render: (_, r) => <div><span className="mono">{r.material_code}</span><div style={{ fontSize: 12, color: '#8c8c8c' }}>{r.material_name}</div></div> },
+    { title: '已收 / 订购', key: 'recv', render: (_, r) => `${fmtQty(r.received_qty || 0)} / ${fmtQty(r.qty)} ${r.uom}` },
+    {
+      title: '数量', key: 'q', width: 150,
+      render: (_, r) => (
+        <div>
+          <InputNumber
+            min={r._f ? Math.ceil(((r.received_qty || 0) / r._f) - 1e-9) || 1 : r.received_qty || 0.0001}
+            precision={r._f ? 0 : undefined}
+            style={{ width: 120 }}
+            value={r.n_qty}
+            onChange={(v) => patch(r.id, { n_qty: v })}
+            addonAfter={undefined}
+          />
+          <div style={{ fontSize: 12, color: '#8c8c8c' }}>{r._f ? `${r.purchase_uom}（= ${fmtQty((Number(r.n_qty) || 0) * r._f)} ${r.uom}）` : r.uom}</div>
+        </div>
+      ),
+    },
+    {
+      title: '单价', key: 'p', width: 150,
+      render: (_, r) => (
+        <div>
+          <InputNumber min={0} style={{ width: 130 }} value={r.n_price} onChange={(v) => patch(r.id, { n_price: v })} />
+          <div style={{ fontSize: 12, color: '#8c8c8c' }}>每{r._f ? r.purchase_uom : r.uom}{r.received_qty > 0 && Number(r.n_price) !== Number(r._f ? r.purchase_price : r.unit_price) ? '，已收部分应付不变' : ''}</div>
+        </div>
+      ),
+    },
+    { title: '预计到货', key: 'e', width: 150, render: (_, r) => date(r.n_expected, (v) => patch(r.id, { n_expected: v })) },
+    { title: '供应商回复交期', key: 'pr', width: 150, render: (_, r) => date(r.n_promised, (v) => patch(r.id, { n_promised: v }), '未回复') },
+  ];
+  return (
+    <Modal
+      open={open}
+      title={`变更采购订单 - ${po.no}`}
+      width={1180}
+      okText="确认变更"
+      onOk={submit}
+      onCancel={onClose}
+      confirmLoading={saving}
+      destroyOnHidden
+      maskClosable={false}
+    >
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 12 }}
+        message="已审批订单可改交期、供应商回复交期、单价、数量（不少于已收数量），无需重新审批；系统记录变更人、时间、原因及前后值（详情页“变更记录”可查）。"
+      />
+      <Space style={{ marginBottom: 12 }} wrap>
+        <span>表头预计到货：</span>
+        {date(head, setHead)}
+      </Space>
+      <Table rowKey="id" size="small" columns={cols} dataSource={rows} pagination={false} scroll={{ x: 'max-content' }} />
+      <div style={{ marginTop: 12 }}>
+        <Input.TextArea rows={2} placeholder="变更原因（必填），如：供应商回复因模具维修推迟到 11/25" value={reason} onChange={(e) => setReason(e.target.value)} maxLength={200} showCount />
+        <Space wrap style={{ marginTop: 6 }}>
+          <Typography.Text type="secondary">常用原因：</Typography.Text>
+          {REASONS.map((r) => <Tag key={r} style={{ cursor: 'pointer' }} onClick={() => setReason(r)}>{r}</Tag>)}
+        </Space>
+      </div>
+    </Modal>
+  );
+}
+
+function ChangeHistory({ poId, version }: { poId: number; version: number }) {
+  const [items, setItems] = useState<Rec[] | null>(null);
+  useEffect(() => {
+    get(`/purchase-orders/${poId}/changes`, undefined, true).then(setItems).catch(() => setItems([]));
+  }, [poId, version]);
+  if (!items || !items.length) return null;
+  return (
+    <Card size="small" title={<Space><HistoryOutlined />变更记录（{items.length} 次）</Space>} className="no-print">
+      <Table
+        rowKey="id"
+        size="small"
+        pagination={false}
+        dataSource={items}
+        columns={[
+          { title: '时间', dataIndex: 'ts', width: 150, render: fmtDateTime },
+          { title: '变更人', dataIndex: 'full_name', width: 100, render: (v, r) => v || r.username },
+          { title: '原因', dataIndex: 'reason', width: 220 },
+          { title: '变更内容', dataIndex: 'items', render: (v: string[]) => <div>{v.map((t) => <div key={t}>{t}</div>)}</div> },
+        ]}
+      />
+    </Card>
+  );
+}
+
 // ---------------- 查看（审批后） ----------------
 function PoView({ po, reload }: { po: Rec; reload: () => Promise<unknown> }) {
   const nav = useNavigate();
   const { can } = useAuth();
   const [busy, setBusy] = useState<string>();
   const [receiving, setReceiving] = useState(false);
+  const [changing, setChanging] = useState(false);
+  const [version, setVersion] = useState(0);
   const st: string = po.status;
   const receivable = RECEIVABLE.includes(st);
   const anyReceived = (po.lines as Rec[]).some((l) => (l.received_qty || 0) > 0);
@@ -405,6 +586,11 @@ function PoView({ po, reload }: { po: Rec; reload: () => Promise<unknown> }) {
       setBusy(undefined);
     }
   };
+
+  const [supplier, setSupplier] = useState<Rec | null>(null);
+  useEffect(() => {
+    get(`/suppliers/${po.supplier_id}`, undefined, true).then(setSupplier).catch(() => undefined);
+  }, [po.supplier_id]);
 
   const receiptRows = useMemo(
     () =>
@@ -446,10 +632,18 @@ function PoView({ po, reload }: { po: Rec; reload: () => Promise<unknown> }) {
       title: '预计到货', dataIndex: 'expected_date',
       render: (v, l) => {
         const d = v || po.expected_date;
-        return <DueDate value={d} overdue={receivable && isPast(d) && remainOf(l) > 0} hint="已过预计到货日期，尚未到齐" />;
+        return <DueDate value={d} overdue={receivable && !l.promised_date && isPast(d) && remainOf(l) > 0} hint="已过预计到货日期，尚未到齐" />;
       },
     },
-    { title: '到货进度', key: 'recv', render: (_, l) => <QtyProgress done={l.received_qty || 0} total={l.qty} /> },
+    {
+      title: '供应商回复交期', dataIndex: 'promised_date',
+      render: (v, l) => (v ? <DueDate value={v} overdue={receivable && isPast(v) && remainOf(l) > 0} hint="已过供应商回复交期，尚未到齐" /> : '-'),
+    },
+    {
+      title: '未交', key: 'open', align: 'right',
+      render: (_, l) => (['CLOSED', 'CANCELLED'].includes(st) ? '-' : remainOf(l) > 0 ? <b>{fmtQty(remainOf(l))}</b> : <Tag color="green">已到齐</Tag>),
+    },
+    { title: '到货进度', key: 'recv', className: 'no-print', render: (_, l) => <QtyProgress done={l.received_qty || 0} total={l.qty} /> },
     { title: '备注', dataIndex: 'remark', render: (v) => v || '-' },
   ];
 
@@ -476,12 +670,15 @@ function PoView({ po, reload }: { po: Rec; reload: () => Promise<unknown> }) {
 
   return (
     <>
+      <div className="no-print">
       <PageHeader
         title={<Space>采购订单 {po.no}<StatusTag dict="po_status" value={st} /></Space>}
         sub={`${po.supplier_name ?? ''}${po.source ? ` · 来源 ${po.source}` : ''}`}
         extra={
           <>
             <Button icon={<ArrowLeftOutlined />} onClick={() => nav('/purchase/orders')}>返回列表</Button>
+            <PrintButton title={`采购订单 ${po.no}`} />
+            {receivable && can('purchase') && <Button icon={<EditOutlined />} onClick={() => setChanging(true)}>变更</Button>}
             {st === 'APPROVED' && !anyReceived && can('purchase') && (
               <Popconfirm title="确定取消该采购订单？" onConfirm={() => act('cancel', `/purchase-orders/${po.id}/cancel`, '订单已取消')}>
                 <Button danger loading={busy === 'cancel'}>取消订单</Button>
@@ -498,14 +695,17 @@ function PoView({ po, reload }: { po: Rec; reload: () => Promise<unknown> }) {
           </>
         }
       />
+      </div>
+      <PrintHeader title="采购订单" no={po.no} extra={<div>币别：{po.currency}</div>} />
       <Space direction="vertical" size={16} style={{ width: '100%' }}>
-        <Card size="small"><PoSteps po={po} /></Card>
+        <Card size="small" className="no-print"><PoSteps po={po} /></Card>
         <Card size="small" title="订单信息">
           <Descriptions
             size="small"
             column={{ xs: 1, sm: 2, lg: 3 }}
             items={[
               { key: 'supplier', label: '供应商', children: po.supplier_name },
+              ...(supplier ? [{ key: 'contact', label: '联系人', children: [supplier.contact, supplier.phone, supplier.email].filter(Boolean).join(' / ') || '-' }] : []),
               { key: 'amount', label: '订单金额', children: <b>{fmtMoney(po.total_amount, po.currency)}</b> },
               { key: 'currency', label: '币别', children: po.currency },
               { key: 'order_date', label: '下单日期', children: fmtDate(po.order_date) },
@@ -521,9 +721,31 @@ function PoView({ po, reload }: { po: Rec; reload: () => Promise<unknown> }) {
           />
         </Card>
         <Card size="small" title="采购明细">
-          <Table rowKey="id" size="middle" columns={lineCols} dataSource={po.lines} pagination={false} scroll={{ x: 'max-content' }} />
+          <Table
+            rowKey="id"
+            size="middle"
+            columns={lineCols}
+            dataSource={po.lines}
+            pagination={false}
+            scroll={{ x: 'max-content' }}
+            summary={() => (
+              <Table.Summary.Row>
+                <Table.Summary.Cell index={0} colSpan={7} align="right"><b>合计</b></Table.Summary.Cell>
+                <Table.Summary.Cell index={7} align="right"><b>{fmtMoney(po.total_amount, po.currency)}</b></Table.Summary.Cell>
+                <Table.Summary.Cell index={8} colSpan={5} />
+              </Table.Summary.Row>
+            )}
+          />
+          <div className="print-only" style={{ fontSize: 11, marginTop: 8, lineHeight: 1.8 }}>
+            <div>交货要求：1. 送货单请注明本采购单号、物料编码与批号，随货附出厂检验报告/COA；2. 湿敏/静电敏感物料请真空防潮、防静电包装；3. 交期如有变化请提前书面告知采购。</div>
+            <div>来料须经本公司 IQC 检验合格后入库；不合格品按质量协议退换。</div>
+          </div>
+          {/* 通用签字栏在打印时被 .print-only 的 display:block 覆盖成竖排，这里局部恢复横排 */}
+          <style>{'@media print { .po-sign > .print-only { display: flex !important; } }'}</style>
+          <div className="po-sign"><PrintSignatures roles={['采购', '审核', '供应商确认（签字盖章）']} /></div>
         </Card>
-        <Card size="small" title={`收货记录（${(po.receipts || []).length} 次）`}>
+        <ChangeHistory poId={po.id} version={version} />
+        <Card size="small" className="no-print" title={`收货记录（${(po.receipts || []).length} 次）`}>
           {receiptRows.length ? (
             <Table rowKey="id" size="middle" columns={receiptCols} dataSource={receiptRows} pagination={false} scroll={{ x: 'max-content' }} />
           ) : (
@@ -531,6 +753,18 @@ function PoView({ po, reload }: { po: Rec; reload: () => Promise<unknown> }) {
           )}
         </Card>
       </Space>
+      {receivable && (
+        <ChangeModal
+          po={po}
+          open={changing}
+          onClose={() => setChanging(false)}
+          onDone={() => {
+            setChanging(false);
+            setVersion((v) => v + 1);
+            reload();
+          }}
+        />
+      )}
       {receivable && (
         <ReceiveModal
           po={po}

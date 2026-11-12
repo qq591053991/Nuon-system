@@ -1,33 +1,87 @@
 import {
-  Alert, Button, Card, Col, Descriptions, Empty, Modal, Popconfirm, Row, Segmented, Select, Space, Spin, Statistic, Table, Tag, Tooltip, Typography, message,
-  type TableColumnsType,
+  Alert, App, Button, Card, Col, Collapse, Descriptions, Empty, Modal, Popconfirm, Popover, Row, Segmented, Select, Space, Spin, Statistic, Table, Tag, Tooltip,
+  Typography, message, type TableColumnsType,
 } from 'antd';
-import { SwapOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { ReloadOutlined, SwapOutlined, ThunderboltOutlined, WarningOutlined } from '@ant-design/icons';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { get, post, type Rec } from '../../api/http';
 import { useAuth } from '../../auth';
+import ExportButton from '../../components/ExportButton';
 import PageHeader from '../../components/PageHeader';
 import StatusTag from '../../components/StatusTag';
-import { fmtDateTime, fmtQty } from '../../utils/format';
-import { DocNoLink, DueDate, isPast } from './shared';
+import { dictLabel } from '../../utils/dict';
+import { fmtDate, fmtDateTime, fmtQty } from '../../utils/format';
+import { DocLink, DocNoLink, DueDate, isPast } from './shared';
 
 const ACTIONS = [
   { value: 'ALL', label: '全部' },
   { value: 'PURCHASE', label: '采购' },
   { value: 'PRODUCE', label: '生产' },
   { value: 'CUSTOMER_SUPPLY', label: '客供料' },
+  { value: 'EXPEDITE', label: '提前催交' },
 ];
 
 const num = (v: any) => <span style={{ color: v ? undefined : '#bfbfbf' }}>{fmtQty(v)}</span>;
+const weekText = (w?: string | null) => (w ? `${w.replace(/^(\d{4})-W(\d+)$/, '$1 第$2周')}` : '-');
+
+/** 需求来源一条：订单行 / 工单用料 / 上层计划 */
+function RefText({ r }: { r: Rec }) {
+  if (r.type === 'SO') {
+    return (
+      <span>
+        订单 <Link to={`/sales/orders/${r.id}`} className="mono">{r.no}</Link> 行{r.line_no}
+        <Typography.Text type="secondary"> {fmtQty(r.qty)} · 交期 {fmtDate(r.date)}{r.customer ? ` · ${r.customer}` : ''}</Typography.Text>
+      </span>
+    );
+  }
+  if (r.type === 'WO') {
+    return (
+      <span>
+        工单 <Link to={`/mes/work-orders/${r.id}`} className="mono">{r.no}</Link>
+        <Typography.Text type="secondary"> {r.parent ?? ''} 用料 {fmtQty(r.qty)} · 开工 {fmtDate(r.date)}</Typography.Text>
+      </span>
+    );
+  }
+  if (r.type === 'PLAN') {
+    return (
+      <span>
+        上层计划 <span className="mono">{r.parent}</span>
+        <Typography.Text type="secondary"> 用料 {fmtQty(r.qty)} · 开工 {fmtDate(r.date)}{r.so?.length ? ` · 来自订单 ${r.so.join('、')}` : ''}</Typography.Text>
+      </span>
+    );
+  }
+  return <span>{r.no}</span>;
+}
+
+/** 催交对象：采购单 / 工单 */
+function ExpediteText({ r }: { r: Rec }) {
+  const doc = r.type === 'PO' ? <Link to={`/purchase/orders/${r.id}`} className="mono">{r.no}</Link> : <Link to={`/mes/work-orders/${r.id}`} className="mono">{r.no}</Link>;
+  return (
+    <span>
+      {r.type === 'PO' ? '催采购单' : '提前工单'} {doc} {fmtQty(r.qty)}：{fmtDate(r.date)} → <b>{fmtDate(r.to_date)}</b>
+      {r.status && ['CANCELLED', 'CLOSED'].includes(r.status) && <Tag color="red" style={{ marginInlineStart: 4 }}>已{r.status === 'CANCELLED' ? '取消' : '关闭'}</Tag>}
+    </span>
+  );
+}
+
+const refsPlain = (s: Rec) =>
+  [
+    ...(s.demand || []).map((r: Rec) =>
+      r.type === 'SO' ? `订单${r.no}行${r.line_no} ${r.qty}` : r.type === 'WO' ? `工单${r.no} ${r.qty}` : `上层计划${r.parent} ${r.qty}${r.so?.length ? `(${r.so.join('/')})` : ''}`,
+    ),
+    ...(s.expedite || []).map((r: Rec) => `催交${r.no} ${r.qty} ${r.date}→${r.to_date}`),
+  ].join('；');
 
 export default function Mrp() {
   const { can } = useAuth();
+  const { modal } = App.useApp();
   const canRun = can('plan');
   const canConvert = can('plan', 'purchase');
   const [runs, setRuns] = useState<Rec[]>([]);
   const [runId, setRunId] = useState<number>();
   const [run, setRun] = useState<Rec | null>(null);
+  const [stale, setStale] = useState<Rec | null>(null);
   const [loading, setLoading] = useState(false);
   const [running, setRunning] = useState(false);
   const [converting, setConverting] = useState(false);
@@ -44,7 +98,9 @@ export default function Mrp() {
   const loadRun = useCallback(async (rid: number) => {
     setLoading(true);
     try {
-      setRun(await get(`/mrp/runs/${rid}`));
+      const [r, s] = await Promise.all([get(`/mrp/runs/${rid}`), get(`/mrp/runs/${rid}/staleness`, undefined, true).catch(() => null)]);
+      setRun(r);
+      setStale(s);
     } finally {
       setLoading(false);
     }
@@ -71,10 +127,13 @@ export default function Mrp() {
     }
   };
 
-  const convert = async () => {
+  const sugs: Rec[] = run?.suggestions || [];
+  const byId = useMemo(() => new Map(sugs.map((s) => [s.id, s])), [sugs]);
+
+  const doConvert = async (force: boolean) => {
     setConverting(true);
     try {
-      const r = await post('/mrp/convert', { suggestion_ids: selected });
+      const r = await post('/mrp/convert', { suggestion_ids: selected, force });
       setResult(r);
       setSelected([]);
       if (runId) await loadRun(runId);
@@ -83,21 +142,59 @@ export default function Mrp() {
     }
   };
 
-  const ignore = async (sid: number) => {
+  /** 转单前确认：列出将生成的单据；结果过期时提示先重算 */
+  const convert = async () => {
+    const st: Rec | null = runId ? await get(`/mrp/runs/${runId}/staleness`, undefined, true).catch(() => null) : null;
+    setStale(st);
+    const picked = selected.map((id) => byId.get(id)).filter(Boolean) as Rec[];
+    const buy = picked.filter((s) => s.action === 'PURCHASE');
+    const make = picked.filter((s) => s.action === 'PRODUCE');
+    const suppliers = [...new Set(buy.map((s) => s.supplier_name || '未设置默认供应商'))];
+    const sos = [...new Set(make.flatMap((s) => (s.demand || []).filter((r: Rec) => r.type === 'SO').map((r: Rec) => r.no)))];
+    modal.confirm({
+      title: st?.stale ? 'MRP 结果已过期，确定仍要转单？' : `确认转单（${picked.length} 条建议）`,
+      icon: st?.stale ? <WarningOutlined style={{ color: '#faad14' }} /> : undefined,
+      width: 600,
+      okText: st?.stale ? '仍然转单' : '确认转单',
+      okButtonProps: { danger: !!st?.stale },
+      cancelText: '取消',
+      content: (
+        <div>
+          {st?.stale && (
+            <Alert type="warning" showIcon style={{ marginBottom: 12 }} message="运算之后有以下变化，建议取消后点【重新运行】，避免重复下单/排产："
+              description={<ul style={{ margin: 0, paddingLeft: 18 }}>{st.reasons.map((t: string) => <li key={t}>{t}</li>)}</ul>} />
+          )}
+          <ul style={{ paddingLeft: 18, margin: 0 }}>
+            {buy.length > 0 && (
+              <li>采购建议 {buy.length} 条 → 按供应商合并为 <b>{suppliers.length}</b> 张采购单草稿（{suppliers.join('、')}），需审批后发给供应商</li>
+            )}
+            {make.length > 0 && (
+              <li>生产建议 {make.length} 条 → 生成计划工单{sos.length ? `，按需求来源关联订单 ${sos.join('、')}（已被工单/库存覆盖的不重复生成）` : ''}</li>
+            )}
+          </ul>
+        </div>
+      ),
+      onOk: () => doConvert(!!st?.stale),
+    });
+  };
+
+  const ignore = async (sid: number, ok = '已忽略') => {
     await post(`/mrp/suggestions/${sid}/ignore`);
-    message.success('已忽略');
+    message.success(ok);
     setSelected((s) => s.filter((x) => x !== sid));
     if (runId) loadRun(runId);
   };
 
-  const sugs: Rec[] = run?.suggestions || [];
-  const count = (a: string) => (a === 'ALL' ? sugs.length : sugs.filter((s) => s.action === a).length);
-  // 按物料分组（层级 → 物料编码 → 需求日期），同一物料的各周建议合并显示物料信息
+  const isExp = (s: Rec) => s.exception === 'EXPEDITE';
+  const count = (a: string) => (a === 'ALL' ? sugs.length : a === 'EXPEDITE' ? sugs.filter(isExp).length : sugs.filter((s) => s.action === a && !isExp(s)).length);
+  // 按物料分组（层级 → 物料编码 → 需求日期 → 催交在前），同一物料的各周建议合并显示物料信息
   const data = useMemo(() => {
-    const rows = action === 'ALL' ? sugs : sugs.filter((s) => s.action === action);
+    const rows = action === 'ALL' ? sugs : action === 'EXPEDITE' ? sugs.filter(isExp) : sugs.filter((s) => s.action === action && !isExp(s));
     const dateOf = (r: Rec) => String(r.required_date ?? r.due_date ?? '');
     return [...rows].sort(
-      (a, b) => a.level - b.level || String(a.material_code).localeCompare(String(b.material_code)) || dateOf(a).localeCompare(dateOf(b)) || a.id - b.id,
+      (a, b) =>
+        a.level - b.level || String(a.material_code).localeCompare(String(b.material_code)) || dateOf(a).localeCompare(dateOf(b)) ||
+        (isExp(b) ? 1 : 0) - (isExp(a) ? 1 : 0) || a.id - b.id,
     );
   }, [sugs, action]);
   const spans = useMemo(
@@ -112,82 +209,130 @@ export default function Mrp() {
   );
   const merge = (_: Rec, i?: number) => ({ rowSpan: spans[i ?? 0] ?? 1 });
   const stat = (st: string) => sugs.filter((s) => s.status === st).length;
-  const isLatest = !!runs.length && runs[0].id === runId;
+  const openExp = sugs.filter((s) => isExp(s) && s.status === 'OPEN').length;
 
   const columns: TableColumnsType<Rec> = [
     {
-      title: <Tooltip title="0 = 成品（独立需求），数字越大越接近原材料">层级</Tooltip>,
-      dataIndex: 'level', width: 60, align: 'center', render: (v) => `L${v}`, onCell: merge,
-    },
-    {
-      title: '物料编码', dataIndex: 'material_code', fixed: 'left', onCell: merge,
-      render: (v, _, i) => (
+      title: '物料', dataIndex: 'material_code', fixed: 'left', width: 190, onCell: merge,
+      render: (v, r, i) => (
         <div>
-          <span className="mono">{v}</span>
-          {spans[i] > 1 && <Typography.Text type="secondary" style={{ display: 'block', fontSize: 12 }}>{spans[i]} 周有缺口</Typography.Text>}
+          <Space size={4}>
+            <Tooltip title="层级：0 = 成品（独立需求），数字越大越接近原材料"><Tag style={{ marginInlineEnd: 0 }}>L{r.level}</Tag></Tooltip>
+            <span className="mono">{v}</span>
+          </Space>
+          <div><Typography.Text type="secondary" style={{ fontSize: 12 }}>{r.material_name}</Typography.Text></div>
+          {spans[i] > 1 && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{spans[i]} 条建议</Typography.Text>}
         </div>
       ),
     },
     {
-      title: '物料名称 / 规格', key: 'name', width: 220, onCell: merge,
+      title: '建议', dataIndex: 'action', width: 92,
+      render: (v, r) => (isExp(r) ? <Tooltip title="已有后续在途/在制可以满足，只需催交提前，不用新下单"><Tag color="orange">提前催交</Tag></Tooltip> : <StatusTag dict="mrp_action" value={v} />),
+    },
+    {
+      title: <Tooltip title="ISO 周（周一开始）；需求日期 = 该周最早的需求日（订单交期 / 上层开工日），早于本周的计入本周">周次 / 需求日期</Tooltip>, key: 'req', width: 140,
       render: (_, r) => (
         <div>
-          <div>{r.material_name}</div>
-          {r.material_spec && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{r.material_spec}</Typography.Text>}
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>{weekText(r.week)}</Typography.Text>
+          <div><DueDate value={r.required_date} overdue={r.status === 'OPEN' && isPast(r.required_date)} hint="需求日期已过（逾期需求）" /></div>
         </div>
       ),
     },
-    { title: '建议', dataIndex: 'action', onCell: merge, render: (v) => <StatusTag dict="mrp_action" value={v} /> },
     {
-      title: <Tooltip title="ISO 周（周一开始）；早于本周的逾期需求计入本周">周次</Tooltip>, dataIndex: 'week',
-      render: (v) => (v ? <Tag>{v.replace('-W', ' 第')}周</Tag> : '-'),
-    },
-    {
-      title: <Tooltip title="该周最早的需求日（订单交期 / 上层物料开工日）">需求日期</Tooltip>, dataIndex: 'required_date',
-      render: (v, r) => <DueDate value={v} overdue={r.status === 'OPEN' && isPast(v)} hint="需求日期已过（逾期需求）" />,
-    },
-    {
-      title: <Tooltip title="需求日期 − 提前期（生产周期 / 采购提前期），不早于今天">建议开工/下单日</Tooltip>, dataIndex: 'due_date',
+      title: <Tooltip title="需求日期 − 提前期（生产周期 / 采购提前期），不早于今天；催交为要求到货/完工日">建议下单/开工</Tooltip>, dataIndex: 'due_date', width: 110,
       render: (v, r) => <DueDate value={v} overdue={r.status === 'OPEN' && isPast(v)} hint="建议日期已过，请尽快处理" />,
     },
     {
-      title: '建议数量', dataIndex: 'suggested_qty', align: 'right',
-      render: (v, r) => <b>{fmtQty(v)} <Typography.Text type="secondary" style={{ fontWeight: 400, fontSize: 12 }}>{r.uom}</Typography.Text></b>,
+      title: '建议数量', dataIndex: 'suggested_qty', align: 'right', width: 110,
+      render: (v, r) => (
+        <Tooltip
+          title={
+            <div>
+              毛需求 {fmtQty(r.gross_qty)} + 安全库存 {fmtQty(r.safety_stock)} − 期初预计库存 {fmtQty(r.on_hand_qty)} − 本周在途/在制 {fmtQty(r.on_order_qty)} = 净需求 {fmtQty(r.net_qty)}
+              {Math.abs(r.suggested_qty - r.net_qty) > 1e-9 && !isExp(r) && <div>按最小订货量/采购单位/整数取整为 {fmtQty(r.suggested_qty)}</div>}
+            </div>
+          }
+        >
+          <b>{fmtQty(v)}</b> <Typography.Text type="secondary" style={{ fontWeight: 400, fontSize: 12 }}>{r.uom}</Typography.Text>
+          {Math.abs(r.suggested_qty - r.net_qty) > 1e-9 && !isExp(r) && <div><Typography.Text type="secondary" style={{ fontSize: 12 }}>净需求 {fmtQty(r.net_qty)}</Typography.Text></div>}
+        </Tooltip>
+      ),
     },
     {
-      title: '供应商 / 客户', key: 'partner', width: 200, ellipsis: true,
+      title: <Tooltip title="为什么要做/要买：哪张订单、哪张工单、哪个上层计划产生的需求">需求来源</Tooltip>, key: 'refs', width: 280,
+      render: (_, r) => {
+        const refs: Rec[] = r.demand || [];
+        const exp: Rec[] = r.expedite || [];
+        if (!refs.length && !exp.length) return <Typography.Text type="secondary">{r.note?.includes('安全库存') ? '补足安全库存' : '-'}</Typography.Text>;
+        const head = refs.slice(0, 2);
+        const all = (
+          <Space direction="vertical" size={2}>
+            {exp.map((x, i) => <ExpediteText key={`e${i}`} r={x} />)}
+            {refs.map((x, i) => <RefText key={i} r={x} />)}
+          </Space>
+        );
+        return (
+          <Space direction="vertical" size={0} style={{ width: 260, fontSize: 13 }}>
+            {exp.map((x, i) => <ExpediteText key={`e${i}`} r={x} />)}
+            {head.map((x, i) => <RefText key={i} r={x} />)}
+            {refs.length > 2 && (
+              <Popover content={all} title="需求来源" trigger="click">
+                <Typography.Link style={{ fontSize: 12 }}>等 {refs.length} 项，查看全部</Typography.Link>
+              </Popover>
+            )}
+          </Space>
+        );
+      },
+    },
+    {
+      title: '状态', dataIndex: 'status', width: 150,
+      render: (v, r) => {
+        const conv: Rec[] = r.converted?.length ? r.converted : r.converted_doc_no ? [{ no: r.converted_doc_no, id: r.converted_doc_id, status: r.converted_doc_status, type: r.converted_doc_kind }] : [];
+        const kind = (x: Rec) => (x.type === 'PO' || (r.action === 'PURCHASE' && x.type !== 'WO') ? 'po' : 'wo');
+        return (
+          <Space direction="vertical" size={0}>
+            <StatusTag dict="mrp_status" value={v} />
+            {conv.map((x) => (
+              <span key={x.no}>
+                <DocLink kind={kind(x)} id={x.id} no={x.no} />
+                {x.status && ['CANCELLED', 'CLOSED'].includes(x.status) && (
+                  <Tooltip title="转出的单据已取消/关闭，需求未被满足，请重新运行 MRP"><Tag color="red" style={{ marginInlineStart: 4 }}>{dictLabel(kind(x) === 'po' ? 'po_status' : 'wo_status', x.status)}</Tag></Tooltip>
+                )}
+              </span>
+            ))}
+          </Space>
+        );
+      },
+    },
+    {
+      title: '供应商 / 客户', key: 'partner', width: 150, ellipsis: true,
       render: (_, r) => {
         if (r.action === 'PURCHASE') return r.supplier_name || <Typography.Text type="warning">未设置默认供应商</Typography.Text>;
         return r.customer_name || '-';
       },
     },
+    { title: <Tooltip title="本周毛需求">毛需求</Tooltip>, dataIndex: 'gross_qty', align: 'right', width: 90, render: num },
     {
-      title: '状态', dataIndex: 'status',
-      render: (v, r) => (
-        <Space size={4}>
-          <StatusTag dict="mrp_status" value={v} />
-          {r.converted_doc_no && <DocNoLink kind={r.action === 'PURCHASE' ? 'po' : 'wo'} no={r.converted_doc_no} />}
-        </Space>
-      ),
-    },
-    { title: <Tooltip title="本周毛需求">毛需求</Tooltip>, dataIndex: 'gross_qty', align: 'right', render: num },
-    { title: <Tooltip title="本周开始时的预计库存（现有库存 + 之前各周计划入库与建议 − 之前各周需求）">期初预计库存</Tooltip>, dataIndex: 'on_hand_qty', align: 'right', render: num },
-    { title: <Tooltip title="本周到货的采购在途 + 本周完工的在制工单">本周在途/在制</Tooltip>, dataIndex: 'on_order_qty', align: 'right', render: num },
-    { title: '安全库存', dataIndex: 'safety_stock', align: 'right', render: num },
-    { title: <Tooltip title="毛需求 + 安全库存 − 期初预计库存 − 本周在途/在制">净需求</Tooltip>, dataIndex: 'net_qty', align: 'right', render: num },
-    {
-      title: '备注', dataIndex: 'note', width: 220,
-      render: (v) => (v ? <Typography.Text type={String(v).includes('交期紧张') ? 'danger' : 'secondary'} style={{ fontSize: 12 }}>{v}</Typography.Text> : '-'),
+      title: '备注', dataIndex: 'note', width: 200, ellipsis: { showTitle: false },
+      render: (v) => (v ? (
+        <Tooltip title={v}><Typography.Text type={String(v).includes('交期紧张') ? 'danger' : 'secondary'} style={{ fontSize: 12 }}>{v}</Typography.Text></Tooltip>
+      ) : '-'),
     },
   ];
   if (canConvert) {
     columns.push({
-      title: '操作', key: 'op', fixed: 'right', width: 70,
+      title: '操作', key: 'op', fixed: 'right', width: 76,
       render: (_, r) =>
         r.status === 'OPEN' ? (
-          <Popconfirm title="忽略后此建议不再转单，确定？" onConfirm={() => ignore(r.id)}>
-            <Button size="small" type="link">忽略</Button>
-          </Popconfirm>
+          isExp(r) ? (
+            <Popconfirm title="已联系供应商/车间提前交货？标记后不再提示。" okText="已处理" cancelText="还没有" onConfirm={() => ignore(r.id, '已标记为已催交')}>
+              <Button size="small" type="link">已催交</Button>
+            </Popconfirm>
+          ) : (
+            <Popconfirm title="忽略后此建议不再转单，确定？" okText="忽略" cancelText="不忽略" onConfirm={() => ignore(r.id)}>
+              <Button size="small" type="link">忽略</Button>
+            </Popconfirm>
+          )
         ) : null,
     });
   }
@@ -200,7 +345,7 @@ export default function Mrp() {
     <>
       <PageHeader
         title="MRP 物料需求计划"
-        sub="根据已确认的销售订单，自动算出要生产什么、要采购什么、要通知客户供什么料。"
+        sub="根据已确认的销售订单与在制工单，算出要生产什么、要采购什么、要催什么、要通知客户供什么料。"
         extra={
           canRun && (
             <Button type="primary" icon={<ThunderboltOutlined />} loading={running} onClick={doRun}>
@@ -210,12 +355,6 @@ export default function Mrp() {
         }
       />
       <Space direction="vertical" size={16} style={{ width: '100%' }}>
-        <Alert
-          type="info"
-          showIcon
-          message="MRP 运算逻辑"
-          description="按周（ISO 周）分时段逐周净算：独立需求 = 已确认销售订单的未发货数量（按交期）；采购在途按预计到货日、在制工单按计划完工日计入当周；每周 净需求 = 毛需求 + 安全库存 − 期初预计库存 − 本周在途/在制，建议多出的部分结转到后续各周。自制件的下层组件需求日期 = 父项需求日期 − 生产周期，外购件建议下单日 = 需求日期 − 采购提前期。自制件建议“生产”，外购件建议“采购”（按默认供应商合并成采购订单，设置了采购单位的按整数采购单位下单），客供料提示“通知客户供料”。"
-        />
         {!runs.length ? (
           <Card>
             <Empty description="还没有运行过 MRP">
@@ -250,13 +389,21 @@ export default function Mrp() {
                 <Col>
                   <Space size={32}>
                     <Statistic title="待处理" value={stat('OPEN')} valueStyle={{ color: stat('OPEN') ? '#d48806' : undefined }} />
+                    <Statistic title="其中催交" value={openExp} valueStyle={{ color: openExp ? '#d46b08' : undefined }} />
                     <Statistic title="已转单" value={stat('CONVERTED')} valueStyle={{ color: '#389e0d' }} />
                     <Statistic title="已忽略" value={stat('IGNORED')} />
                   </Space>
                 </Col>
               </Row>
-              {!isLatest && runId && (
-                <Alert type="warning" showIcon style={{ marginTop: 12 }} message="当前查看的不是最新一次运算结果，订单与库存可能已变化，建议重新运行 MRP 后再转单。" />
+              {stale?.stale && (
+                <Alert
+                  type="warning"
+                  showIcon
+                  style={{ marginTop: 12 }}
+                  message="这次运算结果已过期：之后订单/工单/采购/库存有变化，直接转单可能重复下单或重复排产"
+                  description={<ul style={{ margin: 0, paddingLeft: 18 }}>{stale.reasons.map((t: string) => <li key={t}>{t}</li>)}</ul>}
+                  action={canRun && <Button size="small" type="primary" icon={<ReloadOutlined />} loading={running} onClick={doRun}>重新运行</Button>}
+                />
               )}
             </Card>
             <Card size="small">
@@ -266,14 +413,38 @@ export default function Mrp() {
                   onChange={(v) => setAction(v as string)}
                   options={ACTIONS.map((a) => ({ value: a.value, label: `${a.label}（${count(a.value)}）` }))}
                 />
-                {canConvert && (
-                  <Space>
-                    <Typography.Text type="secondary">勾选“待处理”的采购/生产建议后一键转单</Typography.Text>
+                <Space wrap>
+                  <ExportButton
+                    rows={data}
+                    filename={`MRP建议_${run?.no ?? ''}`}
+                    columns={[
+                      { title: '层级', key: 'level', type: 'number' },
+                      { title: '物料编码', key: 'material_code' },
+                      { title: '物料名称', key: 'material_name' },
+                      { title: '建议', value: (r) => (isExp(r) ? '提前催交' : dictLabel('mrp_action', r.action)) },
+                      { title: '周次', key: 'week' },
+                      { title: '需求日期', key: 'required_date', type: 'date' },
+                      { title: '建议下单/开工', key: 'due_date', type: 'date' },
+                      { title: '建议数量', key: 'suggested_qty', type: 'number' },
+                      { title: '单位', key: 'uom' },
+                      { title: '毛需求', key: 'gross_qty', type: 'number' },
+                      { title: '期初预计库存', key: 'on_hand_qty', type: 'number' },
+                      { title: '本周在途/在制', key: 'on_order_qty', type: 'number' },
+                      { title: '安全库存', key: 'safety_stock', type: 'number' },
+                      { title: '净需求', key: 'net_qty', type: 'number' },
+                      { title: '供应商/客户', value: (r) => r.supplier_name || r.customer_name || '' },
+                      { title: '需求来源', value: refsPlain, width: 60 },
+                      { title: '状态', value: (r) => dictLabel('mrp_status', r.status) },
+                      { title: '转出单据', value: (r) => (r.converted?.length ? r.converted.map((x: Rec) => x.no).join('、') : r.converted_doc_no || '') },
+                      { title: '备注', key: 'note', width: 40 },
+                    ]}
+                  />
+                  {canConvert && (
                     <Button type="primary" icon={<SwapOutlined />} disabled={!selected.length} loading={converting} onClick={convert}>
                       一键转单{selected.length ? `（${selected.length}）` : ''}
                     </Button>
-                  </Space>
-                )}
+                  )}
+                </Space>
               </Space>
               <Spin spinning={loading}>
                 <Table
@@ -289,7 +460,7 @@ export default function Mrp() {
                       ? {
                           selectedRowKeys: selected,
                           onChange: (keys) => setSelected(keys as number[]),
-                          getCheckboxProps: (r: Rec) => ({ disabled: r.status !== 'OPEN' || r.action === 'CUSTOMER_SUPPLY' }),
+                          getCheckboxProps: (r: Rec) => ({ disabled: r.status !== 'OPEN' || r.action === 'CUSTOMER_SUPPLY' || isExp(r) }),
                         }
                       : undefined
                   }
@@ -298,50 +469,68 @@ export default function Mrp() {
             </Card>
           </>
         )}
+        <Collapse
+          size="small"
+          items={[
+            {
+              key: 'how',
+              label: 'MRP 怎么算？（点开查看）',
+              children: (
+                <Typography.Paragraph style={{ marginBottom: 0 }}>
+                  按周（ISO 周）逐周净算：独立需求 = 已确认销售订单的未发货数量（按交期）；采购在途按供应商回复交期/预计到货日、在制工单按计划完工日计入当周；
+                  每周 净需求 = 毛需求 + 安全库存 − 期初预计库存 − 本周在途/在制。出现缺口时，<b>先看后续各周有没有已下的采购单/工单可以提前</b>（给出“提前催交”，不新建单据），
+                  仍不够才建议新下单；建议数量按整数（PCS 等离散单位）、最小订货量、采购单位取整，多出的结转到后续各周。自制件的下层组件需求日期 = 上层开工日；外购件建议下单日 = 需求日期 − 采购提前期。
+                  生产建议转工单时按“需求来源”关联销售订单（订单上的【生成工单】也会扣除这些工单，不会重复排产）。运算后订单、工单、采购或库存有变化，转单前会提示重新运行。
+                </Typography.Paragraph>
+              ),
+            },
+          ]}
+        />
       </Space>
 
-      <Modal
-        open={!!result}
-        title="一键转单结果"
-        onCancel={() => setResult(null)}
-        footer={<Button type="primary" onClick={() => setResult(null)}>知道了</Button>}
-      >
-        <Space direction="vertical" size={16} style={{ width: '100%' }}>
-          {createdPos.length > 0 && (
-            <div>
-              <Typography.Paragraph style={{ marginBottom: 8 }}>
-                已生成 <b>{createdPos.length}</b> 张采购订单（草稿），请审批后发给供应商：
-              </Typography.Paragraph>
-              <Space wrap>{createdPos.map((no) => <DocNoLink key={no} kind="po" no={no} />)}</Space>
-            </div>
-          )}
-          {createdWos.length > 0 && (
-            <div>
-              <Typography.Paragraph style={{ marginBottom: 8 }}>
-                已生成 <b>{createdWos.length}</b> 张生产工单（计划状态），请下达后生产：
-              </Typography.Paragraph>
-              <Space wrap>{createdWos.map((no) => <DocNoLink key={no} kind="wo" no={no} />)}</Space>
-            </div>
-          )}
-          {!createdPos.length && !createdWos.length && !skipped.length && <Alert type="info" showIcon message="所选建议已处理，没有生成新单据" />}
-          {skipped.length > 0 && (
-            <Alert
-              type="warning"
-              showIcon
-              message="以下建议未转单"
-              description={
-                <>
-                  <ul style={{ margin: 0, paddingLeft: 18 }}>{skipped.map((s) => <li key={s}>{s}</li>)}</ul>
-                  <Space size={16}>
-                    <Link to="/master/materials">维护物料默认供应商 →</Link>
-                    <Link to="/engineering/boms">维护 BOM →</Link>
-                  </Space>
-                </>
-              }
-            />
-          )}
-        </Space>
-      </Modal>
+      <ResultModal result={result} onClose={() => setResult(null)} createdPos={createdPos} createdWos={createdWos} skipped={skipped} />
     </>
+  );
+}
+
+function ResultModal({ result, onClose, createdPos, createdWos, skipped }: { result: Rec | null; onClose: () => void; createdPos: string[]; createdWos: string[]; skipped: string[] }) {
+  return (
+    <Modal open={!!result} title="一键转单结果" onCancel={onClose} footer={<Button type="primary" onClick={onClose}>知道了</Button>}>
+      <Space direction="vertical" size={16} style={{ width: '100%' }}>
+        {createdPos.length > 0 && (
+          <div>
+            <Typography.Paragraph style={{ marginBottom: 8 }}>
+              已生成 <b>{createdPos.length}</b> 张采购订单（草稿），请审批后发给供应商：
+            </Typography.Paragraph>
+            <Space wrap>{createdPos.map((no) => <DocNoLink key={no} kind="po" no={no} />)}</Space>
+          </div>
+        )}
+        {createdWos.length > 0 && (
+          <div>
+            <Typography.Paragraph style={{ marginBottom: 8 }}>
+              已生成 <b>{createdWos.length}</b> 张生产工单（计划状态，已关联来源订单），请下达后生产：
+            </Typography.Paragraph>
+            <Space wrap>{createdWos.map((no) => <DocNoLink key={no} kind="wo" no={no} />)}</Space>
+          </div>
+        )}
+        {!createdPos.length && !createdWos.length && !skipped.length && <Alert type="info" showIcon message="所选建议已处理，没有生成新单据" />}
+        {skipped.length > 0 && (
+          <Alert
+            type="warning"
+            showIcon
+            message="以下建议未转单"
+            description={
+              <>
+                <ul style={{ margin: 0, paddingLeft: 18 }}>{skipped.map((s) => <li key={s}>{s}</li>)}</ul>
+                <Space size={16}>
+                  <Link to="/master/materials">维护物料默认供应商 →</Link>
+                  <Link to="/engineering/boms">维护 BOM →</Link>
+                </Space>
+              </>
+            }
+          />
+        )}
+      </Space>
+    </Modal>
   );
 }

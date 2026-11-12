@@ -5,7 +5,7 @@
  *    首次登录自动开通本系统账号（默认无角色，需管理员分配）。
  *  - 工牌登录：仅限启用状态、拥有车间报工（mes）权限的用户，PIN 以 bcrypt 校验。
  *  - 连续失败锁定：失败次数与锁定截止时间存数据库（sys_user.failed_login_count / locked_until），多实例部署同样有效；
- *    密码登录与工牌登录共用同一计数。管理员在“用户与角色”中保存该用户即解锁。
+ *    密码登录与工牌登录共用同一计数。密码错误时提示“还可尝试 N 次”。管理员在“用户与角色”中点“解锁”（或保存该用户）即解锁。
  *  - 登录成功/失败写入审计追踪（对象“登录”）。
  * 电子签名的密码校验也走这里，保证金蝶用户用金蝶密码签名。
  */
@@ -45,9 +45,13 @@ export class AuthService {
     }
   }
 
-  /** 记录一次失败：累计到数据库，达到上限即锁定；写审计；抛出 401 */
-  private async fail(loginName: string, user: User | null, reason: string, extra: Record<string, unknown> = {}): Promise<never> {
+  /**
+   * 记录一次失败：累计到数据库，达到上限即锁定；写审计；抛出 401。
+   * hint = true 时在提示中告诉用户还可尝试几次 / 已被锁定多久（仅用于本系统密码登录）。
+   */
+  private async fail(loginName: string, user: User | null, reason: string, extra: Record<string, unknown> = {}, hint = false): Promise<never> {
     let locked = false;
+    let left: number | null = null;
     if (user) {
       const u = await this.db.base.user.update({ where: { id: user.id }, data: { failed_login_count: { increment: 1 } } });
       if (u.failed_login_count >= config.loginMaxFailures) {
@@ -56,10 +60,17 @@ export class AuthService {
           data: { failed_login_count: 0, locked_until: new Date(Date.now() + config.loginLockMinutes * 60000) },
         });
         locked = true;
+      } else {
+        left = config.loginMaxFailures - u.failed_login_count;
       }
     }
     await this.audit(user?.username ?? loginName, user?.full_name ?? null, user?.id ?? null, 'LOGIN_FAILED', { reason, ...extra, ...(locked ? { locked: true } : {}) });
-    throw new HttpException({ detail: reason }, 401);
+    let detail = reason;
+    if (hint && user && user.is_active) {
+      if (locked) detail = `${reason}：已连续错误 ${config.loginMaxFailures} 次，账号已锁定 ${config.loginLockMinutes} 分钟，请稍后再试或联系管理员解锁`;
+      else if (left !== null) detail = `${reason}，还可尝试 ${left} 次（连续错误 ${config.loginMaxFailures} 次将锁定 ${config.loginLockMinutes} 分钟）`;
+    }
+    throw new HttpException({ detail }, 401);
   }
 
   /** 登录成功：清零失败计数、记录最近登录时间与审计 */
@@ -81,7 +92,8 @@ export class AuthService {
 
     if (!useKingdee) {
       if (!user || user.auth_source !== 'LOCAL' || !verifyPassword(password, user.password_hash)) {
-        return this.fail(username, user, user?.auth_source === 'KINGDEE' ? '金蝶登录未启用，请联系管理员' : '用户名或密码错误');
+        const kingdee = user?.auth_source === 'KINGDEE';
+        return this.fail(username, user, kingdee ? '金蝶登录未启用，请联系管理员' : '用户名或密码错误', {}, !kingdee);
       }
     } else {
       const r = await kingdeeValidateUser(username, password);

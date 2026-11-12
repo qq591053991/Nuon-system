@@ -33,7 +33,7 @@ async function passAll(api: Api, sn: string, ref: Ref, from = 10) {
 
 /** RL-300 工单（关联订单 LUM-PO-26-118）：创建 → 下达 →（可选）领料过账 */
 async function rlWo(api: Api, ref: Ref, qty: number, issue = true) {
-  const so = await api.ok('get', `/api/sales-orders/${(await api.find('/api/sales-orders', { q: 'LUM-PO-26-118' })).id}`);
+  const so = await api.as('sales').ok('get', `/api/sales-orders/${(await api.as('sales').find('/api/sales-orders', { q: 'LUM-PO-26-118' })).id}`);
   let wo = await api.as('pmc').ok('post', '/api/work-orders', {
     material_id: ref.m['FG-RL300'], planned_qty: qty, so_id: so.id, so_line_id: so.lines[0].id,
   });
@@ -87,7 +87,7 @@ describe('评审改进：生产（资质 / 返工换件 / 分批放行）', () =
     expect(r.status).toBe(400);
     expect(r.body.detail).toBe('您尚未取得工序【ASM 整机组装】的上岗资质，请联系质量部培训考核');
 
-    const q = await api.as('qa').ok('post', '/api/qualifications', body);
+    const q = await api.as('qa').ok('post', '/api/qualifications', { ...body, signature: SIG });
     expect([q.level, q.valid, q.user_full_name, q.created_by]).toEqual(['QUALIFIED', true, '王厂长', 'qa']);
     expect((await report(api, sns[0], 10, ref, {}, 'manager')).body.result).toBe('PASS');
     // 只有 ASM 资质，不能做光学测试
@@ -98,15 +98,15 @@ describe('评审改进：生产（资质 / 返工换件 / 分批放行）', () =
     expect(recs[0].operator_name).toBe('王厂长');
 
     // 过期
-    await api.as('admin').ok('put', `/api/qualifications/${q.id}`, { certified_at: '2025-01-01', expires_at: '2025-12-31' });
+    await api.as('admin').ok('put', `/api/qualifications/${q.id}`, { certified_at: '2025-01-01', expires_at: '2025-12-31', signature: SIG });
     r = await report(api, sns[1], 10, ref, {}, 'manager');
     expect(r.body.detail).toContain('已于 2025-12-31 过期');
     // 培训期（TRAINEE）不能独立上岗
-    await api.as('qa').ok('put', `/api/qualifications/${q.id}`, { expires_at: null, level: 'TRAINEE' });
+    await api.as('qa').ok('put', `/api/qualifications/${q.id}`, { expires_at: null, level: 'TRAINEE', signature: SIG });
     r = await report(api, sns[1], 10, ref, {}, 'manager');
     expect(r.body.detail).toContain('培训期');
     // 停用
-    await api.as('qa').ok('put', `/api/qualifications/${q.id}`, { level: 'QUALIFIED', is_active: false });
+    await api.as('qa').ok('put', `/api/qualifications/${q.id}`, { level: 'QUALIFIED', is_active: false, signature: SIG });
     expect((await report(api, sns[1], 10, ref, {}, 'manager')).body.detail).toContain('上岗资质');
     const got = await api.ok('get', `/api/qualifications/${q.id}`);
     expect([got.is_active, got.valid, got.expires_at]).toEqual([false, false, null]);
@@ -119,7 +119,7 @@ describe('评审改进：生产（资质 / 返工换件 / 分批放行）', () =
     bwo = await api.as('pmc').ok('post', `/api/work-orders/${bwo.id}/release`);
     r = await api.as('manager').post(`/api/work-orders/${bwo.id}/report-batch`, { seq: 10, good_qty: 5 });
     expect(r.body.detail).toContain('工序【SMT SMT贴片+回流焊】的上岗资质');
-    await api.as('qa').ok('put', `/api/qualifications/${q.id}`, { is_active: true, op_code: '*' });
+    await api.as('qa').ok('put', `/api/qualifications/${q.id}`, { is_active: true, op_code: '*', signature: SIG });
     await api.as('manager').ok('post', `/api/work-orders/${bwo.id}/report-batch`, { seq: 10, good_qty: 5 });
 
     // 删除（审计追踪保留）

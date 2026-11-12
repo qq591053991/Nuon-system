@@ -10,7 +10,7 @@ import { BizError, NotFound } from '../common/errors';
 import { EPS, g, round } from '../common/num';
 import type { Tx } from '../common/prisma.service';
 import { config } from '../config';
-import { releasedBom, releasedRouting } from '../core/engineering';
+import { activateDueBoms, releasedBom, releasedRouting } from '../core/engineering';
 import { EsignService, type SignatureDto } from '../core/esign.service';
 import { InventoryService, STATUS_TEXT as STOCK_STATUS_TEXT, type Ref } from '../core/inventory.service';
 import { NumberingService } from '../core/numbering.service';
@@ -24,8 +24,71 @@ export const OP_TYPE_TEXT: Record<string, string> = {
 };
 
 /** 工序测试规格（工单下达时从工艺路线快照到 params_json） */
-export interface OpParam { code: string; name: string; unit: string | null; lower: number | null; upper: number | null; target: number | null }
+export interface OpParam {
+  code: string; name: string; unit: string | null; lower: number | null; upper: number | null; target: number | null;
+  /** NUMBER = 数值；OKNG = 合格判定（值 1 = OK，0 = NG） */
+  param_type?: string | null;
+  /** 小数位数（录入限制） */
+  decimals?: number | null;
+  /** 合理输入范围：超出视为录入错误（拦截，不判不合格） */
+  min_valid?: number | null;
+  max_valid?: number | null;
+}
 export interface JudgedValue extends OpParam { value: number; result: 'PASS' | 'FAIL' }
+
+/** OK/NG 判定型测试项在测试数据中的单位标记（值 1 = OK，0 = NG） */
+export const OKNG_UNIT = 'OK/NG';
+
+export const EQUIPMENT_TYPE_TEXT: Record<string, string> = { PRODUCTION: '生产设备', TEST: '检测仪器', AGING: '老化设备' };
+/** 设备未设置“适用工序”时按设备类型推断（检测仪器只能用于测试/检验工序，老化设备只能用于老化工序） */
+const EQUIPMENT_TYPE_OPS: Record<string, string[]> = { TEST: ['TEST_OPTICAL', 'TEST_SAFETY', 'INSPECTION'], AGING: ['AGING'] };
+
+/**
+ * 设备能否用于该工序（F08）：设备台账设置了“适用工序类型”时按其判断；未设置时按设备类型推断，
+ * 且设备与工序都指定了工作中心时须一致。可用返回 null，否则返回中文原因。
+ */
+export function equipmentMismatch(
+  eq: { code: string; name: string; equipment_type: string; op_types?: string | null; work_center_id?: number | null },
+  op: { name: string; op_type: string; work_center_id?: number | null },
+): string | null {
+  const typeText = OP_TYPE_TEXT[op.op_type] ?? op.op_type;
+  const opText = op.name === typeText ? `【${op.name}】` : `【${op.name}】（${typeText}）`;
+  const list = (eq.op_types || '').split(',').map((x) => x.trim()).filter(Boolean);
+  if (list.length) {
+    return list.includes(op.op_type) ? null : `设备 ${eq.code} ${eq.name} 适用于【${list.map((t) => OP_TYPE_TEXT[t] ?? t).join('、')}】工序，不能用于${opText}`;
+  }
+  const allowed = EQUIPMENT_TYPE_OPS[eq.equipment_type];
+  if (allowed && !allowed.includes(op.op_type)) return `设备 ${eq.code} ${eq.name} 是${EQUIPMENT_TYPE_TEXT[eq.equipment_type] ?? eq.equipment_type}，不能用于${opText}`;
+  if (eq.work_center_id && op.work_center_id && eq.work_center_id !== op.work_center_id) {
+    return `设备 ${eq.code} ${eq.name} 属于其他工作中心，不能用于${opText}；如确需共用，请由设备管理员在设备台账中设置“适用工序”`;
+  }
+  return null;
+}
+
+/** 不良现象代码（工位判不合格时点选，按工序类型） */
+export const DEFECT_CODES: Record<string, { code: string; name: string }[]> = {
+  SMT: [{ code: 'SMT-SOLDER', name: '虚焊/连锡' }, { code: 'SMT-MISSING', name: '缺件/错件' }, { code: 'SMT-SHIFT', name: '偏移/立碑' }],
+  ASSEMBLY: [
+    { code: 'ASM-SCRATCH', name: '外观划伤/脏污' }, { code: 'ASM-GAP', name: '装配缝隙/松动' }, { code: 'ASM-SCREW', name: '螺丝缺失/滑牙' },
+    { code: 'ASM-CABLE', name: '线材压伤/接插不良' }, { code: 'ASM-KEY', name: '按键失灵' }, { code: 'ASM-POWER', name: '不开机/无显示' },
+  ],
+  TEST_OPTICAL: [
+    { code: 'OPT-WL', name: '波长超差' }, { code: 'OPT-IRR-LOW', name: '辐照度偏低' }, { code: 'OPT-IRR-HIGH', name: '辐照度偏高' },
+    { code: 'OPT-LED', name: '灯珠不亮/闪烁' }, { code: 'OPT-UNIFORM', name: '均匀度不良' },
+  ],
+  AGING: [{ code: 'AGE-CRASH', name: '老化中死机/重启' }, { code: 'AGE-DROP', name: '光衰超差' }, { code: 'AGE-TEMP', name: '温升异常' }, { code: 'AGE-LED', name: '灯珠失效' }],
+  TEST_SAFETY: [{ code: 'SAFE-HIPOT', name: '耐压击穿/漏电超标' }, { code: 'SAFE-EARTH', name: '接地电阻超标' }, { code: 'SAFE-INSUL', name: '绝缘不良' }],
+  INSPECTION: [
+    { code: 'FQC-SCRATCH', name: '外观划伤/脏污' }, { code: 'FQC-LABEL', name: '标签错误/缺失' }, { code: 'FQC-FUNC', name: '功能异常' },
+    { code: 'FQC-ACC', name: '配件缺失' }, { code: 'FQC-DOC', name: '说明书/铭牌不符' },
+  ],
+  PACKING: [{ code: 'PACK-DAMAGE', name: '包装破损' }, { code: 'PACK-ACC', name: '配件缺失' }, { code: 'PACK-LABEL', name: '标签错误' }],
+};
+const DEFECT_OTHER = { code: 'OTHER', name: '其他（请说明）' };
+export const defectCodes = (opType: string | null | undefined) => [...(DEFECT_CODES[opType || ''] ?? []), DEFECT_OTHER];
+
+/** QA 返工处置意见要求更换零件（此时重测前必须先登记返工换件） */
+export const REWORK_PARTS_RE = /更换|换件|换新|替换|换上|换掉|换一/;
 export type WoOp = WorkOrderOperation & { work_center?: { name: string } | null };
 
 export interface KeyPartInput { lot_no?: string | null; part_sn?: string | null }
@@ -33,6 +96,8 @@ export interface ReportSerialArgs {
   sn: string;
   seq?: number | null;
   result?: string | null;
+  /** 判不合格时点选的不良现象代码（见 DEFECT_CODES） */
+  defect_code?: string | null;
   values?: Record<string, number | null | undefined> | null;
   equipment_id?: number | null;
   remark?: string | null;
@@ -87,12 +152,38 @@ export function opDict(op: WoOp | null | undefined) {
   };
 }
 
-/** 测试数据自动判定：逐项与上下限比较 */
+/** 数字的小数位数（按十进制文本） */
+const decimalsOf = (v: number) => {
+  const s = String(v);
+  if (/e-/i.test(s)) return Number(s.split(/e-/i)[1]) + ((s.split(/e/i)[0].split('.')[1] || '').length);
+  return (s.split('.')[1] || '').length;
+};
+
+/** 合理范围文本 */
+export const validRangeText = (p: { min_valid?: number | null; max_valid?: number | null; unit?: string | null }) =>
+  `${p.min_valid ?? '不限'} ~ ${p.max_valid ?? '不限'}${p.unit ? ` ${p.unit}` : ''}`;
+
+/**
+ * 测试数据自动判定：逐项与上下限比较。
+ * - OK/NG 型：1 = OK（合格），0 = NG（不合格）；
+ * - 超出合理范围 / 小数位过多 = 录入错误，直接拦截（不是不合格判定），防止拼接/错位的数值写进 DHR（C-F01）。
+ */
 export function judge(params: OpParam[], values: Record<string, number | null | undefined>): JudgedValue[] {
   return params.map((p) => {
     const raw = values[p.code];
     const v = raw === null || raw === undefined || (raw as unknown) === '' ? null : Number(raw);
-    if (v === null || Number.isNaN(v)) throw new BizError(`请录入测试项【${p.name}】的测量值`);
+    const okng = p.param_type === 'OKNG';
+    if (v === null || Number.isNaN(v)) throw new BizError(okng ? `请判定测试项【${p.name}】（OK / NG）` : `请录入测试项【${p.name}】的测量值`);
+    if (okng) {
+      if (v !== 0 && v !== 1) throw new BizError(`测试项【${p.name}】只能判定 OK 或 NG`);
+      return { ...p, unit: OKNG_UNIT, lower: null, upper: null, target: null, value: v, result: v === 1 ? 'PASS' : 'FAIL' };
+    }
+    if ((p.min_valid !== null && p.min_valid !== undefined && v < p.min_valid - EPS) || (p.max_valid !== null && p.max_valid !== undefined && v > p.max_valid + EPS)) {
+      throw new BizError(`录入错误：【${p.name}】${g(v)}${p.unit || ''} 超出合理范围（${validRangeText(p)}），请复测后重新录入（不是不合格判定）`);
+    }
+    if (p.decimals !== null && p.decimals !== undefined && decimalsOf(v) > p.decimals) {
+      throw new BizError(`录入错误：【${p.name}】最多 ${p.decimals} 位小数，实际录入 ${g(v)}，请核对后重新录入`);
+    }
     const ok = (p.lower === null || p.lower === undefined || v >= p.lower - EPS) && (p.upper === null || p.upper === undefined || v <= p.upper + EPS);
     return { ...p, value: v, result: ok ? 'PASS' : 'FAIL' };
   });
@@ -109,6 +200,8 @@ export function specText(p: { lower?: number | null; upper?: number | null; unit
 }
 
 const ACTIVE = ['RELEASED', 'IN_PROGRESS'];
+const SN_STATUS_TEXT: Record<string, string> = { COMPLETED: '完工待入库', IN_STOCK: '在库', SHIPPED: '已发货', RETURNED: '客户退回' };
+const WO_STATUS_TEXT: Record<string, string> = { PLANNED: '计划', COMPLETED: '已完工', CLOSED: '已关闭', CANCELLED: '已取消' };
 
 @Injectable()
 export class ProductionService {
@@ -142,6 +235,8 @@ export class ProductionService {
     const wo = await this.getWo(tx, woId, true);
     if (wo.status !== 'PLANNED') throw new BizError('只有“计划”状态的工单才能下达');
     const product = wo.material;
+    // 生效日期已到的新版 BOM 先转为已发布（D#18）
+    await activateDueBoms(tx, product.id);
     const bom = wo.bom_id
       ? await tx.bom.findUnique({ where: { id: wo.bom_id }, include: { lines: { include: { component: true }, orderBy: { line_no: 'asc' } } } })
       : await releasedBom(tx, product.id);
@@ -168,7 +263,10 @@ export class ProductionService {
     // 2) 工序快照（含测试规格）
     await tx.workOrderOperation.deleteMany({ where: { wo_id: wo.id } });
     for (const op of routing.operations) {
-      const params: OpParam[] = op.params.map((p) => ({ code: p.code, name: p.name, unit: p.unit, lower: p.lower, upper: p.upper, target: p.target }));
+      const params: OpParam[] = op.params.map((p) => ({
+        code: p.code, name: p.name, unit: p.unit, lower: p.lower, upper: p.upper, target: p.target,
+        param_type: p.param_type || 'NUMBER', decimals: p.decimals ?? null, min_valid: p.min_valid ?? null, max_valid: p.max_valid ?? null,
+      }));
       await tx.workOrderOperation.create({
         data: {
           wo_id: wo.id, seq: op.seq, code: op.code, name: op.name, op_type: op.op_type, work_center_id: op.work_center_id,
@@ -217,7 +315,18 @@ export class ProductionService {
     if (eq.calibration_required && (!eq.next_calibration_date || eq.next_calibration_date.getTime() < today().getTime())) {
       throw new BizError(`设备 ${eq.code} ${eq.name} 校准已过期（有效期至 ${fmtDate(eq.next_calibration_date) ?? '-'}），禁止使用，请联系计量管理员`);
     }
+    const bad = equipmentMismatch(eq, op);
+    if (bad) throw new BizError(`${bad}，请选择适用于本工序的设备`);
     return eq;
+  }
+
+  /** 设备在工位上能否选用：不可用时返回原因（状态 / 校准过期 / 不适用本工序） */
+  equipmentIssue(eq: Equipment, op?: { name: string; op_type: string; work_center_id?: number | null } | null): string | null {
+    if (eq.status !== 'NORMAL') return `状态为【${eq.status === 'MAINTENANCE' ? '维修中' : eq.status === 'DISABLED' ? '停用' : eq.status}】`;
+    if (eq.calibration_required && (!eq.next_calibration_date || eq.next_calibration_date.getTime() < today().getTime())) {
+      return `校准已过期（有效期至 ${fmtDate(eq.next_calibration_date) ?? '未校准'}）`;
+    }
+    return op ? equipmentMismatch(eq, op) : null;
   }
 
   /**
@@ -238,7 +347,7 @@ export class ProductionService {
   }
 
   /** 已领用（过账）到工单、且未全部退回的某物料批次 */
-  private async issuedLots(tx: Tx, woId: number, materialId: number): Promise<Set<string>> {
+  async issuedLots(tx: Tx, woId: number, materialId: number): Promise<Set<string>> {
     const rows = await tx.materialIssueLine.findMany({
       where: { material_id: materialId, issue: { wo_id: woId, status: 'CONFIRMED' } },
       select: { lot_no: true, qty: true, issue: { select: { issue_type: true } } },
@@ -283,9 +392,28 @@ export class ProductionService {
       throw new BizError(`防呆拦截：${sn.sn} 的下一道工序是【${op.seq} ${op.name}】，当前工位【${cur ? cur.name : a.seq}】不能报工（禁止跳站/重复过站）`);
     }
     await this.checkQualification(tx, user, op);
+    // 返工重测：QA 处置意见要求换件时，必须先登记返工换件（拆下/装上），保证单台追溯完整（F17）
+    if (this.underRework(sn) && sn.ng_seq === op.seq) {
+      const rn = await this.reworkNcr(tx, sn);
+      if (rn && REWORK_PARTS_RE.test(rn.disposition_remark || '')) {
+        const n = await tx.keyPartBinding.count({ where: { sn_id: sn.id, ncr_id: rn.id, action: { in: ['REMOVE', 'INSTALL'] } } });
+        if (!n) {
+          throw new BizError(`QA 处置意见要求更换零件（“${rn.disposition_remark}”），请先在【返工换件】中登记拆下/装上的零件，再重新测试（${rn.no}）`);
+        }
+      }
+    }
+    // 判不合格：点选不良现象或填写原因（F16）
+    const defect = a.defect_code ? defectCodes(op.op_type).find((d) => d.code === a.defect_code) : null;
+    if (a.defect_code && !defect) throw new BizError(`不良现象代码 ${a.defect_code} 不适用于工序【${op.name}】`);
+    if (a.result === 'FAIL' && !defect && !a.remark?.trim()) throw new BizError('判不合格请选择不良现象或填写原因');
+    if (defect?.code === 'OTHER' && !a.remark?.trim()) throw new BizError('选择“其他”时请说明不良现象');
+    const remark = [defect && defect.code !== 'OTHER' ? `【${defect.name}】` : null, a.remark?.trim() || null].filter(Boolean).join(' ').slice(0, 256) || null;
     const eq = await this.checkEquipment(tx, op, a.equipment_id);
     const params = opParams(op);
-    const judged = params.length ? judge(params, a.values || {}) : [];
+    const vals = a.values || {};
+    // 人工判不合格（如灯珠不亮无法测量）时只记录已测的项
+    const toJudge = a.result === 'FAIL' ? params.filter((p) => vals[p.code] !== null && vals[p.code] !== undefined && (vals[p.code] as unknown) !== '') : params;
+    const judged = toJudge.length ? judge(toJudge, vals) : [];
     const final = a.result === 'FAIL' || judged.some((j) => j.result === 'FAIL') ? 'FAIL' : 'PASS';
 
     // 关键件绑定校验
@@ -307,7 +435,7 @@ export class ProductionService {
       data: {
         ts: new Date(), wo_id: wo.id, sn_id: sn.id, seq: op.seq, op_code: op.code, op_name: op.name, result: final, qty: 1,
         operator: user.username, operator_name: user.full_name, equipment_id: eq?.id ?? null, is_rework: sn.ng_seq === op.seq,
-        remark: a.remark ?? null,
+        remark,
         values: {
           create: judged.map((j) => ({ code: j.code, name: j.name, unit: j.unit ?? null, value: j.value, lower: j.lower ?? null, upper: j.upper ?? null, result: j.result })),
         },
@@ -332,8 +460,10 @@ export class ProductionService {
     } else {
       opUpd.ng_qty = (op.ng_qty || 0) + 1;
       Object.assign(snUpd, { status: 'NG', ng_seq: op.seq });
-      const fails = judged.filter((j) => j.result === 'FAIL').map((j) => `${j.name}=${g(j.value)}${j.unit || ''}(规格 ${specText(j)})`);
-      const desc = `工序【${op.seq} ${op.name}】判定不合格。` + fails.join('；') + (a.remark ? ` 备注：${a.remark}` : '');
+      const fails = judged
+        .filter((j) => j.result === 'FAIL')
+        .map((j) => (j.unit === OKNG_UNIT ? `${j.name}=NG` : `${j.name}=${g(j.value)}${j.unit || ''}(规格 ${specText(j)})`));
+      const desc = `工序【${op.seq} ${op.name}】判定不合格。` + fails.join('；') + (remark ? ` 不良现象/备注：${remark}` : '');
       ncrNo = await this.numbering.nextNo(tx, 'NCR');
       await tx.ncr.create({
         data: {
@@ -412,7 +542,12 @@ export class ProductionService {
   }
 
   // ---------------- 工位扫码 ----------------
-  async scanSerial(tx: Tx, snText: string) {
+  /**
+   * 工位扫码：产品、工单、工序进度、下一道工序及测试规格、生产履历。
+   * stationOp = 本工位锁定的工序编码时，附带 station 判定（F04）：能否在本工位作业；不能时说明原因、
+   * 已由谁何时在本工位测过、应送往哪道工序（工位直接整块红色提示，不显示录入表）。
+   */
+  async scanSerial(tx: Tx, snText: string, stationOp?: string | null) {
     const sn = await this.getSn(tx, snText);
     const wo = await tx.workOrder.findUniqueOrThrow({ where: { id: sn.wo_id }, include: { material: true, customer: true } });
     const ops = await this.woOps(tx, wo.id);
@@ -424,30 +559,117 @@ export class ProductionService {
     const kpm = nxt?.key_part_material_id ? await tx.material.findUnique({ where: { id: nxt.key_part_material_id } }) : null;
     const reworkNcr = this.underRework(sn) ? await this.reworkNcr(tx, sn) : null;
     const reworkOp = reworkNcr ? ops.find((o) => o.seq === sn.ng_seq) : null;
+    const keyParts = await keyPartRows(tx, { sn_id: sn.id });
+    // 作业指导附件（挂在工艺路线工序上，按工序编码对应）
+    const rop = nxt && wo.routing_id ? await tx.routingOperation.findFirst({ where: { routing_id: wo.routing_id, code: nxt.code } }) : null;
+    const attachments = rop
+      ? (await tx.attachment.findMany({ where: { entity: 'eng_routing_op', entity_id: rop.id }, orderBy: { id: 'asc' } }))
+          .map((a) => ({ id: a.id, filename: a.filename, content_type: a.content_type, size: a.size }))
+      : [];
     const p = wo.material;
     return {
       sn: sn.sn, udi: sn.udi, status: sn.status, lot_no: sn.lot_no, last_seq: sn.last_seq,
-      wo: { id: wo.id, no: wo.no, status: wo.status, planned_qty: wo.planned_qty, completed_qty: wo.completed_qty, customer_name: wo.customer?.name ?? null },
+      wo: {
+        id: wo.id, no: wo.no, status: wo.status, planned_qty: wo.planned_qty, completed_qty: wo.completed_qty, customer_name: wo.customer?.name ?? null,
+        routing_id: wo.routing_id,
+      },
       product: { id: p.id, code: p.code, name: p.name, model: p.model, spec: p.spec },
       operations: ops.map((o) => ({ seq: o.seq, code: o.code, name: o.name, op_type: o.op_type, done: o.seq <= (sn.last_seq || 0) })),
-      next_operation: opDict(nxt),
+      next_operation: nxt ? { ...opDict(nxt)!, attachments } : null,
       key_part_material: kpm ? { id: kpm.id, code: kpm.code, name: kpm.name } : null,
       open_ncr: openNcr?.no ?? null,
+      /** 判不合格时可点选的不良现象（按下一道工序类型） */
+      defect_codes: defectCodes(nxt?.op_type),
+      /** 本工位判定（传入 op 时） */
+      station: stationOp ? this.stationCheck(sn, wo, ops, nxt, recs, openNcr?.no ?? null, stationOp) : null,
       /** 返工中（NCR 处置为返工、尚未重新测试通过）：可登记返工换件 */
       rework: reworkNcr
         ? {
             ncr_id: reworkNcr.id, ncr_no: reworkNcr.no, ng_seq: sn.ng_seq, op_name: reworkOp?.name ?? reworkNcr.op_name,
             description: reworkNcr.description, disposition_remark: reworkNcr.disposition_remark,
+            /** QA 意见要求换件：重测前必须先登记 */
+            require_parts: REWORK_PARTS_RE.test(reworkNcr.disposition_remark || ''),
+            /** 本次返工已登记的换件条数 */
+            registered: keyParts.filter((k) => k.ncr_id === reworkNcr.id && k.action !== 'BIND').length,
+            /** 拆下件候选：本机已绑定的关键件 + 工单 BOM 用料（含已领批次），供工位一键选择 */
+            candidates: await this.reworkCandidates(tx, wo.id, keyParts),
           }
         : null,
       /** 关键件绑定与返工换件记录（BIND/REMOVE/INSTALL） */
-      key_parts: await keyPartRows(tx, { sn_id: sn.id }),
+      key_parts: keyParts,
       history: recs.map((r) => ({
         ts: r.ts, seq: r.seq, op_name: r.op_name, result: r.result, operator_name: r.operator_name,
-        equipment_code: r.equipment?.code ?? null, is_rework: r.is_rework,
+        equipment_code: r.equipment?.code ?? null, is_rework: r.is_rework, remark: r.remark,
         values: r.values.map((v) => ({ name: v.name, value: v.value, unit: v.unit, result: v.result })),
       })),
     };
+  }
+
+  /** 本工位能否对该序列号作业；不能时给出整块提示的标题与说明 */
+  private stationCheck(
+    sn: SerialNumber, wo: WorkOrder, ops: WoOp[], nxt: WoOp | null,
+    recs: { ts: Date; seq: number; result: string; operator_name: string | null }[], openNcr: string | null, stationOp: string,
+  ) {
+    const code = stationOp.trim().toUpperCase();
+    const target = ops.find((o) => o.code.toUpperCase() === code) ?? null;
+    const at = (d: Date) => new Intl.DateTimeFormat('zh-CN', {
+      timeZone: config.timezone, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
+    }).format(d).replace(/\//g, '-');
+    const last = (seq: number) => [...recs].reverse().find((r) => r.seq === seq) ?? null;
+    const tested = target ? last(target.seq) : null;
+    const testedText = tested
+      ? `该序列号已于 ${at(tested.ts)} 由 ${tested.operator_name ?? '-'} 在【${target!.seq} ${target!.name}】测过（${tested.result === 'PASS' ? '合格' : '不合格'}）`
+      : null;
+    const sendTo = nxt ? { seq: nxt.seq, code: nxt.code, name: nxt.name } : null;
+    const out = (kind: string, title: string, message: string) => ({
+      ok: false, kind, title, message, op_code: code, op_name: target?.name ?? null, send_to: sendTo,
+      tested: tested ? { ts: tested.ts, operator_name: tested.operator_name, result: tested.result, seq: tested.seq } : null,
+    });
+    if (sn.status === 'SCRAPPED') return out('SCRAPPED', '该产品已报废', '已报废的产品禁止继续生产，请放入报废品区');
+    if (sn.status === 'NG') return out('NG', '该产品不合格，待 QA 处置', `存在未处置的不合格报告 ${openNcr ?? ''}，请贴不良标识放入不良品区，等待 QA 评审处置（返工/报废）`);
+    if (['COMPLETED', 'IN_STOCK', 'SHIPPED'].includes(sn.status)) {
+      return out('DONE', '该产品已完成全部工序', `${testedText ? `${testedText}；` : ''}当前状态：${SN_STATUS_TEXT[sn.status] ?? sn.status}，无需再测`);
+    }
+    if (!ACTIVE.includes(wo.status)) return out('WO', `工单 ${wo.no} 不能报工`, `工单当前为【${WO_STATUS_TEXT[wo.status] ?? wo.status}】，请联系计划员`);
+    if (!target) {
+      return out('NOT_IN_ROUTING', '该产品不经过本工位', `产品工艺路线中没有本工位工序【${code}】${sendTo ? `，应送往【${sendTo.seq} ${sendTo.name}】工序` : ''}`);
+    }
+    if (!nxt) return out('DONE', '该产品没有待执行的工序', testedText ?? '请核对序列号');
+    if (nxt.seq === target.seq) return { ok: true, kind: 'OK', title: '', message: '', op_code: code, op_name: target.name, send_to: sendTo, tested: null };
+    if (nxt.seq > target.seq) {
+      return out('PASSED', '该序列号已过本工位', `${testedText ?? `该产品已通过【${target.seq} ${target.name}】`}，应送往【${nxt.seq} ${nxt.name}】工序`);
+    }
+    return out('EARLY', '工序未到，禁止跳站', `该产品尚未完成【${nxt.seq} ${nxt.name}】，应先送往【${nxt.seq} ${nxt.name}】工序`);
+  }
+
+  /** 返工拆下件候选：本机已绑定的关键件（带批号/部件序列号）+ 工单 BOM 用料（带已领批次） */
+  private async reworkCandidates(tx: Tx, woId: number, keyParts: { action: string; material_id: number; material_code: string | null; material_name: string | null; lot_no: string | null; part_sn: string | null }[]) {
+    const out: { material_id: number; code: string; name: string; source: 'BIND' | 'BOM'; lot_no: string | null; part_sn: string | null; lots: string[] }[] = [];
+    for (const k of keyParts.filter((x) => x.action === 'BIND' || x.action === 'INSTALL')) {
+      out.push({ material_id: k.material_id, code: k.material_code ?? '', name: k.material_name ?? '', source: 'BIND', lot_no: k.lot_no, part_sn: k.part_sn, lots: k.lot_no ? [k.lot_no] : [] });
+    }
+    const mats = await tx.workOrderMaterial.findMany({ where: { wo_id: woId }, orderBy: { id: 'asc' }, include: { material: true } });
+    for (const m of mats) {
+      if (out.some((o) => o.material_id === m.material_id)) continue;
+      const lots = [...(await this.issuedLots(tx, woId, m.material_id))].sort();
+      out.push({ material_id: m.material_id, code: m.material.code, name: m.material.name, source: 'BOM', lot_no: lots.length === 1 ? lots[0] : null, part_sn: null, lots });
+    }
+    return out;
+  }
+
+  /** 关键件扫码即时校验（F15）：批号须是本工单已领用的批次 */
+  async checkKeyPart(tx: Tx, snText: string, lotNo: string) {
+    const sn = await this.getSn(tx, snText);
+    const wo = await tx.workOrder.findUniqueOrThrow({ where: { id: sn.wo_id } });
+    const op = nextOperation(await this.woOps(tx, wo.id), sn);
+    if (!op?.key_part_material_id) return { ok: true, message: null };
+    const lot = (lotNo || '').trim();
+    if (!lot) return { ok: false, message: '请扫描关键件批号' };
+    const lots = await this.issuedLots(tx, wo.id, op.key_part_material_id);
+    if (lots.size && !lots.has(lot)) {
+      return { ok: false, message: `关键件批号 ${lot} 未领用到工单 ${wo.no}（已领批次：${[...lots].sort().join(', ')}），请核对后重扫` };
+    }
+    return { ok: true, message: null };
   }
 
   // ---------------- 返工换件 ----------------

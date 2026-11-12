@@ -1,6 +1,6 @@
 /** 库存核心服务：所有库存变动必须经过这里，余额与流水在同一事务内更新。 */
 import { Injectable } from '@nestjs/common';
-import type { Stock } from '@prisma/client';
+import type { Location, Stock, Warehouse } from '@prisma/client';
 import { als } from '../common/context';
 import { fmtDate, today } from '../common/dates';
 import { BizError } from '../common/errors';
@@ -31,6 +31,19 @@ export interface AddStockArgs extends Key {
 }
 
 export interface RemoveStockArgs extends Key { qty: number; move_type: string; ref: Ref; log?: boolean }
+
+/** 湿敏等级 MSL 2a 及以上（2a、3、4、5、5a、6）需存放防潮柜；MSL 1（不限）与 MSL 2（车间寿命 1 年）可放普通库位（J-STD-033） */
+export const needsDryStorage = (msl?: string | null): boolean => {
+  const s = String(msl ?? '').trim().toUpperCase().replace(/^MSL\s*/, '');
+  return !!s && !['0', '1', '2'].includes(s);
+};
+
+/** 库位放置检查结果：errors = 后端必须拒绝；warnings = 需要操作人确认 */
+export interface PlacementCheck {
+  errors: string[];
+  warnings: string[];
+  location: (Location & { warehouse: Warehouse | null }) | null;
+}
 
 @Injectable()
 export class InventoryService {
@@ -208,6 +221,46 @@ export class InventoryService {
       remain = round(remain - take);
     }
     return { alloc, short: Math.max(remain, 0) };
+  }
+
+  /**
+   * 库位放置规则（收货、调拨/上架、退料、盘盈新增行共用）：
+   *   - 自有物料（无货主）不能放入客供料仓；客供料不能放入自有的原材料仓/成品仓（线边仓、不合格品仓两者都可）——错误，后端拒绝；
+   *   - MSL ≥ 2 的湿敏物料放入非防潮柜库位（线边、不合格品区除外）——警告，需操作人确认。
+   * owner_customer_id 未传时按物料主数据的货主判断。
+   */
+  async checkPlacement(tx: Tx, a: { material_id: number; location_id: number; owner_customer_id?: number | null }): Promise<PlacementCheck> {
+    const errors: string[] = [];
+    const warnings: string[] = [];
+    const loc = await tx.location.findUnique({ where: { id: a.location_id }, include: { warehouse: true } });
+    const m = await tx.material.findUnique({ where: { id: a.material_id }, include: { owner_customer: true } });
+    if (!m) return { errors: ['物料不存在'], warnings, location: loc };
+    if (!loc || !loc.is_active) return { errors: ['库位不存在或已停用，请重扫库位'], warnings, location: loc };
+    const owner = a.owner_customer_id === undefined ? m.owner_customer_id : a.owner_customer_id;
+    const wtype = loc.warehouse?.warehouse_type ?? 'RAW';
+    const whName = loc.warehouse?.name ?? '';
+    const firstLoc = async (where: any) =>
+      (await tx.location.findFirst({ where: { is_active: true, ...where }, orderBy: { code: 'asc' } }))?.code ?? null;
+    if (!owner && wtype === 'CUSTOMER') {
+      const alt = needsDryStorage(m.msl_level)
+        ? await firstLoc({ location_type: 'DRY_CABINET', warehouse: { warehouse_type: 'RAW' } })
+        : await firstLoc({ warehouse: { warehouse_type: m.category === 'FINISHED' ? 'FG' : 'RAW' } });
+      errors.push(`${m.code} 是公司自有物料，不能放入客供料仓库位 ${loc.code}（${whName}）。请改放自有仓库位${alt ? `，如 ${alt}` : ''}`);
+    } else if (owner && (wtype === 'RAW' || wtype === 'FG')) {
+      const cust = m.owner_customer_id === owner ? m.owner_customer?.name : (await tx.customer.findUnique({ where: { id: owner } }))?.name;
+      const alt = await firstLoc({ warehouse: { warehouse_type: 'CUSTOMER' } });
+      errors.push(`${m.code} 是客供料（货主：${cust ?? owner}），不能放入自有仓库位 ${loc.code}（${whName}）。请放客供料仓库位${alt ? `，如 ${alt}` : ''}`);
+    }
+    if (needsDryStorage(m.msl_level) && loc.location_type !== 'DRY_CABINET' && wtype !== 'WIP' && wtype !== 'REJECT') {
+      const dry = await firstLoc({ location_type: 'DRY_CABINET' });
+      warnings.push(`${m.code} 是湿敏物料（MSL ${m.msl_level}），${loc.code} 不是防潮柜，放普通库位会消耗车间寿命。建议放防潮柜${dry ? ` ${dry}` : ''}`);
+    }
+    return { errors, warnings, location: loc };
+  }
+
+  /** 读取并锁定某库存键的当前账面数量（无库存行 = 0），用于盘点过账按“实盘 − 当前账面”调整 */
+  async lockedQty(tx: Tx, k: Key): Promise<number> {
+    return (await this.find(tx, k))?.qty ?? 0;
   }
 
   async onHand(tx: Tx, material_id: number, statuses = ['AVAILABLE', 'QUARANTINE']): Promise<number> {

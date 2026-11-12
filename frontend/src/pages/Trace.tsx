@@ -9,11 +9,12 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { get, type Rec } from '../api/http';
+import ExportButton, { type ExportColumn } from '../components/ExportButton';
 import PageHeader from '../components/PageHeader';
 import StatusTag from '../components/StatusTag';
 import { dictLabel } from '../utils/dict';
 import { fmtDate, fmtDateTime, fmtQty } from '../utils/format';
-import { CsTag, LotLink, MaterialCell, SnLink, exportCsv } from './wms/common';
+import { CsTag, LotLink, MaterialCell, SnLink } from './wms/common';
 
 const C = { ok: '#389e0d', bad: '#cf1322', warn: '#d46b08', muted: '#8c8c8c', brand: '#5b3cc4' };
 
@@ -108,7 +109,9 @@ function SerialResult({ d }: { d: Rec }) {
       render: (_, r) => <MaterialCell code={r.material_code} name={r.material_name} extra={r.customer_supplied ? <CsTag /> : undefined} />,
     },
     { title: '批号', dataIndex: 'lot_no', width: 120, render: (v, r) => <LotLink code={r.material_code} lot={v} /> },
-    { title: '用量', dataIndex: 'qty', width: 70, align: 'right', render: (v) => fmtQty(v) },
+    {
+      title: <Tooltip title="整张工单领用该批次的数量（不是单台用量）">工单领用量</Tooltip>, dataIndex: 'qty', width: 90, align: 'right', render: (v) => fmtQty(v),
+    },
     {
       title: '供应商 / 原厂批号', key: 'sup', width: 190,
       render: (_, r) => (
@@ -499,20 +502,29 @@ function LotResult({ d }: { d: Rec }) {
     { title: '序列号', dataIndex: 'sn', fixed: 'left', render: (v) => <SnLink sn={v} /> },
     { title: '工单', dataIndex: 'wo_no' },
     { title: '状态', dataIndex: 'status', render: (v) => <StatusTag dict="sn_status" value={v} /> },
+    { title: '库位', dataIndex: 'location_code', render: (v, r) => (r.shipment_no ? '-' : v ? <span className="mono">{v}</span> : '-') },
     {
       title: <Tooltip title="该台设备逐台扫描绑定了本批次关键件">关键件绑定</Tooltip>, dataIndex: 'key_part_bound', align: 'center',
       render: (v) => (v ? <Tag color="green" style={{ marginInlineEnd: 0 }}>已绑定</Tag> : <Typography.Text type="secondary">-</Typography.Text>),
     },
     { title: '发货单', dataIndex: 'shipment_no', render: (v) => (v ? <Link className="mono" to={`/wms/shipments?q=${encodeURIComponent(v)}`}>{v}</Link> : '-') },
-    { title: '客户', dataIndex: 'customer_name', render: (v) => (v ? <b>{v}</b> : <Typography.Text type="secondary">在厂</Typography.Text>) },
+    {
+      title: '客户 / 联系人', dataIndex: 'customer_name',
+      render: (v, r) => (v ? <div><b>{v}</b>{r.customer_contact && <div><Typography.Text type="secondary" style={{ fontSize: 12 }}>{r.customer_contact} {r.customer_phone ?? ''}</Typography.Text></div>}</div> : <Typography.Text type="secondary">在厂</Typography.Text>),
+    },
     { title: '发货日期', dataIndex: 'ship_date', render: (v) => fmtDate(v) },
   ];
 
-  const exportSerials = () => exportCsv(
-    `召回清单_${m.code}_${d.lot_no}.csv`,
-    ['序列号', '工单', '状态', '关键件绑定', '发货单', '客户', '发货日期'],
-    serials.map((s) => [s.sn, s.wo_no, dictLabel('sn_status', s.status), s.key_part_bound ? '是' : '', s.shipment_no, s.customer_name, s.ship_date]),
-  );
+  /** 召回清单（Excel）：已发货在前、在厂在后；含 UDI、生产批号、客户联系人 */
+  const recallRows = [...serials].sort((a, b) => Number(!a.shipment_no) - Number(!b.shipment_no) || String(a.customer_name ?? '').localeCompare(String(b.customer_name ?? '')) || a.sn.localeCompare(b.sn));
+  const recallColumns: ExportColumn[] = [
+    { title: '去向', value: (r) => (r.shipment_no ? '已发货' : '在厂') }, { title: '序列号', key: 'sn' }, { title: 'UDI（GS1）', key: 'udi', width: 48 },
+    { title: '产品编码', key: 'product_code' }, { title: '产品名称', key: 'product_name' }, { title: '生产批号', key: 'lot_no' }, { title: '工单', key: 'wo_no' },
+    { title: '状态', value: (r) => dictLabel('sn_status', r.status) }, { title: `含本批次（${m.code} ${d.lot_no}）关键件`, value: (r) => (r.key_part_bound ? '是' : '') },
+    { title: '在厂库位', key: 'location_code' }, { title: '发货单', key: 'shipment_no' }, { title: '发货日期', key: 'ship_date', type: 'date' }, { title: '运单号', key: 'tracking_no' },
+    { title: '客户', key: 'customer_name' }, { title: '国家/地区', key: 'customer_country' }, { title: '联系人', key: 'customer_contact' },
+    { title: '电话', key: 'customer_phone' }, { title: '邮箱', key: 'customer_email' }, { title: '地址', key: 'customer_address', width: 40 },
+  ];
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
@@ -526,7 +538,9 @@ function LotResult({ d }: { d: Rec }) {
             {m.spec && <div><Typography.Text type="secondary">{m.spec}</Typography.Text></div>}
           </div>
           <Space className="no-print">
-            <Button icon={<DownloadOutlined />} disabled={!serials.length} onClick={exportSerials}>导出召回清单</Button>
+            {serials.length > 0
+              ? <ExportButton rows={recallRows} columns={recallColumns} filename={`召回清单_${m.code}_${d.lot_no}`} title={`召回清单：${m.code} ${m.name} 批号 ${d.lot_no}（已发货 ${sum.shipped} 台 / 在厂 ${inFactory} 台）`} text="导出召回清单" />
+              : <Button icon={<DownloadOutlined />} disabled>导出召回清单</Button>}
             <Button icon={<PrinterOutlined />} onClick={() => window.print()}>打印</Button>
           </Space>
         </div>

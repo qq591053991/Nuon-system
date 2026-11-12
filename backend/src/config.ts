@@ -39,6 +39,10 @@ export const config = {
   },
   /** 仅测试环境：开放 POST /api/test/reset 用于重置数据库 */
   enableTestReset: process.env.ENABLE_TEST_RESET === '1',
+  /** 演示模式（登录页显示演示账号）：DEMO_MODE=1 开启、0 关闭；未设置时自动判断（仍有预置演示账号使用公开演示密码） */
+  get demoMode(): string {
+    return (process.env.DEMO_MODE || '').trim().toLowerCase();
+  },
   /** 本位币：报表/驾驶舱金额统一折算为该币别（汇率表 md_exchange_rate：1 外币 = rate 本位币） */
   baseCurrency: (process.env.BASE_CURRENCY || 'CNY').trim().toUpperCase(),
   /** 人员上岗资质：报工时校验操作员持有该工序（或 *）的有效资质（REQUIRE_QUALIFICATION=0 关闭） */

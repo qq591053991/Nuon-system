@@ -51,7 +51,10 @@ describe('仓储与质量', () => {
     // 不良 3 > Ac=1 → 判不合格，库存转不合格并自动开 NCR
     const detail = await api.ok('get', `/api/inspections/${insp.id}`);
     expect(detail.items.map((i: any) => i.name)).toContain('峰值波长抽测');
-    const items = detail.items.map((i: any) => ({ ...i, result: i.name === '峰值波长抽测' ? 'FAIL' : 'PASS' }));
+    // 逐项检验：定性项逐项确认；定量项（峰值波长 840~860nm，按物料规格）逐件录入实测值，超限自动判不合格
+    const items = detail.items.map((i: any) => (i.item_type === 'QUANT'
+      ? { id: i.id, name: i.name, sample_values: i.name === '峰值波长抽测' ? [850, 851, 866, 867, 868] : [] }
+      : { id: i.id, name: i.name, checked: true, result: 'PASS' }));
     const res = await api.as('qc').ok('post', `/api/inspections/${insp.id}/submit`, { defect_qty: 3, items, remark: '波长偏移', signature: SIG });
     expect(res.status).toBe('REJECTED');
     expect(res.inspector).toBe('孙质检');
@@ -65,12 +68,16 @@ describe('仓储与质量', () => {
     expect(ncr.description).toContain('峰值波长抽测');
     expect(ncr.description).toContain('波长偏移');
     await api.as('qa').ok('post', `/api/ncrs/${ncr.id}/disposition`, { disposition: 'RETURN', signature: SIG });
+    // 退货：生成退供应商单（库存仍为不合格隔离），仓管出库确认后才扣账
+    expect((await stockOf(api, 'NEW-850'))[0].status).toBe('REJECTED');
+    const sr = (await api.ok('get', '/api/supplier-returns', { q: 'NEW-850' })).items[0];
+    await api.as('wh').ok('post', `/api/supplier-returns/${sr.id}/ship`, {});
     expect(await stockOf(api, 'NEW-850')).toEqual([]);
     const moves = (await api.ok('get', '/api/stock-moves', { lot_no: 'NEW-850' })).items;
     expect(moves.map((m: any) => m.move_type).slice(0, 2)).toEqual(['RETURN_SUPPLIER', 'IQC_REJECT']);
-    await api.as('qa').ok('post', `/api/ncrs/${ncr.id}/close`);
+    await api.as('qa').ok('post', `/api/ncrs/${ncr.id}/close`, { signature: SIG });
     const sigs = (await api.ok('get', '/api/system/esignatures', { entity: 'qms_ncr' })).items;
-    expect(sigs[0].meaning).toBe('不合格品评审处置：退货');
+    expect(sigs.map((x: any) => x.meaning)).toEqual(expect.arrayContaining(['不合格品评审处置：退货', 'NCR关闭']));
   });
 
   test('IQC 合格与让步接收', async () => {
@@ -249,7 +256,7 @@ describe('仓储与质量', () => {
     const mats = await db.client.workOrderMaterial.findMany({ where: { wo_id: wo.id }, orderBy: { id: 'asc' } });
     expect(mats.map((m) => m.issued_qty)).toEqual([100, 10, 35]);
     expect((await api.as('wh').post(`/api/issues/${issue.id}/confirm`)).body.detail).toBe('领料单已过账或已取消');
-    expect((await api.as('wh').post(`/api/issues/${issue.id}/cancel`)).body.detail).toBe('只能取消未过账的领料单');
+    expect((await api.as('wh').post(`/api/issues/${issue.id}/cancel`)).body.detail).toBe('领料单已过账，不能作废；如需撤销请用“冲销”');
     r = await api.as('wh').post(`/api/work-orders/${wo.id}/issues`, {});
     expect(r.body.detail).toBe('没有可领用的合格库存（缺料：PSU-24V-5A）');
     const issueMoves = (await api.ok('get', '/api/stock-moves', { ref_no: issue.no })).items;
@@ -279,7 +286,7 @@ describe('仓储与质量', () => {
     const { api, db } = t;
     const ref = await api.ids();
     const inv = t.app.get(InventoryService);
-    const so = await api.ok('get', `/api/sales-orders/${(await api.find('/api/sales-orders', { q: 'LUM-PO-26-118' })).id}`);
+    const so = await api.as('sales').ok('get', `/api/sales-orders/${(await api.as('sales').find('/api/sales-orders', { q: 'LUM-PO-26-118' })).id}`);
     const sol = so.lines[0];
     const fg = ref.m['FG-RL300'];
     const wo = await db.client.workOrder.create({
@@ -334,13 +341,13 @@ describe('仓储与质量', () => {
       ['SHIPPED', sh.id, so.customer_id, null], ['SHIPPED', sh.id, so.customer_id, null], ['IN_STOCK', null, null, ref.loc['FG-01']],
     ]);
     expect((await stockOf(api, 'B-T-SH'))[0].qty).toBe(1);
-    const so2 = await api.ok('get', `/api/sales-orders/${so.id}`);
+    const so2 = await api.as('sales').ok('get', `/api/sales-orders/${so.id}`);
     expect([so2.status, so2.lines[0].shipped_qty]).toEqual(['PARTIAL_SHIPPED', 2]);
     const ar = (await api.ok('get', '/api/finance/docs', { doc_type: 'AR' })).items[0];
     expect([ar.amount, ar.ref_no, ar.customer_id, ar.currency, ar.partner_name]).toEqual([176, sh.no, so.customer_id, 'USD', 'Lumina Health Inc.']);
     expect(ar.due_date).toBe(addDays(today(), 60).toISOString().slice(0, 10));
     expect((await api.as('wh').post(`/api/shipments/${sh.id}/confirm`)).body.detail).toBe('发货单已过账或已取消');
-    expect((await api.as('wh').post(`/api/shipments/${sh.id}/cancel`)).body.detail).toBe('已发货不能取消');
+    expect((await api.as('wh').post(`/api/shipments/${sh.id}/cancel`)).body.detail).toBe('发货单已过账，不能作废；如需撤销请用“冲销”');
     expect((await api.ok('get', '/api/shipments', { so_id: so.id })).items).toHaveLength(1);
 
     // 已发货序列号不能再次发货；草稿可取消
@@ -382,7 +389,7 @@ describe('仓储与质量', () => {
     c = await api.as('qa').ok('post', `/api/capas/${capa.id}/status`, { status: 'CLOSED', effectiveness: '连续 3 批无复发', signature: SIG });
     expect([c.status, c.closed_by, c.effectiveness]).toEqual(['CLOSED', '赵QA', '连续 3 批无复发']);
     expect((await api.as('qa').put(`/api/capas/${capa.id}`, { title: 'x' })).body.detail).toBe('CAPA 已关闭');
-    const closed = await api.as('qa').ok('post', `/api/ncrs/${ncr.id}/close`, { capa_id: capa.id });
+    const closed = await api.as('qa').ok('post', `/api/ncrs/${ncr.id}/close`, { capa_id: capa.id, signature: SIG });
     expect([closed.status, closed.capa_id]).toEqual(['CLOSED', capa.id]);
     const sigs = (await api.ok('get', '/api/system/esignatures', { entity: 'qms_capa' })).items;
     expect(sigs.map((s: any) => [s.meaning, s.username])).toEqual([['CAPA关闭批准', 'qa']]);
@@ -391,7 +398,7 @@ describe('仓储与质量', () => {
 
   test('库存汇总', async () => {
     const { api } = t;
-    const rows = await api.ok('get', '/api/stock/summary');
+    const rows = await api.as('manager').ok('get', '/api/stock/summary'); // 库存金额仅 财务/采购/厂长 可见
     const led = rows.find((x: any) => x.material_code === 'LED-660-3030');
     expect([led.available, led.quarantine, led.safety_stock, led.below_safety, led.amount]).toEqual([3000, 0, 2000, false, 1050]);
     expect(rows.find((x: any) => x.material_code === 'PKG-RL300-BOX').customer_supplied).toBe(true);

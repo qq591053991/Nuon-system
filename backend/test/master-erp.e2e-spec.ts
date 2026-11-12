@@ -194,7 +194,7 @@ describe('ERP：销售、采购、MRP、财务', () => {
 
   test('MRP 运算与转单（test_mrp_and_convert）', async () => {
     const { api } = t;
-    const so = await api.find('/api/sales-orders', { q: 'LUM-PO-26-131' }); // 200 台草稿
+    const so = await api.as('sales').find('/api/sales-orders', { q: 'LUM-PO-26-131' }); // 200 台草稿
     await api.as('sales').ok('post', `/api/sales-orders/${so.id}/confirm`);
     const run = await api.as('pmc').ok('post', '/api/mrp/run');
     const by: Record<string, any> = {};
@@ -235,20 +235,20 @@ describe('ERP：销售、采购、MRP、财务', () => {
     expect(r.body.detail).toBe('LED-660-3030 不是成品/半成品，不能销售');
     r = await api.as('sales').post('/api/sales-orders', { customer_id: c2.id, lines: [] });
     expect(r.body.detail).toBe('请至少录入一行订单明细');
-    const so = await api.find('/api/sales-orders', { q: 'LUM-PO-26-118' }); // 已确认 20 台
+    const so = await api.as('sales').find('/api/sales-orders', { q: 'LUM-PO-26-118' }); // 已确认 20 台
     expect(so.customer_name).toBe('Lumina Health Inc.');
     expect((await api.as('sales').post(`/api/sales-orders/${so.id}/create-work-orders`)).status).toBe(403);
     const res = await api.as('pmc').ok('post', `/api/sales-orders/${so.id}/create-work-orders`);
     expect(res.work_orders).toHaveLength(1);
     expect(res.skipped).toEqual([]);
     expect((await api.as('pmc').ok('post', `/api/sales-orders/${so.id}/create-work-orders`)).work_orders).toEqual([]);
-    const d = await api.ok('get', `/api/sales-orders/${so.id}`);
+    const d = await api.as('sales').ok('get', `/api/sales-orders/${so.id}`);
     expect(d.status).toBe('IN_PRODUCTION');
     expect(d.work_orders).toHaveLength(1);
     expect([d.work_orders[0].planned_qty, d.work_orders[0].so_no, d.work_orders[0].source]).toEqual([20, so.no, so.no]);
     expect(d.shipments).toEqual([]);
-    expect((await api.as('sales').post(`/api/sales-orders/${so.id}/cancel`)).body.detail).toBe('订单已有生产工单，请先取消工单');
-    const list = await api.ok('get', '/api/sales-orders', { status: 'IN_PRODUCTION,DRAFT' });
+    expect((await api.as('sales').post(`/api/sales-orders/${so.id}/cancel`)).body.detail).toMatch(/^订单已有生产工单（WO\d+），请先取消工单；如只是改数量\/交期，请用【变更】$/);
+    const list = await api.as('sales').ok('get', '/api/sales-orders', { status: 'IN_PRODUCTION,DRAFT' });
     expect(list.items.map((x: any) => x.status).sort()).toEqual(['DRAFT', 'IN_PRODUCTION']);
   });
 
@@ -350,7 +350,7 @@ describe('数据导入', () => {
     r = await api.as('engineer').upload('/api/import/materials', 'm.csv', Buffer.from(csv));
     expect(r.status).toBe(200);
     expect(r.body.ok).toBe(false);
-    expect(r.body.errors).toEqual([{ row: 3, message: '无法识别的物料类别：未知类别' }]); // 有错误时整体回滚
+    expect(r.body.errors).toEqual([{ row: 3, message: '无法识别的物料类别：未知类别（可选：原材料、半成品、成品、包材、辅料；金蝶的 外购/委外/自制 也可识别）' }]); // 有错误时整体回滚；报错列出可选值（G2 E-25）
     expect(r.body.message).toBe('发现 1 行错误，已全部回滚，请修正后重新导入');
     expect((await api.find('/api/materials', { q: 'LED-630-2835' })).name).toBe('红光LED 630nm');
     const tpl = await api.as('engineer').get('/api/import/templates/boms');
@@ -397,8 +397,8 @@ describe('数据导入', () => {
     ]));
     expect(r.body.ok).toBe(false);
     expect(r.body.errors).toEqual([
-      { row: 2, message: '物料 LED-630-X 不存在' },
-      { row: 3, message: '库位 NOPE 不存在' },
+      { row: 2, message: '物料 LED-630-X 不存在（请先导入物料，或核对编码与物料主数据是否完全一致）' }, // G2 E-25：报错说明怎么改、列出可选库位
+      { row: 3, message: '库位 NOPE 不存在（现有库位：CS-01、DRY-01、FG-01、FG-02、LINE-01、RAW-A01、RAW-A02、REJ-01；新库位请先在“基础资料 → 库位”中建立）' },
       { row: 4, message: '数量必须大于 0' },
       { row: 5, message: '日期格式错误：2026-13-45x' },
     ]);
@@ -411,7 +411,8 @@ describe('数据导入', () => {
       ['LED-660-3030', 'DRY-01', 'KD-OPEN-1', 800, '2026-10-01', '2027-10-01'],
       ['PKG-RL300-IFU', 'CS-01', 'KD-IFU-1', 30, null, null],
     ]));
-    expect(res.body).toEqual({ ok: true, created: 2, updated: 0, errors: [] });
+    expect(res.body).toMatchObject({ ok: true, created: 2, updated: 0, errors: [], duplicates: [] }); // G2 E-01：另返回导入批次号
+    expect(res.body.batch_no).toMatch(/^RK/);
     const st: Record<string, any> = {};
     for (const s of (await api.ok('get', '/api/stock', { q: 'KD-' })).items) st[s.lot_no] = s;
     expect(st['KD-OPEN-1'].status).toBe('AVAILABLE');
@@ -447,7 +448,7 @@ describe('数据导入', () => {
       ['物料编码', '物料名称', '物料类别'], ['X-1', '测试', 'LED芯片'], ['X'.repeat(80), '超长编码', '原材料'], ['X-3', '正常', '原材料'], ['', '缺编码', '原材料'],
     ]));
     expect(r.body.errors).toEqual([
-      { row: 2, message: '无法识别的物料类别：LED芯片' },
+      { row: 2, message: '无法识别的物料类别：LED芯片（可选：原材料、半成品、成品、包材、辅料；金蝶的 外购/委外/自制 也可识别）' },
       { row: 3, message: '字段内容超出长度限制' },
       { row: 5, message: '编码和名称不能为空' },
     ]);

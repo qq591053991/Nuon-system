@@ -10,6 +10,11 @@ const named = (loader: () => Promise<any>, name: string): Page => lazy(() => loa
 const M = () => import('./pages/master/MasterPages');
 
 export interface RouteDef { path: string; element: Page }
+/**
+ * 菜单（G1 负责结构与权限）：perm = 需要任一权限点才显示；分组上的 perm 作为子项默认值；子项全部隐藏时分组也隐藏。
+ * 口径与后端读权限矩阵一致（见 backend/src/auth/roles.ts READ_PERMS）：财务只给 finance，审计只给 audit/admin，
+ * 价格/金额类页面不给车间操作员；同时按岗位去掉与日常工作无关的入口（菜单 ⊆ 可读）。
+ */
 export interface MenuDef { key: string; label: string; icon?: ReactNode; perm?: string[]; children?: MenuDef[] }
 
 export const routes: RouteDef[] = [
@@ -19,6 +24,8 @@ export const routes: RouteDef[] = [
   { path: '/sales/orders/:id', element: lazy(() => import('./pages/erp/SalesOrderDetail')) },
   { path: '/purchase/orders', element: lazy(() => import('./pages/erp/PurchaseOrders')) },
   { path: '/purchase/orders/:id', element: lazy(() => import('./pages/erp/PurchaseOrderDetail')) },
+  { path: '/purchase/chase', element: lazy(() => import('./pages/erp/PurchaseChase')) },
+  { path: '/purchase/materials', element: lazy(() => import('./pages/erp/PurchaseMaterials')) },
   { path: '/plan/mrp', element: lazy(() => import('./pages/erp/Mrp')) },
   { path: '/finance', element: lazy(() => import('./pages/erp/Finance')) },
   { path: '/engineering/boms', element: lazy(() => import('./pages/erp/Boms')) },
@@ -38,6 +45,8 @@ export const routes: RouteDef[] = [
   { path: '/quality/dhr/:id', element: lazy(() => import('./pages/quality/DhrView')) },
   { path: '/quality/inspection-specs', element: lazy(() => import('./pages/quality/InspectionSpecs')) },
   { path: '/quality/complaints', element: lazy(() => import('./pages/quality/Complaints')) },
+  { path: '/quality/supplier-returns', element: lazy(() => import('./pages/quality/SupplierReturns')) },
+  { path: '/quality/qualifications', element: lazy(() => import('./pages/system/Qualifications')) },
   // WMS
   { path: '/wms/stock', element: lazy(() => import('./pages/wms/Stock')) },
   { path: '/wms/moves', element: lazy(() => import('./pages/wms/StockMoves')) },
@@ -46,6 +55,18 @@ export const routes: RouteDef[] = [
   { path: '/wms/shipments', element: lazy(() => import('./pages/wms/Shipments')) },
   { path: '/wms/counts', element: lazy(() => import('./pages/wms/StockCounts')) },
   { path: '/wms/customer-returns', element: lazy(() => import('./pages/wms/CustomerReturns')) },
+  // WMS · 待上架与 PDA 作业页（G7）
+  { path: '/wms/putaway', element: lazy(() => import('./pages/wms/Putaway')) },
+  { path: '/wms/pda', element: lazy(() => import('./pages/wms/pda/PdaHome')) },
+  { path: '/wms/pda/receive', element: lazy(() => import('./pages/wms/pda/PdaReceive')) },
+  { path: '/wms/pda/putaway', element: lazy(() => import('./pages/wms/pda/PdaPutaway')) },
+  { path: '/wms/pda/count', element: named(() => import('./pages/wms/pda/PdaCount'), 'PdaCountList') },
+  { path: '/wms/pda/count/:id', element: lazy(() => import('./pages/wms/pda/PdaCount')) },
+  { path: '/wms/pda/pick', element: named(() => import('./pages/wms/pda/PdaPick'), 'PdaPickList') },
+  { path: '/wms/pda/pick/:id', element: lazy(() => import('./pages/wms/pda/PdaPick')) },
+  { path: '/wms/pda/fg', element: lazy(() => import('./pages/wms/pda/PdaFgReceipt')) },
+  { path: '/wms/print/:kind', element: lazy(() => import('./pages/wms/PrintDoc')) },
+  { path: '/wms/print/:kind/:id', element: lazy(() => import('./pages/wms/PrintDoc')) },
   // 追溯
   { path: '/trace', element: lazy(() => import('./pages/Trace')) },
   // 主数据
@@ -67,67 +88,83 @@ export const routes: RouteDef[] = [
 
 export const menu: MenuDef[] = [
   { key: '/', label: '工作台', icon: <DashboardOutlined /> },
-  { key: '/mes/station', label: '工位终端', icon: <ScanOutlined /> },
+  { key: '/mes/station', label: '工位终端', icon: <ScanOutlined />, perm: ['mes'] },
   {
     key: 'sales', label: '销售与计划', icon: <ShoppingOutlined />, children: [
-      { key: '/sales/orders', label: '销售订单' },
-      { key: '/plan/mrp', label: 'MRP 物料需求' },
+      { key: '/sales/orders', label: '销售订单', perm: ['sales', 'plan', 'finance'] },
+      { key: '/plan/mrp', label: 'MRP 物料需求', perm: ['plan', 'purchase'] },
     ],
   },
-  { key: 'purchase', label: '采购', icon: <ShoppingCartOutlined />, children: [{ key: '/purchase/orders', label: '采购订单' }] },
+  { key: 'purchase', label: '采购', icon: <ShoppingCartOutlined />, perm: ['purchase', 'plan', 'finance'], children: [
+      { key: '/purchase/orders', label: '采购订单' },
+      { key: '/purchase/chase', label: '催货清单', perm: ['purchase', 'plan', 'wms'] },
+      { key: '/purchase/materials', label: '物料采购属性', perm: ['purchase', 'master', 'plan'] },
+    ] },
   {
-    key: 'mes', label: '生产执行 MES', icon: <ToolOutlined />, children: [
+    key: 'mes', label: '生产执行 MES', icon: <ToolOutlined />, perm: ['plan', 'mes', 'wms', 'qa', 'qc', 'engineering'], children: [
       { key: '/mes/work-orders', label: '生产工单' },
     ],
   },
   {
     key: 'quality', label: '质量管理 QMS', icon: <ExperimentOutlined />, children: [
-      { key: '/quality/inspections', label: '来料检验 IQC' },
-      { key: '/quality/ncrs', label: '不合格品 NCR' },
-      { key: '/quality/capas', label: '纠正预防 CAPA' },
-      { key: '/quality/release', label: 'DHR 审核与放行' },
-      { key: '/quality/inspection-specs', label: '检验规范' },
-      { key: '/quality/complaints', label: '客户投诉/不良事件' },
+      { key: '/quality/inspections', label: '来料检验 IQC', perm: ['qc', 'qa'] },
+      { key: '/quality/ncrs', label: '不合格品 NCR', perm: ['qc', 'qa'] },
+      { key: '/quality/capas', label: '纠正预防 CAPA', perm: ['qa'] },
+      { key: '/quality/release', label: 'DHR 审核与放行', perm: ['qa'] },
+      { key: '/quality/inspection-specs', label: '检验规范', perm: ['qa', 'qc'] },
+      { key: '/quality/complaints', label: '客户投诉/不良事件', perm: ['qa', 'sales'] },
+      { key: '/quality/supplier-returns', label: '退供应商', perm: ['qa', 'qc', 'wms', 'purchase'] },
+      { key: '/quality/qualifications', label: '人员上岗资质', perm: ['qa', 'qc'] },
     ],
   },
   {
     key: 'wms', label: '仓储管理 WMS', icon: <DatabaseOutlined />, children: [
-      { key: '/wms/stock', label: '库存查询' },
-      { key: '/wms/receipts', label: '收货入库' },
-      { key: '/wms/issues', label: '生产领料' },
-      { key: '/wms/shipments', label: '发货出库' },
-      { key: '/wms/counts', label: '库存盘点' },
-      { key: '/wms/customer-returns', label: '客户退货' },
-      { key: '/wms/moves', label: '库存流水' },
+      { key: '/wms/pda', label: 'PDA 作业', perm: ['wms'] },
+      { key: '/wms/stock', label: '库存查询', perm: ['wms', 'plan', 'purchase', 'sales', 'qa', 'qc'] },
+      { key: '/wms/putaway', label: '待上架', perm: ['wms'] },
+      { key: '/wms/receipts', label: '收货入库', perm: ['wms'] },
+      { key: '/wms/issues', label: '生产领料', perm: ['wms', 'plan'] },
+      { key: '/wms/shipments', label: '发货出库', perm: ['wms', 'sales'] },
+      { key: '/wms/counts', label: '库存盘点', perm: ['wms'] },
+      { key: '/wms/customer-returns', label: '客户退货', perm: ['wms', 'qa', 'sales'] },
+      { key: '/wms/moves', label: '库存流水', perm: ['wms', 'finance'] },
     ],
   },
-  { key: '/trace', label: '质量追溯', icon: <NodeIndexOutlined /> },
-  { key: '/finance', label: '应收应付', icon: <AccountBookOutlined /> },
+  { key: '/trace', label: '质量追溯', icon: <NodeIndexOutlined />, perm: ['qa', 'qc', 'wms', 'sales', 'plan', 'engineering'] },
+  {
+    key: 'finance', label: '应收应付', icon: <AccountBookOutlined />, perm: ['finance'], children: [
+      { key: '/finance?tab=AR', label: '应收账款' },
+      { key: '/finance?tab=AP', label: '应付账款' },
+      { key: '/finance?tab=PAY', label: '收付款流水' },
+      { key: '/finance?tab=AGING', label: '账龄分析' },
+      { key: '/finance?tab=EXPORT', label: '月结导出（金蝶）' },
+      { key: '/master/exchange-rates?view=finance', label: '汇率' },
+    ],
+  },
   {
     key: 'engineering', label: '工程数据', icon: <ApartmentOutlined />, children: [
-      { key: '/engineering/boms', label: 'BOM 物料清单' },
-      { key: '/engineering/routings', label: '工艺路线与测试规格' },
+      { key: '/engineering/boms', label: 'BOM 物料清单', perm: ['engineering', 'qa', 'plan'] },
+      { key: '/engineering/routings', label: '工艺路线与测试规格', perm: ['engineering', 'qa'] },
     ],
   },
   {
     key: 'master', label: '基础资料', icon: <AppstoreOutlined />, children: [
-      { key: '/master/materials', label: '物料' },
-      { key: '/master/customers', label: '客户' },
-      { key: '/master/suppliers', label: '供应商' },
-      { key: '/master/equipment', label: '设备与仪器' },
-      { key: '/master/work-centers', label: '工作中心' },
-      { key: '/master/warehouses', label: '仓库' },
-      { key: '/master/locations', label: '库位' },
-      { key: '/master/exchange-rates', label: '汇率' },
+      { key: '/master/materials', label: '物料', perm: ['master', 'engineering', 'plan', 'purchase', 'wms', 'qc', 'qa'] },
+      { key: '/master/customers', label: '客户', perm: ['master', 'sales', 'finance'] },
+      { key: '/master/suppliers', label: '供应商', perm: ['master', 'purchase', 'qa', 'finance'] },
+      { key: '/master/equipment', label: '设备与仪器', perm: ['master', 'engineering', 'qa', 'qc'] },
+      { key: '/master/work-centers', label: '工作中心', perm: ['master', 'engineering', 'plan'] },
+      { key: '/master/warehouses', label: '仓库', perm: ['master', 'wms'] },
+      { key: '/master/locations', label: '库位', perm: ['master', 'wms'] },
+      { key: '/master/exchange-rates', label: '汇率', perm: ['master'] },
     ],
   },
   {
     key: 'system', label: '系统与合规', icon: <SettingOutlined />, children: [
       { key: '/system/users', label: '用户与角色', perm: ['admin'] },
-      { key: '/system/audit', label: '审计追踪' },
-      { key: '/system/esign', label: '电子签名记录' },
-      { key: '/system/import', label: '数据导入（金蝶迁移）' },
-      { key: '/system/qualifications', label: '人员上岗资质' },
+      { key: '/system/audit', label: '审计追踪', perm: ['audit', 'admin'] },
+      { key: '/system/esign', label: '电子签名记录', perm: ['audit', 'admin'] },
+      { key: '/system/import', label: '数据导入（金蝶迁移）', perm: ['admin', 'master', 'engineering', 'wms'] },
     ],
   },
 ];

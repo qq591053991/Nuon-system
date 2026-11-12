@@ -1,5 +1,5 @@
 import {
-  Alert, Button, Card, Col, DatePicker, Descriptions, Drawer, Empty, Form, Input, Row, Segmented, Select, Space, Spin, Steps, Table, Tag, Typography, message,
+  Alert, Button, Card, Checkbox, Col, DatePicker, Descriptions, Drawer, Empty, Form, Input, Row, Segmented, Select, Space, Spin, Steps, Table, Tag, Tooltip, Typography, message,
 } from 'antd';
 import { CheckCircleOutlined, PlusOutlined, ReloadOutlined, RollbackOutlined, SaveOutlined, SendOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
@@ -7,16 +7,20 @@ import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { get, post, put, type Rec } from '../../api/http';
 import { useAuth } from '../../auth';
+import Attachments from '../../components/Attachments';
 import { isCancel, useESign } from '../../components/ESign';
+import ExportButton from '../../components/ExportButton';
 import PageHeader from '../../components/PageHeader';
+import ResponsiveTable from '../../components/ResponsiveTable';
 import StatusTag from '../../components/StatusTag';
 import { usePaged } from '../../components/usePaged';
-import { dictOptions } from '../../utils/dict';
+import { dictLabel, dictOptions } from '../../utils/dict';
 import { fmtDate, fmtDateTime, toDate } from '../../utils/format';
+import { useUrlFilters } from './qshared';
 
 const STATUS_TABS = [
-  { value: '', label: '全部' },
   { value: 'OPEN,IN_PROGRESS,VERIFYING', label: '未关闭' },
+  { value: '', label: '全部' },
   { value: 'OPEN', label: '新建' },
   { value: 'IN_PROGRESS', label: '进行中' },
   { value: 'VERIFYING', label: '有效性验证' },
@@ -34,6 +38,17 @@ const TEXT_FIELDS: { name: string; label: string; placeholder: string }[] = [
 ];
 
 const overdue = (r: Rec) => r.due_date && r.status !== 'CLOSED' && dayjs(r.due_date).isBefore(dayjs(), 'day');
+/** CAPA 默认完成期限（天，与后端一致） */
+const DUE_DAYS = 30;
+
+/** 负责人下拉（启用账号，按姓名/账号/部门搜索；保存为姓名） */
+function useOwners() {
+  const [owners, setOwners] = useState<Rec[]>([]);
+  useEffect(() => {
+    get<Rec[]>('/capas/owners', undefined, true).then(setOwners).catch(() => setOwners([]));
+  }, []);
+  return owners.map((u) => ({ value: u.full_name, label: `${u.full_name}（${u.username}）${u.department ? ` · ${u.department}` : ''}` }));
+}
 
 function CapaDrawer({ open, capaId, onClose, onSaved }: { open: boolean; capaId: number | null; onClose: () => void; onSaved: (id: number) => void }) {
   const { can } = useAuth();
@@ -42,6 +57,7 @@ function CapaDrawer({ open, capaId, onClose, onSaved }: { open: boolean; capaId:
   const [capa, setCapa] = useState<Rec | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const ownerOptions = useOwners();
 
   const load = async (id: number) => {
     setLoading(true);
@@ -59,7 +75,7 @@ function CapaDrawer({ open, capaId, onClose, onSaved }: { open: boolean; capaId:
     setCapa(null);
     if (can('qa')) {
       form.resetFields();
-      if (!capaId) form.setFieldsValue({ source: 'OTHER' });
+      if (!capaId) form.setFieldsValue({ source: 'OTHER', due_date: dayjs().add(DUE_DAYS, 'day') });
     }
     if (capaId) load(capaId);
   }, [open, capaId]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -86,6 +102,8 @@ function CapaDrawer({ open, capaId, onClose, onSaved }: { open: boolean; capaId:
     }
   };
 
+  const openNcrs: Rec[] = (capa?.ncrs ?? []).filter((n: Rec) => n.status === 'OPEN');
+
   const changeStatus = async (to: string) => {
     if (!capa) return;
     const v = await form.validateFields();
@@ -97,22 +115,26 @@ function CapaDrawer({ open, capaId, onClose, onSaved }: { open: boolean; capaId:
       message.warning('请先填写“有效性验证”结论');
       return;
     }
-    let signature;
-    if (to === 'CLOSED') {
-      try {
-        signature = await sign({ meaning: 'CAPA关闭批准', description: `${capa.no}：确认纠正预防措施已实施且验证有效，批准关闭。`, defaultReason: '措施已实施，验证有效' });
-      } catch (e) {
-        if (isCancel(e)) return;
-        throw e;
-      }
+    if (to === 'CLOSED' && openNcrs.length) {
+      message.warning(`关联的 ${openNcrs.map((n) => n.no).join('、')} 尚未评审处置，不能关闭 CAPA`);
+      return;
     }
     setSaving(true);
     try {
       const saved = await put(`/capas/${capa.id}`, body(v));
-      if (saved.status !== to) await post(`/capas/${capa.id}/status`, { status: to, effectiveness: v.effectiveness, signature });
+      if (saved.status !== to) {
+        if (to === 'CLOSED') {
+          await sign({
+            meaning: 'CAPA关闭批准', description: `${capa.no}：确认纠正预防措施已实施且验证有效，批准关闭。`, defaultReason: '措施已实施，验证有效',
+            submit: (signature) => post(`/capas/${capa.id}/status`, { status: to, effectiveness: v.effectiveness, signature }, true),
+          });
+        } else await post(`/capas/${capa.id}/status`, { status: to, effectiveness: v.effectiveness });
+      }
       message.success({ IN_PROGRESS: '已进入处理', VERIFYING: '已提交有效性验证', CLOSED: 'CAPA 已关闭' }[to] || '状态已更新');
       await load(capa.id);
       onSaved(capa.id);
+    } catch (e) {
+      if (!isCancel(e)) throw e;
     } finally {
       setSaving(false);
     }
@@ -125,7 +147,11 @@ function CapaDrawer({ open, capaId, onClose, onSaved }: { open: boolean; capaId:
       {st === 'OPEN' && <Button type="primary" icon={<SendOutlined />} loading={saving} onClick={() => changeStatus('IN_PROGRESS')}>开始处理</Button>}
       {st === 'IN_PROGRESS' && <Button type="primary" icon={<SendOutlined />} loading={saving} onClick={() => changeStatus('VERIFYING')}>提交有效性验证</Button>}
       {st === 'VERIFYING' && <Button icon={<RollbackOutlined />} loading={saving} onClick={() => changeStatus('IN_PROGRESS')}>退回整改</Button>}
-      {st === 'VERIFYING' && <Button type="primary" icon={<CheckCircleOutlined />} loading={saving} onClick={() => changeStatus('CLOSED')}>批准关闭（电子签名）</Button>}
+      {st === 'VERIFYING' && (
+        <Tooltip title={openNcrs.length ? `关联的 ${openNcrs.map((n) => n.no).join('、')} 尚未评审处置` : ''}>
+          <Button type="primary" icon={<CheckCircleOutlined />} loading={saving} disabled={openNcrs.length > 0} onClick={() => changeStatus('CLOSED')}>批准关闭（电子签名）</Button>
+        </Tooltip>
+      )}
     </Space>
   );
 
@@ -148,6 +174,9 @@ function CapaDrawer({ open, capaId, onClose, onSaved }: { open: boolean; capaId:
             { title: '关闭', description: capa.closed_by ? `${capa.closed_by} ${fmtDate(capa.closed_at)}` : 'QA 电子签名' },
           ]} />
         )}
+        {capa && st === 'VERIFYING' && openNcrs.length > 0 && (
+          <Alert type="warning" showIcon style={{ marginBottom: 16 }} message={`关联的 ${openNcrs.map((n) => n.no).join('、')} 尚未评审处置：请先在 NCR 中评审处置后再关闭 CAPA。`} />
+        )}
         {capa && st !== 'CLOSED' && (
           <Alert type="info" showIcon style={{ marginBottom: 16 }} message={
             st === 'OPEN' ? '下一步：分析根本原因并填写纠正措施，点击【开始处理】。'
@@ -165,10 +194,14 @@ function CapaDrawer({ open, capaId, onClose, onSaved }: { open: boolean; capaId:
                 <Form.Item name="source" label="来源"><Select options={dictOptions('capa_source')} /></Form.Item>
               </Col>
               <Col xs={24} sm={8}>
-                <Form.Item name="owner" label="负责人"><Input /></Form.Item>
+                <Form.Item name="owner" label="负责人" rules={[{ required: true, message: '请选择负责人' }]}>
+                  <Select showSearch allowClear optionFilterProp="label" options={ownerOptions} placeholder="选择负责人" />
+                </Form.Item>
               </Col>
               <Col xs={24} sm={8}>
-                <Form.Item name="due_date" label="完成期限"><DatePicker style={{ width: '100%' }} /></Form.Item>
+                <Form.Item name="due_date" label="完成期限" tooltip={`默认 ${DUE_DAYS} 天`} rules={[{ required: true, message: '请选择完成期限' }]}>
+                  <DatePicker style={{ width: '100%' }} presets={[30, 60, 90].map((d) => ({ label: `${d} 天`, value: dayjs().add(d, 'day') }))} />
+                </Form.Item>
               </Col>
               {TEXT_FIELDS.map((f) => (
                 <Col span={24} key={f.name}>
@@ -194,7 +227,7 @@ function CapaDrawer({ open, capaId, onClose, onSaved }: { open: boolean; capaId:
           <Card size="small" title={`关联不合格品（${capa.ncrs?.length || 0}）`} style={{ marginTop: 16 }}>
             {capa.ncrs?.length ? (
               <Table<Rec> rowKey="id" size="small" pagination={false} dataSource={capa.ncrs} columns={[
-                { title: 'NCR', dataIndex: 'no', render: (v) => <Link to={`/quality/ncrs?q=${encodeURIComponent(v)}`}>{v}</Link> },
+                { title: 'NCR', dataIndex: 'no', render: (v, r) => <Link to={`/quality/ncrs?id=${r.id}`}>{v}</Link> },
                 { title: '来源', dataIndex: 'source', render: (v) => <StatusTag dict="ncr_source" value={v} /> },
                 { title: '物料', dataIndex: 'material_name', render: (v) => v || '-' },
                 { title: '描述', dataIndex: 'description', width: 280, ellipsis: true },
@@ -202,6 +235,11 @@ function CapaDrawer({ open, capaId, onClose, onSaved }: { open: boolean; capaId:
               ]} />
             ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="无关联 NCR（可在 NCR 页面关闭时关联）" />}
           </Card>
+        )}
+        {capa && (
+          <div style={{ marginTop: 16 }}>
+            <Attachments entity="qms_capa" entityId={capa.id} bare title="附件（证据）" hint="根因分析（5Why/鱼骨图）、整改前后照片、修订后的 SOP、有效性验证数据等。" canUpload={can('qa')} />
+          </div>
         )}
       </Spin>
     </Drawer>
@@ -211,8 +249,11 @@ function CapaDrawer({ open, capaId, onClose, onSaved }: { open: boolean; capaId:
 export default function Capas() {
   const { can } = useAuth();
   const [sp, setSp] = useSearchParams();
-  const [status, setStatus] = useState('');
-  const { rows, loading, setQuery, reload, pagination } = usePaged('/capas', {});
+  const url = useUrlFilters(['status', 'q', 'overdue']);
+  const initStatus = url.status ?? (url.q ? '' : 'OPEN,IN_PROGRESS,VERIFYING');
+  const [status, setStatus] = useState(initStatus);
+  const [od, setOd] = useState(!!url.overdue);
+  const { rows, loading, setQuery, reload, pagination, query, onTableChange } = usePaged('/capas', { ...url, status: initStatus || undefined });
   const [drawer, setDrawer] = useState<{ open: boolean; id: number | null }>({ open: false, id: null });
 
   // 支持 /quality/capas?id=xx 直接打开
@@ -223,42 +264,62 @@ export default function Capas() {
 
   const close = () => {
     setDrawer({ open: false, id: null });
-    if (idParam) setSp({}, { replace: true });
+    if (idParam) {
+      const next = new URLSearchParams(sp);
+      next.delete('id');
+      setSp(next, { replace: true });
+    }
   };
 
   const columns: any[] = [
-    { title: 'CAPA 编号', dataIndex: 'no', fixed: 'left', render: (v: string) => <Typography.Link>{v}</Typography.Link> },
-    { title: '标题', dataIndex: 'title', width: 280, ellipsis: true },
-    { title: '来源', dataIndex: 'source', render: (v: string) => <StatusTag dict="capa_source" value={v} /> },
-    { title: '状态', dataIndex: 'status', render: (v: string) => <StatusTag dict="capa_status" value={v} /> },
-    { title: '负责人', dataIndex: 'owner', render: (v: string) => v || '-' },
-    { title: '完成期限', dataIndex: 'due_date', render: (v: string, r: Rec) => (overdue(r) ? <Tag color="red">{fmtDate(v)} 已逾期</Tag> : fmtDate(v)) },
-    { title: '创建', key: 'c', render: (_: any, r: Rec) => `${r.created_by ?? ''} ${fmtDate(r.created_at)}` },
-    { title: '关闭', key: 'cl', render: (_: any, r: Rec) => (r.closed_by ? `${r.closed_by} ${fmtDate(r.closed_at)}` : '-') },
+    { title: 'CAPA 编号', dataIndex: 'no', fixed: 'left', sorter: true, mobile: 'title', render: (v: string) => <Typography.Link>{v}</Typography.Link> },
+    { title: '状态', dataIndex: 'status', sorter: true, mobile: 'subtitle', render: (v: string) => <StatusTag dict="capa_status" value={v} /> },
+    { title: '标题', dataIndex: 'title', width: 260, ellipsis: true },
+    { title: '完成期限', dataIndex: 'due_date', sorter: true, render: (v: string, r: Rec) => (overdue(r) ? <Tag color="red">{fmtDate(v)} 已逾期</Tag> : fmtDate(v)) },
+    { title: '负责人', dataIndex: 'owner', sorter: true, render: (v: string) => v || <Typography.Text type="danger">未指定</Typography.Text> },
+    { title: '来源', dataIndex: 'source', sorter: true, render: (v: string) => <StatusTag dict="capa_source" value={v} /> },
+    { title: '创建', dataIndex: 'created_at', sorter: true, render: (_: any, r: Rec) => <span style={{ whiteSpace: 'nowrap' }}>{r.created_by ?? ''} {fmtDate(r.created_at)}</span> },
+    { title: '关闭', dataIndex: 'closed_at', sorter: true, render: (_: any, r: Rec) => (r.closed_by ? `${r.closed_by} ${fmtDate(r.closed_at)}` : '-') },
   ];
 
   return (
     <>
       <PageHeader
         title="纠正预防措施 CAPA"
-        sub="针对严重或重复发生的不合格，分析根本原因、实施纠正/预防措施并验证有效性；关闭需 QA 电子签名。"
-        extra={can('qa') && <Button type="primary" icon={<PlusOutlined />} onClick={() => setDrawer({ open: true, id: null })}>新建 CAPA</Button>}
+        sub="针对严重或重复发生的不合格，分析根本原因、实施纠正/预防措施并验证有效性；关闭需 QA 电子签名（关联 NCR 须已评审处置）。"
+        extra={
+          <Space wrap>
+            <ExportButton url="/capas" params={query} filename="CAPA" columns={[
+              { title: 'CAPA 编号', key: 'no' }, { title: '状态', value: (r) => dictLabel('capa_status', r.status) }, { title: '标题', key: 'title' },
+              { title: '来源', value: (r) => dictLabel('capa_source', r.source) }, { title: '负责人', key: 'owner' }, { title: '完成期限', key: 'due_date', type: 'date' },
+              { title: '逾期', value: (r) => (overdue(r) ? '是' : '') }, { title: '问题描述', key: 'description' }, { title: '根本原因', key: 'root_cause' },
+              { title: '纠正', key: 'correction' }, { title: '纠正措施', key: 'corrective_action' }, { title: '预防措施', key: 'preventive_action' },
+              { title: '有效性验证', key: 'effectiveness' }, { title: '创建人', key: 'created_by' }, { title: '创建时间', key: 'created_at', type: 'datetime' },
+              { title: '关闭人', key: 'closed_by' }, { title: '关闭时间', key: 'closed_at', type: 'datetime' },
+            ]} />
+            {can('qa') && <Button type="primary" icon={<PlusOutlined />} onClick={() => setDrawer({ open: true, id: null })}>新建 CAPA</Button>}
+          </Space>
+        }
       />
       <Card>
         <Space wrap style={{ marginBottom: 16 }}>
           <Segmented value={status} options={STATUS_TABS} onChange={(v) => { setStatus(v as string); setQuery({ status: v || undefined }); }} />
-          <Input.Search allowClear placeholder="编号 / 标题" style={{ width: 240 }} onSearch={(q) => setQuery({ q })} />
+          <Checkbox checked={od} onChange={(e) => { setOd(e.target.checked); setQuery({ overdue: e.target.checked ? 1 : undefined }); }}>
+            <span style={{ color: od ? '#cf1322' : undefined }}>只看逾期</span>
+          </Checkbox>
+          <Input.Search allowClear placeholder="编号 / 标题 / 负责人" defaultValue={url.q} style={{ width: 240 }} onSearch={(q) => setQuery({ q })} />
           <Button icon={<ReloadOutlined />} onClick={reload} />
         </Space>
-        <Table<Rec>
+        <ResponsiveTable<Rec>
           rowKey="id"
           size="middle"
           columns={columns}
           dataSource={rows}
           loading={loading}
           pagination={pagination}
+          onChange={onTableChange}
           scroll={{ x: 'max-content' }}
-          onRow={(r) => ({ onClick: () => setDrawer({ open: true, id: r.id }), style: { cursor: 'pointer' } })}
+          onRow={(r) => ({ onClick: () => setDrawer({ open: true, id: r.id }), style: { cursor: 'pointer', background: overdue(r) ? '#fff1f0' : undefined } })}
         />
       </Card>
       <CapaDrawer

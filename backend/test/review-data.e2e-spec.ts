@@ -123,7 +123,7 @@ describe('P0-3 汇率与多币别', () => {
   test('驾驶舱在手订单金额折算本位币，按币别分列；缺汇率时提示', async () => {
     const { api } = t;
     // 基础数据：已确认 USD 1,760（Lumina）+ CNY 42,000（光悦）；草稿不计
-    let k = (await api.ok('get', '/api/dashboard')).kpi;
+    let k = (await api.as('manager').ok('get', '/api/dashboard')).kpi;
     expect(k.open_so).toBe(2);
     expect(k.base_currency).toBe('CNY');
     expect(k.open_so_by_currency).toEqual([{ currency: 'CNY', amount: 42000 }, { currency: 'USD', amount: 1760 }]);
@@ -131,14 +131,14 @@ describe('P0-3 汇率与多币别', () => {
     expect(k.missing_rates).toEqual([]);
     // 今天生效的新汇率立即用于折算
     await api.as('finance').ok('post', '/api/exchange-rates', { currency: 'USD', rate: 7.2, effective_date: d(0) });
-    k = (await api.ok('get', '/api/dashboard')).kpi;
+    k = (await api.as('manager').ok('get', '/api/dashboard')).kpi;
     expect(k.open_so_amount).toBe(54672);
     // EUR 订单没有汇率：不计入本位币合计，按币别列出并预警
     const ref = await api.ids();
     const c2 = await api.find('/api/customers', { q: 'C002' });
     const so = await api.as('sales').ok('post', '/api/sales-orders', { customer_id: c2.id, currency: 'EUR', lines: [{ material_id: ref.m['FG-BL100'], qty: 1, unit_price: 1000 }] });
     await api.as('sales').ok('post', `/api/sales-orders/${so.id}/confirm`);
-    const dash = await api.ok('get', '/api/dashboard');
+    const dash = await api.as('manager').ok('get', '/api/dashboard');
     expect(dash.kpi.open_so_amount).toBe(54672);
     expect(dash.kpi.open_so_by_currency).toEqual([{ currency: 'CNY', amount: 42000 }, { currency: 'EUR', amount: 1000 }, { currency: 'USD', amount: 1760 }]);
     expect(dash.kpi.missing_rates).toEqual(['EUR']);
@@ -279,7 +279,7 @@ describe('P1-3 采购单位换算', () => {
   test('MRP 建议按整数采购单位取整，转单后采购订单行带采购单位信息', async () => {
     const { api } = t;
     await setPurchaseUnit('LED-660-3030', '卷', 4000);
-    const so = await api.find('/api/sales-orders', { q: 'LUM-PO-26-131' });
+    const so = await api.as('sales').find('/api/sales-orders', { q: 'LUM-PO-26-131' });
     await api.as('sales').ok('post', `/api/sales-orders/${so.id}/confirm`);
     const run = await api.as('pmc').ok('post', '/api/mrp/run');
     const leds = run.suggestions.filter((s: any) => s.material_code === 'LED-660-3030');
@@ -310,28 +310,31 @@ describe('P1-5 MRP 按周分时段', () => {
   test('逐周净算：预计库存结转、子件需求日期扣父项生产周期、外购件扣采购提前期、交期压缩提示', async () => {
     const { api } = t;
     const ref = await api.ids();
-    const so = await api.find('/api/sales-orders', { q: 'LUM-PO-26-131' }); // 200 台，交期 +45 天
+    const so = await api.as('sales').find('/api/sales-orders', { q: 'LUM-PO-26-131' }); // 200 台，交期 +45 天
     await api.as('sales').ok('post', `/api/sales-orders/${so.id}/confirm`);
-    // 在制工单的计划完工日在 +60 天：不能抵扣 +20 天的需求，只能提示“其后有在制”
+    // 在制工单的计划完工日在 +60 天：+20 天那周的缺口先建议把它提前（提前催交例外），不足部分才建议新生产（UX A3）
     await api.as('pmc').ok('post', '/api/work-orders', { material_id: ref.m['FG-RL300'], planned_qty: 5, planned_start: d(55), planned_end: d(60) });
     const run = await api.as('pmc').ok('post', '/api/mrp/run');
     const of = (code: string) => run.suggestions.filter((s: any) => s.material_code === code);
     const wk = (n: number) => isoWeekLabel(weekStart(addDays(today(), n)));
 
-    // 成品：交期 +20 天（20 台，已确认）和 +45 天（200 台）分属两周 → 两条生产建议；建议开工 = 需求日 − 5 天生产周期
+    // 成品：交期 +20 天（20 台，已确认）和 +45 天（200 台）分属两周；建议开工 = 需求日 − 5 天生产周期
+    // +20 天那周：先把 +60 天完工的在制工单 5 台提前（催交例外），再建议新生产 15 台
     const fg = of('FG-RL300');
-    expect(fg.map((s: any) => [s.week, s.required_date, s.due_date, s.gross_qty, s.net_qty, s.suggested_qty])).toEqual([
-      [wk(20), d(20), d(15), 20, 20, 20],
+    const fgExp = fg.filter((s: any) => s.exception === 'EXPEDITE');
+    expect(fgExp.map((s: any) => [s.week, s.required_date, s.suggested_qty, s.expedite.map((x: any) => [x.type, x.qty, x.date, x.to_date])])).toEqual([
+      [wk(20), d(20), 5, [['WO', 5, d(60), d(20)]]],
+    ]);
+    expect(fg.filter((s: any) => !s.exception).map((s: any) => [s.week, s.required_date, s.due_date, s.gross_qty, s.net_qty, s.suggested_qty])).toEqual([
+      [wk(20), d(20), d(15), 20, 15, 15],
       [wk(45), d(45), d(40), 200, 200, 200],
     ]);
-    expect(fg[0].note).toBe('其后各周另有在途/在制 5，可考虑催交提前');
-    // 在制工单 5 台在 +60 天入库：结转为预计库存，不产生新建议
     expect(fg.every((s: any) => s.action === 'PRODUCE' && s.level === 0)).toBe(true);
 
-    // 灯板组件：需求在父项开工日（+15、+40），计划工单在 +55 开工另需 5；期初 30 先满足 +15 的 20，剩 10 结转到 +40 那周
+    // 灯板组件：需求在父项开工日（+15、+40），计划工单在 +55 开工另需 5；期初 30 先满足 +15 的 15，剩 15 结转到 +40 那周
     const sa = of('SA-RL300-LB');
     expect(sa.map((s: any) => [s.week, s.required_date, s.due_date, s.gross_qty, s.on_hand_qty, s.net_qty, s.suggested_qty])).toEqual([
-      [wk(40), d(40), d(37), 200, 10, 190, 190],
+      [wk(40), d(40), d(37), 200, 15, 185, 185],
       [wk(55), d(55), d(52), 5, 0, 5, 5],
     ]);
 
@@ -342,7 +345,7 @@ describe('P1-5 MRP 按周分时段', () => {
       [d(37), d(22), 'PURCHASE', 3000],
       [d(52), d(37), 'PURCHASE', 2000],
     ]);
-    expect(led[0].gross_qty).toBe(Math.round(190 * 60 * 1.01 * 1e4) / 1e4);
+    expect(led[0].gross_qty).toBe(Math.ceil(185 * 60 * 1.01 - 1e-9));
     expect([led[1].gross_qty, led[1].net_qty, led[1].suggested_qty]).toEqual([303, 303, 1000]);
     for (const s of led) expect(s.net_qty).toBe(Math.round((s.gross_qty + s.safety_stock - s.on_hand_qty - s.on_order_qty) * 1e4) / 1e4);
 
@@ -351,17 +354,20 @@ describe('P1-5 MRP 按周分时段', () => {
     const rush = await api.as('sales').ok('post', '/api/sales-orders', { customer_id: c1.id, currency: 'USD', lines: [{ material_id: ref.m['FG-RL300'], qty: 50, unit_price: 80, delivery_date: d(2) }] });
     await api.as('sales').ok('post', `/api/sales-orders/${rush.id}/confirm`);
     const run2 = await api.as('pmc').ok('post', '/api/mrp/run');
-    const rushFg = run2.suggestions.find((s: any) => s.material_code === 'FG-RL300' && s.required_date === d(2));
-    expect([rushFg.due_date, rushFg.week, rushFg.suggested_qty]).toEqual([d(0), wk(2), 50]);
+    // 紧急订单那周先提前 +60 天的在制 5 台（催交例外），新生产 45 台
+    const rushExp = run2.suggestions.find((s: any) => s.material_code === 'FG-RL300' && s.required_date === d(2) && s.exception === 'EXPEDITE');
+    expect(rushExp.suggested_qty).toBe(5);
+    const rushFg = run2.suggestions.find((s: any) => s.material_code === 'FG-RL300' && s.required_date === d(2) && !s.exception);
+    expect([rushFg.due_date, rushFg.week, rushFg.suggested_qty]).toEqual([d(0), wk(2), 45]);
     expect(rushFg.note).toContain('交期紧张：建议日期早于今天');
     const rushSa = run2.suggestions.find((s: any) => s.material_code === 'SA-RL300-LB' && s.required_date === d(-3));
-    expect([rushSa.week, rushSa.due_date, rushSa.on_hand_qty, rushSa.gross_qty, rushSa.net_qty]).toEqual([wk(0), d(0), 30, 50, 20]);
+    expect([rushSa.week, rushSa.due_date, rushSa.on_hand_qty, rushSa.gross_qty, rushSa.net_qty]).toEqual([wk(0), d(0), 30, 45, 15]);
 
-    // 忽略/转单仍可用；转单生成的工单按建议开工日
+    // 忽略/转单仍可用；转单生成的工单按建议开工日，并关联紧急订单
     const ign = await api.as('pmc').ok('post', `/api/mrp/suggestions/${rushSa.id}/ignore`);
     expect([ign.status, ign.required_date]).toEqual(['IGNORED', d(-3)]);
     const res = await api.as('pmc').ok('post', '/api/mrp/convert', { suggestion_ids: [rushFg.id] });
-    const wo = await api.find('/api/work-orders', { q: res.work_orders[0] });
-    expect([wo.planned_qty, wo.planned_start, wo.planned_end]).toEqual([50, d(0), d(5)]);
+    const wo = await api.as('pmc').find('/api/work-orders', { q: res.work_orders[0] });
+    expect([wo.planned_qty, wo.planned_start, wo.planned_end, wo.so_id]).toEqual([45, d(0), d(5), rush.id]);
   });
 });

@@ -5,6 +5,7 @@
  */
 import { Prisma } from '@prisma/client';
 import { num, round } from './num';
+import { itemDefects, ncrDueView, parseSamples } from '../qms/qms-rules';
 
 type Props = Record<string, (o: any) => unknown>;
 interface View { include?: Record<string, any>; props?: Props; order?: Record<string, any> }
@@ -77,6 +78,8 @@ export const VIEWS: Record<string, View> = {
     include: { customer: true, supplier: true },
     props: {
       partner_name: (o) => (o.customer ? o.customer.name : nm(o.supplier)),
+      partner_code: (o) => (o.customer ? o.customer.code : (o.supplier?.code ?? null)),
+      partner_id: (o) => o.customer_id ?? o.supplier_id ?? null,
       balance: (o) => round(num(o.amount) - num(o.paid_amount), 2),
     },
     order: { payments: { id: 'asc' } },
@@ -157,9 +160,21 @@ export const VIEWS: Record<string, View> = {
     props: { ...matProps, supplier_name: (o) => nm(o.supplier) },
     order: { items: { id: 'asc' } },
   },
+  // 质量（G6）：检验项目逐件值/不良数；NCR 有效处置期限与超期
+  InspectionItem: {
+    props: {
+      samples: (o) => parseSamples(o).values,
+      item_defects: (o) => itemDefects(o),
+    },
+  },
   Ncr: {
-    include: { ...matInclude, work_order: true, supplier: true },
-    props: { ...matProps, wo_no: (o) => o.work_order?.no ?? null, supplier_name: (o) => nm(o.supplier) },
+    include: { ...matInclude, work_order: true, supplier: true, customer: true },
+    props: {
+      ...matProps, wo_no: (o) => o.work_order?.no ?? null, supplier_name: (o) => nm(o.supplier), customer_name: (o) => nm(o.customer),
+      due_on: (o) => ncrDueView(o).due_on,
+      days_left: (o) => ncrDueView(o).days_left,
+      overdue: (o) => ncrDueView(o).overdue,
+    },
   },
   // 生产（代理 3）：放行批、人员上岗资质
   ProductRelease: {
@@ -177,6 +192,7 @@ export const VIEWS: Record<string, View> = {
       username: (o) => o.user?.username ?? null,
       user_full_name: (o) => o.user?.full_name ?? null,
       department: (o) => o.user?.department ?? null,
+      badge_no: (o) => o.user?.badge_no ?? null,
       // 纯日期输出 YYYY-MM-DD
       certified_at: (o) => (o.certified_at ? new Date(o.certified_at).toISOString().slice(0, 10) : null),
       expires_at: (o) => (o.expires_at ? new Date(o.expires_at).toISOString().slice(0, 10) : null),
@@ -188,7 +204,15 @@ export const VIEWS: Record<string, View> = {
     order: { lines: { id: 'asc' } },
   },
   CustomerReturnLine: { include: matInclude, props: matProps },
-  Complaint: { props: { received_date: (o) => (o.received_date ? new Date(o.received_date).toISOString().slice(0, 10) : null) } },
+  Complaint: {
+    props: {
+      received_date: (o) => (o.received_date ? new Date(o.received_date).toISOString().slice(0, 10) : null),
+      event_date: (o) => (o.event_date ? new Date(o.event_date).toISOString().slice(0, 10) : null),
+      report_deadline: (o) => (o.report_deadline ? new Date(o.report_deadline).toISOString().slice(0, 10) : null),
+      reported_at: (o) => (o.reported_at ? new Date(o.reported_at).toISOString().slice(0, 10) : null),
+      replied_at: (o) => (o.replied_at ? new Date(o.replied_at).toISOString().slice(0, 10) : null),
+    },
+  },
 };
 
 interface Tree { [k: string]: Tree }

@@ -6,20 +6,58 @@ import { ConvertDto, PaymentDto, PoDto, ReceiveDto, SoDto } from './erp.dto';
 import { FinanceService } from './finance.service';
 import { MrpService } from './mrp.service';
 import { PurchaseService } from './purchase.service';
-import { SalesService } from './sales.service';
+import { PO_READ } from './purchase-extra.controller';
+import { maskMoney, SalesService } from './sales.service';
+import { ReasonDto, SoChangeDto, SoWorkOrdersDto } from './erp.dto';
+import { userPermissions } from '../auth';
+
+/** 销售订单读权限（读权限矩阵：销售、计划、仓库、财务、QA；厂长含全部业务权限） */
+const SO_READ = ['sales', 'plan', 'wms', 'finance', 'qa'];
 
 @Controller('sales-orders')
 export class SalesOrderController {
   constructor(private readonly svc: SalesService) {}
 
   @Get()
-  list(@Query() q: Record<string, string>) {
-    return this.svc.list(q);
+  @Perms(...SO_READ)
+  async list(@Query() q: Record<string, string>, @User() user: CurrentUser) {
+    const page = await this.svc.list(q);
+    page.items = maskMoney(user, userPermissions(user), page.items);
+    return page;
+  }
+
+  /** 同一客户的客户PO号是否已被其他订单使用（录单时提示重复下单） */
+  @Get('check-po')
+  @Perms(...SO_READ)
+  checkPo(@Query() q: Record<string, string>) {
+    return this.svc.checkPo(q);
+  }
+
+  /** 该客户各产品的上次成交价：?customer_id=&material_ids=1,2 */
+  @Get('last-prices')
+  @Perms('sales')
+  lastPrices(@Query() q: Record<string, string>) {
+    return this.svc.lastPrices(q);
   }
 
   @Get(':id')
-  get(@Param('id', ParseIntPipe) id: number) {
-    return this.svc.get(id);
+  @Perms(...SO_READ)
+  async get(@Param('id', ParseIntPipe) id: number, @User() user: CurrentUser) {
+    return maskMoney(user, userPermissions(user), await this.svc.get(id));
+  }
+
+  /** 订单变更记录（审计追踪中本订单及其明细行的变更，含变更原因） */
+  @Get(':id/history')
+  @Perms(...SO_READ)
+  history(@Param('id', ParseIntPipe) id: number) {
+    return this.svc.history(id);
+  }
+
+  /** 生成工单预览：已排产、库存/未关联工单抵扣、建议数量、按交期倒排的计划日期 */
+  @Get(':id/work-order-plan')
+  @Perms('plan', 'sales')
+  workOrderPlan(@Param('id', ParseIntPipe) id: number) {
+    return this.svc.workOrderPlan(id);
   }
 
   @Post()
@@ -40,6 +78,20 @@ export class SalesOrderController {
     return this.svc.transition(id, ['DRAFT'], 'CONFIRMED', '只有草稿可以确认');
   }
 
+  /** 撤销确认（金蝶“反审核”）：无工单、无发货时退回草稿 */
+  @Post(':id/unconfirm')
+  @Perms('sales')
+  unconfirm(@Param('id', ParseIntPipe) id: number, @Body() body: ReasonDto, @User() user: CurrentUser) {
+    return this.svc.unconfirm(id, body.reason, user);
+  }
+
+  /** 订单变更（已确认/生产中/部分发货）：preview=true 只返回差异与受影响工单 */
+  @Post(':id/change')
+  @Perms('sales')
+  change(@Param('id', ParseIntPipe) id: number, @Body() body: SoChangeDto, @User() user: CurrentUser) {
+    return this.svc.change(id, body, user);
+  }
+
   @Post(':id/cancel')
   @Perms('sales')
   cancel(@Param('id', ParseIntPipe) id: number) {
@@ -52,10 +104,11 @@ export class SalesOrderController {
     return this.svc.transition(id, ['CONFIRMED', 'IN_PRODUCTION', 'PARTIAL_SHIPPED', 'SHIPPED'], 'CLOSED', '当前状态不能关闭');
   }
 
+  /** 生成工单：不传 body = 按未覆盖数量自动生成（交期倒排）；lines = 按预览确认的数量/日期；link_wo_ids = 关联已有工单 */
   @Post(':id/create-work-orders')
   @Perms('plan')
-  createWorkOrders(@Param('id', ParseIntPipe) id: number, @User() user: CurrentUser) {
-    return this.svc.createWorkOrders(id, user);
+  createWorkOrders(@Param('id', ParseIntPipe) id: number, @Body() body: SoWorkOrdersDto, @User() user: CurrentUser) {
+    return this.svc.createWorkOrders(id, user, body ?? {});
   }
 }
 
@@ -64,11 +117,13 @@ export class PurchaseOrderController {
   constructor(private readonly svc: PurchaseService) {}
 
   @Get()
+  @Perms(...PO_READ)
   list(@Query() q: Record<string, string>) {
     return this.svc.list(q);
   }
 
   @Get(':id')
+  @Perms(...PO_READ)
   get(@Param('id', ParseIntPipe) id: number) {
     return this.svc.get(id);
   }
@@ -130,10 +185,16 @@ export class MrpController {
     return this.svc.getRun(id);
   }
 
+  /** 运算结果是否过期（之后订单/工单/采购/BOM/库存有变化） */
+  @Get('runs/:id/staleness')
+  staleness(@Param('id', ParseIntPipe) id: number) {
+    return this.svc.staleness(id);
+  }
+
   @Post('convert')
   @Perms('plan', 'purchase')
   convert(@Body() body: ConvertDto, @User() user: CurrentUser) {
-    return this.svc.convert(body.suggestion_ids, user);
+    return this.svc.convert(body.suggestion_ids, user, !!body.force);
   }
 
   @Post('suggestions/:id/ignore')
@@ -147,7 +208,9 @@ export class MrpController {
 export class FinanceController {
   constructor(private readonly svc: FinanceService) {}
 
+  /** 应收应付单据：往来单位/期间/币别/状态筛选，sort/order 排序 */
   @Get('docs')
+  @Perms('finance')
   list(@Query() q: Record<string, string>) {
     return this.svc.list(q);
   }
@@ -158,14 +221,16 @@ export class FinanceController {
     return this.svc.addPayment(id, body, user);
   }
 
-  /** 账龄汇总：按往来单位 + 币别，另给本位币合计 */
+  /** 账龄汇总：按往来单位 + 币别，另给本位币合计（as_of 截止日、basis=booking|closing、buckets=30,60,90、detail=1 下钻） */
   @Get('summary')
-  summary() {
-    return this.svc.summary();
+  @Perms('finance')
+  summary(@Query() q: Record<string, string>) {
+    return this.svc.summary(q);
   }
 
   /** 本位币与当前适用汇率 */
   @Get('currencies')
+  @Perms('finance', 'master')
   currencies() {
     return this.svc.currencies();
   }

@@ -26,7 +26,7 @@ describe('生产流程', () => {
   test('完整生产流程：下达 → 领料 → 过站 → NCR → 入库 → DHR 放行 → 发货 → 追溯', async () => {
     const { api } = t;
     const ref = await api.ids();
-    const so = await api.find('/api/sales-orders', { q: 'LUM-PO-26-118' });
+    const so = await api.as('sales').find('/api/sales-orders', { q: 'LUM-PO-26-118' });
     expect(so.status).toBe('CONFIRMED');
 
     // 一键生成工单（计划员）
@@ -137,7 +137,7 @@ describe('生产流程', () => {
     expect(fg.lines[0].qty).toBe(2);
     expect(fg.lines[0].status).toBe('QUARANTINE');
     // 未放行不能发货
-    let soDetail = await api.ok('get', `/api/sales-orders/${so.id}`);
+    let soDetail = await api.as('sales').ok('get', `/api/sales-orders/${so.id}`);
     r = await api.as('wh').post('/api/shipments', { so_id: so.id, lines: [{ so_line_id: soDetail.lines[0].id, qty: 1, serials: [sns[0]] }] });
     expect(r.status).toBe(400);
     expect(r.body.detail).toContain('放行');
@@ -162,7 +162,7 @@ describe('生产流程', () => {
     expect([...sh.lines[0].serial_list].sort()).toEqual([...sns.slice(0, 2)].sort());
     sh = await api.as('wh').ok('post', `/api/shipments/${sh.id}/confirm`);
     expect(sh.status).toBe('SHIPPED');
-    soDetail = await api.ok('get', `/api/sales-orders/${so.id}`);
+    soDetail = await api.as('sales').ok('get', `/api/sales-orders/${so.id}`);
     expect(soDetail.status).toBe('PARTIAL_SHIPPED');
     expect(soDetail.lines[0].shipped_qty).toBe(2);
     const ar = (await api.ok('get', '/api/finance/docs', { doc_type: 'AR' })).items;

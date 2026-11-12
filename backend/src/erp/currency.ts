@@ -116,3 +116,31 @@ export class CurrencyTotals {
     return { amount: total.value, missing };
   }
 }
+
+/**
+ * 记账汇率与本位币金额（应收应付生成时写入 fin_doc.exchange_rate / base_amount）：
+ * 取单据日期适用的汇率；本位币 → 1；缺汇率 → 两者均为 null（报表提示“缺汇率”，补录汇率后自动补记）。
+ */
+export function bookingOf(book: RateBook, amount: MoneyLike, currency: string | null | undefined, date: Date): { exchange_rate: number | null; base_amount: number | null } {
+  const hit = book.rate(currency, date);
+  if (!hit) return { exchange_rate: null, base_amount: null };
+  return { exchange_rate: hit.rate, base_amount: money(dec(amount).times(hit.rate)) };
+}
+
+/** 按指定汇率折算本位币（四舍五入到分） */
+export const atRate = (amount: MoneyLike, rate: MoneyLike): number => money(dec(amount).times(dec(rate)));
+
+/**
+ * 收付款的本位币与汇兑差异（汇兑差异以“收益为正”）：
+ *   应收（AR）：手续费含在核销金额内（银行从货款中扣除）→ 银行到账 = (核销 − 手续费) × 实收汇率
+ *   应付（AP）：手续费为我方另付 → 银行付出 = (核销 + 手续费) × 实付汇率
+ *   汇兑差异 = 核销 × 实收汇率 − 核销 × 记账汇率（应收），应付取相反数。
+ * 各项先按分取整，再相减，保证凭证借贷平衡：银行 ± 手续费 = 冲销往来 ± 汇兑差异。
+ */
+export function settleBase(kind: 'AR' | 'AP', amount: MoneyLike, fee: MoneyLike, payRate: MoneyLike, bookRate: MoneyLike) {
+  const gross = atRate(amount, payRate);
+  const booked = atRate(amount, bookRate);
+  const feeBase = atRate(fee, payRate);
+  if (kind === 'AR') return { gross, booked, fee_base: feeBase, base_amount: money(dec(gross).minus(feeBase)), fx_diff: money(dec(gross).minus(booked)) };
+  return { gross, booked, fee_base: feeBase, base_amount: money(dec(gross).plus(feeBase)), fx_diff: money(dec(booked).minus(gross)) };
+}

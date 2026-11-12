@@ -9,7 +9,18 @@ export interface SpecParam {
   lower?: number | null;
   upper?: number | null;
   target?: number | null;
+  /** NUMBER = 数值；OKNG = 合格判定（1 = OK，0 = NG） */
+  param_type?: string | null;
+  /** 小数位数（录入限制） */
+  decimals?: number | null;
+  /** 合理输入范围（超出 = 录入错误） */
+  min_valid?: number | null;
+  max_valid?: number | null;
 }
+
+/** OK/NG 判定型测试项在测试数据中的单位标记（值 1 = OK，0 = NG） */
+export const OKNG_UNIT = 'OK/NG';
+export const isOkNg = (p: { param_type?: string | null; unit?: string | null }) => p.param_type === 'OKNG' || p.unit === OKNG_UNIT;
 
 export const PRIORITY_OPTIONS = [
   { value: 1, label: '1 - 特急' },
@@ -24,6 +35,7 @@ export const num = (v?: number | null) => (v === null || v === undefined ? '-' :
 
 /** 规格文本：40~60 mW/cm² / ≥4 h / ≤5 mA */
 export function specText(p: SpecParam, withUnit = true): string {
+  if (isOkNg(p)) return 'OK / NG 判定';
   const u = withUnit && p.unit ? ` ${p.unit}` : '';
   const lo = p.lower ?? null;
   const up = p.upper ?? null;
@@ -36,12 +48,14 @@ export function specText(p: SpecParam, withUnit = true): string {
 /** 是否在规格内；未录入返回 null */
 export function inSpec(p: SpecParam, v?: number | null): boolean | null {
   if (v === null || v === undefined || Number.isNaN(v)) return null;
+  if (isOkNg(p)) return v === 1;
   const eps = 1e-9;
   return (p.lower == null || v >= p.lower - eps) && (p.upper == null || v <= p.upper + eps);
 }
 
 /** 单个测试值的文本："辐照度=50.1mW/cm²(40~60) ✓" */
 export function valueText(v: Rec): string {
+  if (isOkNg(v)) return `${v.name}=${Number(v.value) === 1 ? 'OK' : 'NG'} ${v.result === 'FAIL' ? '✗' : '✓'}`;
   const spec = v.lower == null && v.upper == null ? '' : `(${specText(v as SpecParam, false)})`;
   return `${v.name}=${num(v.value)}${v.unit ?? ''}${spec} ${v.result === 'FAIL' ? '✗' : '✓'}`;
 }

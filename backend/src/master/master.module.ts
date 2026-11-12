@@ -11,7 +11,7 @@ import { RoutingController } from './routing.controller';
 
 /** 主数据：通用 CRUD */
 const crud = [
-  crudController({ model: 'Customer', prefix: 'customers', perm: 'master', label: '客户', search: ['code', 'name', 'short_name'], filters: ['is_active'] }),
+  crudController({ model: 'Customer', prefix: 'customers', perm: ['master', 'sales'], label: '客户', search: ['code', 'name', 'short_name'], filters: ['is_active'] }),
   crudController({ model: 'Supplier', prefix: 'suppliers', perm: 'master', label: '供应商', search: ['code', 'name', 'short_name', 'category'], filters: ['status', 'is_active'] }),
   crudController({
     model: 'Material', prefix: 'materials', perm: 'master', label: '物料', search: ['code', 'name', 'spec'],

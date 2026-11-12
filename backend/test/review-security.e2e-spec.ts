@@ -23,7 +23,7 @@ describe('评审改进：安全与合规', () => {
   test('P0-5 职责分离：admin 只管账号；manager 不能做质量签名；质量签名接口只限 QA', async () => {
     const { api } = t;
     const admin = await api.as('admin').ok('get', '/api/auth/me');
-    expect(admin.permissions).toEqual(['admin']);
+    expect(admin.permissions).toEqual(['admin', 'audit']); // G1：admin 可查审计追踪/签名台账（audit）
     const mgr = await api.as('manager').ok('get', '/api/auth/me');
     expect(mgr.permissions).not.toContain('qa');
     expect(mgr.permissions).not.toContain('admin');
@@ -80,7 +80,8 @@ describe('评审改进：安全与合规', () => {
     expect([bom.status, bom.submitted_by]).toEqual(['DRAFT', null]);
     await api.as('engineer').ok('put', `/api/boms/${bom.id}`, { material_id: mat.id, version: 'A0', lines: [{ component_id: ref.m['LED-460-5050'], qty_per: 12 }] });
     // 同时拥有工程与 QA 角色的人：可以提交，但不能批准自己提交的版本
-    await api.as('admin').ok('post', '/api/system/users', { username: 'eqa', full_name: '钱工程QA', password: DEMO_PASSWORD, roles: ['engineer', 'qa'] });
+    // 管理员设置的密码默认首次登录须修改（G2 E-03）；此处测试职责分离，显式免改密
+    await api.as('admin').ok('post', '/api/system/users', { username: 'eqa', full_name: '钱工程QA', password: DEMO_PASSWORD, roles: ['engineer', 'qa'], must_change_password: false });
     bom = await api.as('eqa').ok('post', `/api/boms/${bom.id}/submit`, { signature: SIG });
     const self = await api.as('eqa').post(`/api/boms/${bom.id}/approve`, { signature: SIG });
     expect(self.status).toBe(400);

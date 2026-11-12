@@ -42,6 +42,13 @@ export function calcPoLine(m: Mat, ln: PoLineInput, no: number): PoLineCalc {
     if (!hasPurchaseUnit(m)) throw new BizError(`第 ${no} 行 ${m.code} 未设置采购单位，请按库存单位（${m.uom}）录入数量`);
     if (uom !== m.purchase_uom) throw new BizError(`第 ${no} 行 ${m.code} 的采购单位为 ${m.purchase_uom}，不能按 ${uom} 下单`);
     const factor = m.purchase_factor;
+    // 采购单位是包装单位（卷/包/箱…）：只能整包下单，不出现 1.09 卷
+    if (Math.abs(ln.purchase_qty - Math.round(ln.purchase_qty)) > 1e-6) {
+      throw new BizError(
+        `第 ${no} 行 ${m.code} 按${uom}下单须为整数${uom}（填写了 ${round(ln.purchase_qty, 4)} ${uom}，1 ${uom} = ${round(factor, 4)} ${m.uom}）。` +
+          `请改为 ${Math.ceil(ln.purchase_qty - EPS)} ${uom}，或改按 ${m.uom} 下单`,
+      );
+    }
     const hasPrice = ln.purchase_price !== null && ln.purchase_price !== undefined;
     const pp = price6(hasPrice ? ln.purchase_price : dec(ln.unit_price).times(factor));
     return {

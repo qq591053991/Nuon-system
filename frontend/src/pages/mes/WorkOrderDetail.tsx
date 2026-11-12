@@ -3,12 +3,12 @@ import {
   Space, Spin, Steps, Table, Tabs, Tag, Tooltip, Typography, message,
 } from 'antd';
 import {
-  ArrowLeftOutlined, EditOutlined, ExportOutlined, FileProtectOutlined, FormOutlined, InboxOutlined, ReloadOutlined, ScanOutlined, SendOutlined,
+  ArrowLeftOutlined, ColumnHeightOutlined, EditOutlined, ExportOutlined, FileProtectOutlined, FormOutlined, InboxOutlined, ReloadOutlined, ScanOutlined, SendOutlined,
   SplitCellsOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { get, post, put, type Rec } from '../../api/http';
 import { useAuth } from '../../auth';
 import PageHeader from '../../components/PageHeader';
@@ -16,6 +16,7 @@ import { EquipmentSelect, LocationSelect } from '../../components/RemoteSelect';
 import StatusTag from '../../components/StatusTag';
 import { dictLabel } from '../../utils/dict';
 import { fmtDate, fmtDateTime, fmtQty, toDate } from '../../utils/format';
+import { KittingTable, kittingSummary } from '../erp/shared';
 import { ReleaseBatchModal, WoReleaseHistory } from './ReleaseBatch';
 import { PRIORITY_OPTIONS, ParamsText, inSpec, num, specText, type SpecParam } from './spec';
 
@@ -50,11 +51,11 @@ function guide(wo: Rec): { type: 'info' | 'success' | 'warning' | 'error'; text:
   const pendingFg = r4((wo.completed_qty || 0) - (wo.received_qty || 0));
   switch (wo.status) {
     case 'PLANNED':
-      return { type: 'info', text: '下一步：确认产品、数量和计划日期无误后点击【下达】。下达后数量不可再修改。' };
+      return { type: 'info', text: '下一步：先看【齐套检查】页签确认物料是否齐套，产品、数量和计划日期无误后点击【下达】。下达后未开工的部分仍可【调整】数量和日期。' };
     case 'RELEASED':
       return {
         type: 'info',
-        text: `下一步：点击【生成领料单】，系统按 FEFO 自动分配合格批次，仓库过账发料后即可开工；${wo.serial_control ? '在工位终端逐台扫码报工' : '在本页【批量报工】'}。`,
+        text: `下一步：先看【齐套检查】（只读，不占库存），齐套后点击【生成领料单】，系统按 FEFO 自动分配合格批次，仓库过账发料后即可开工；${wo.serial_control ? '在工位终端逐台扫码报工' : '在本页【批量报工】'}。`,
       };
     case 'IN_PROGRESS':
       return {
@@ -71,7 +72,7 @@ function guide(wo: Rec): { type: 'info' | 'success' | 'warning' | 'error'; text:
     case 'CLOSED':
       return { type: 'success', text: '该批已由 QA 审核 DHR 并放行，成品为合格库存，可以发货。' };
     case 'CANCELLED':
-      return { type: 'error', text: '工单已取消，已生成的序列号已作废。' };
+      return { type: 'error', text: wo.lot_no ? '工单已取消，下达时生成的序列号已作废。' : '工单已取消（未下达，未生成序列号）。' };
     default:
       return { type: 'info', text: '' };
   }
@@ -320,6 +321,7 @@ function EditWoModal({ wo, open, onClose, onDone }: { wo: Rec; open: boolean; on
             <Select options={PRIORITY_OPTIONS} style={{ width: 140 }} />
           </Form.Item>
         </Space>
+        {wo.so_no && <Typography.Paragraph type="secondary" style={{ marginTop: -8 }}>来源订单 {wo.so_no}：工单数量超过订单数量的部分完工后入库为库存。</Typography.Paragraph>}
         <Form.Item name="range" label="计划开始 ~ 计划完成">
           <DatePicker.RangePicker style={{ width: '100%' }} allowEmpty={[true, true]} />
         </Form.Item>
@@ -327,6 +329,83 @@ function EditWoModal({ wo, open, onClose, onDone }: { wo: Rec; open: boolean; on
           <Input.TextArea rows={2} />
         </Form.Item>
       </Form>
+    </Modal>
+  );
+}
+
+// ---------------- 弹窗：下达后调整（未开工部分的数量 / 计划日期） ----------------
+function AdjustWoModal({ wo, open, onClose, onDone }: { wo: Rec; open: boolean; onClose: () => void; onDone: () => void }) {
+  const [form] = Form.useForm();
+  const [info, setInfo] = useState<Rec | null>(null);
+  const [preview, setPreview] = useState<Rec | null>(null);
+  const [previewErr, setPreviewErr] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const timer = useMemo(() => ({ t: undefined as any }), []);
+  const body = () => {
+    const v = form.getFieldsValue();
+    const [s, e] = v.range || [];
+    return { planned_qty: v.planned_qty, planned_start: toDate(s), planned_end: toDate(e), reason: v.reason };
+  };
+  const runPreview = () => {
+    clearTimeout(timer.t);
+    timer.t = setTimeout(async () => {
+      try {
+        setPreview(await post(`/work-orders/${wo.id}/adjust`, { ...body(), preview: true }, true));
+        setPreviewErr(null);
+      } catch (e: any) {
+        setPreview(null);
+        const d = e?.response?.data?.detail;
+        setPreviewErr(d && d !== '没有修改任何内容' ? d : null);
+      }
+    }, 300);
+  };
+  const submit = async () => {
+    await form.validateFields();
+    setSaving(true);
+    try {
+      const r = await post(`/work-orders/${wo.id}/adjust`, body());
+      message.success(`工单已调整：${r.changes.join('；')}`);
+      if (r.warnings?.length) message.warning(r.warnings.join('；'), 8);
+      onDone();
+      onClose();
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <Modal open={open} title={`调整工单 ${wo.no}（未开工部分）`} width={620} okText="确认调整" onOk={submit} confirmLoading={saving} onCancel={onClose}
+      destroyOnHidden maskClosable={false} okButtonProps={{ disabled: !!previewErr }}
+      afterOpenChange={(o) => {
+        if (!o) return;
+        setPreview(null);
+        setPreviewErr(null);
+        form.setFieldsValue({
+          planned_qty: wo.planned_qty, reason: '',
+          range: [wo.planned_start ? dayjs(wo.planned_start) : null, wo.planned_end ? dayjs(wo.planned_end) : null],
+        });
+        get(`/work-orders/${wo.id}/adjust-info`).then(setInfo);
+      }}>
+      {info && (
+        <Alert type="info" showIcon style={{ marginBottom: 12 }}
+          message={`已开工 ${num(info.started)} ${info.uom}（完工 ${num(info.completed_qty)}、报废 ${num(info.scrap_qty)}），数量最少可调到 ${num(info.min_qty)}${info.serial_control ? `；调减时作废未开工的序列号（现有 ${info.unstarted_serials} 个），调增时按原批号补发序列号/UDI` : ''}`}
+          description={info.so_line ? `来源订单 ${info.so_line.so_no} 第${info.so_line.line_no}行 订购 ${num(info.so_line.qty)}${info.so_line.other_wo_qty ? `，其他工单已排 ${num(info.so_line.other_wo_qty)}` : ''}` : undefined} />
+      )}
+      <Form form={form} layout="vertical" onValuesChange={runPreview}>
+        <Form.Item name="planned_qty" label="计划数量" rules={[{ required: true, message: '请填写数量' }]}>
+          <InputNumber min={info?.min_qty || 0} precision={wo.serial_control ? 0 : 4} style={{ width: 200 }} suffix={wo.uom} autoFocus />
+        </Form.Item>
+        <Form.Item name="range" label="计划开始 ~ 计划完成">
+          <DatePicker.RangePicker style={{ width: '100%' }} allowEmpty={[true, true]} />
+        </Form.Item>
+        <Form.Item name="reason" label="调整原因（记入审计追踪）" rules={[{ required: true, whitespace: true, message: '请填写调整原因' }]}>
+          <Input.TextArea rows={2} placeholder="如：客户订单减少 5 台 / 物料延期到货，推迟一周" />
+        </Form.Item>
+      </Form>
+      {previewErr && <Alert type="error" showIcon message={previewErr} />}
+      {preview && (
+        <Alert type={preview.warnings?.length ? 'warning' : 'success'} showIcon message={`将调整：${preview.changes.join('；')}`}
+          description={preview.warnings?.length ? <ul style={{ margin: 0, paddingLeft: 18 }}>{preview.warnings.map((t: string) => <li key={t}>{t}</li>)}</ul> : undefined} />
+      )}
     </Modal>
   );
 }
@@ -350,7 +429,11 @@ export default function WorkOrderDetail() {
   const [fgOpen, setFgOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [releaseOpen, setReleaseOpen] = useState(false);
+  const [adjustOpen, setAdjustOpen] = useState(false);
   const [relKey, setRelKey] = useState(0);
+  const [sp] = useSearchParams();
+  const [tab, setTab] = useState<string | undefined>(sp.get('tab') || undefined);
+  const [kit, setKit] = useState<Rec | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -366,6 +449,8 @@ export default function WorkOrderDetail() {
       setRecords(r);
       setIssues(i.items);
       setNcrs(n.items);
+      if (['PLANNED', 'RELEASED', 'IN_PROGRESS'].includes(w.status)) get(`/kitting/work-orders/${id}`, undefined, true).then(setKit).catch(() => setKit(null));
+      else setKit(null);
     } catch {
       setFailed(true);
     }
@@ -418,13 +503,23 @@ export default function WorkOrderDetail() {
             <li>生成生产批号；</li>
             {wo.serial_control && <li>按数量逐台生成 <b>{num(wo.planned_qty)}</b> 个序列号及 UDI（GS1 格式）。</li>}
           </ol>
-          <p style={{ marginTop: 8, color: '#8c8c9e' }}>下达后数量不能再修改，如需调整请取消后重建。</p>
+          {kit && !kit.kitted && <p style={{ marginTop: 8, color: '#d46b08' }}>{kittingSummary(kit).text}（可先下达，齐套后再领料）。</p>}
+          <p style={{ marginTop: 8, color: '#8c8c9e' }}>下达后未开工的部分仍可用【调整】改数量和日期。</p>
         </div>
       ),
       onOk: () => run(() => post(`/work-orders/${id}/release`), '工单已下达：已生成批号' + (wo.serial_control ? '、序列号与 UDI' : '')),
     });
 
   const createIssue = async () => {
+    if (kit && !kit.kitted) {
+      const ok = await modal.confirm({
+        title: `缺料 ${kit.shortage_count} 项，仍要生成领料单？`,
+        content: '生成领料单会把现有合格库存先分配给本工单（排在后面的工单将领不到），缺的部分不会出库。建议先看【齐套检查】，物料到齐后再领料。',
+        okText: '仍然生成',
+        cancelText: '先不领料',
+      });
+      if (!ok) return;
+    }
     setBusy(true);
     try {
       const r = await post(`/work-orders/${id}/issues`, {});
@@ -444,6 +539,11 @@ export default function WorkOrderDetail() {
           <Button icon={<EditOutlined />} onClick={() => setEditOpen(true)}>修改</Button>
           <Button type="primary" icon={<SendOutlined />} loading={busy} onClick={release}>下达</Button>
         </>
+      )}
+      {active && can('plan') && (
+        <Tooltip title="未开工部分可调数量、计划日期（记入审计追踪）">
+          <Button icon={<ColumnHeightOutlined />} onClick={() => setAdjustOpen(true)}>调整</Button>
+        </Tooltip>
       )}
       {active && can('wms', 'plan') && (
         <Tooltip title={needIssue ? (draftIssue ? '已有待过账的领料单，系统只会为剩余需求分配批次' : '') : '物料已按 BOM 领齐'}>
@@ -466,7 +566,7 @@ export default function WorkOrderDetail() {
         <Button type={primary === 'dhr' ? 'primary' : 'default'} icon={<FileProtectOutlined />} onClick={() => nav(`/quality/dhr/${id}`)}>查看 DHR</Button>
       )}
       {(st === 'PLANNED' || st === 'RELEASED') && can('plan') && (
-        <Popconfirm title="确定取消该工单？" description="已生成的序列号将作废；已领料的工单需先退料。"
+        <Popconfirm title="确定取消该工单？" description={st === 'RELEASED' ? '下达时生成的序列号将作废；已领料的工单需先退料。' : '计划工单尚未下达，取消后不可恢复。'} okText="确认取消工单" cancelText="不取消"
           onConfirm={() => run(() => post(`/work-orders/${id}/cancel`), '工单已取消')}>
           <Button danger loading={busy}>取消工单</Button>
         </Popconfirm>
@@ -474,7 +574,20 @@ export default function WorkOrderDetail() {
     </>
   );
 
+  const kitOpen = ['PLANNED', 'RELEASED', 'IN_PROGRESS'].includes(st);
   const tabs = [
+    ...(kitOpen
+      ? [{
+        key: 'kitting',
+        label: (
+          <span>
+            齐套检查
+            {kit && kit.lines?.length > 0 && (kit.kitted ? <Tag color="green" style={{ marginInlineStart: 4 }}>齐套</Tag> : <Tag color="red" style={{ marginInlineStart: 4 }}>缺 {kit.shortage_count} 项</Tag>)}
+          </span>
+        ),
+        children: <KittingTable data={kit} loading={!kit} />,
+      }]
+      : []),
     {
       key: 'materials',
       label: `用料清单（${wo.materials?.length || 0}）`,
@@ -740,13 +853,14 @@ export default function WorkOrderDetail() {
           />
         </Card>
         <Card styles={{ body: { paddingTop: 4 } }}>
-          <Tabs items={tabs} />
+          <Tabs items={tabs} activeKey={tab && tabs.some((t) => t.key === tab) ? tab : undefined} onChange={setTab} />
         </Card>
       </Space>
       <IssueResultModal issue={issueResult} onClose={() => setIssueResult(null)} onPosted={load} />
       <BatchReportModal wo={wo} open={batchOpen} onClose={() => setBatchOpen(false)} onDone={load} />
       <FgReceiptModal wo={wo} open={fgOpen} onClose={() => setFgOpen(false)} onDone={load} />
       <EditWoModal wo={wo} open={editOpen} onClose={() => setEditOpen(false)} onDone={load} />
+      <AdjustWoModal wo={wo} open={adjustOpen} onClose={() => setAdjustOpen(false)} onDone={load} />
       <ReleaseBatchModal wo={wo} open={releaseOpen} onClose={() => setReleaseOpen(false)}
         onDone={() => {
           setRelKey((k) => k + 1);

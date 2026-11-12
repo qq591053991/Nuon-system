@@ -6,6 +6,7 @@ import { get, post, type Rec } from '../../api/http';
 import { useAuth } from '../../auth';
 import CrudPage, { type Field } from '../../components/CrudPage';
 import { fmtDate, fmtQty } from '../../utils/format';
+import { OpTypesButton, OpTypesCell } from '../mes/station/EquipmentOpTypes';
 
 const active: Field = { name: 'is_active', label: '启用', type: 'switch', default: true, width: 70 };
 
@@ -13,9 +14,9 @@ export function Customers() {
   return (
     <CrudPage
       title="客户（品牌方/注册人）"
-      sub="代工模式下，产品注册证属于客户（医疗器械注册人）。质量协议到期前系统会提醒。"
+      sub="代工模式下，产品注册证属于客户（医疗器械注册人）。销售可直接新建/维护客户；质量协议到期前系统会提醒。"
       url="/customers"
-      perm="master"
+      perm={['master', 'sales']}
       fields={[
         { name: 'code', label: '客户编码', required: true, width: 100, fixed: 'left' },
         { name: 'name', label: '客户名称', required: true, width: 220 },
@@ -103,7 +104,8 @@ export function Materials() {
         { name: 'iqc_required', label: '来料需检验', type: 'switch', default: true, width: 90 },
         { name: 'aql', label: 'AQL', type: 'number', default: 1.0, list: false, help: 'GB/T 2828.1 接收质量限，如 0.65 / 1.0 / 2.5' },
         { name: 'wavelength_nm', label: '波长(nm)', width: 80 },
-        { name: 'msl_level', label: '湿敏等级 MSL', list: false },
+        { name: 'msl_level', label: '湿敏等级 MSL', list: false, help: 'MSL 2a 及以上（2a、3、4、5、5a、6）须放防潮柜库位：放普通库位时收货/上架会要求确认' },
+        { name: 'default_location_id', label: '默认库位（收货/上架自动带出）', type: 'remote', url: '/locations', list: false, help: '如湿敏 LED → 防潮柜 DRY-01；PDA 收货、上架和“待上架”清单按此库位建议' },
         { name: 'esd_sensitive', label: '静电敏感 ESD', type: 'switch', list: false },
         { name: 'model', label: '产品型号', list: false },
         { name: 'registration_no', label: '注册证/备案号', list: false },
@@ -192,6 +194,7 @@ export function EquipmentPage() {
           { name: 'serial_no', label: '出厂编号', list: false },
           { name: 'equipment_type', label: '类型', type: 'select', dict: 'equipment_type', default: 'PRODUCTION', width: 100, render: (v) => ({ PRODUCTION: '生产设备', TEST: '检测仪器', AGING: '老化设备' } as Rec)[v] || v },
           { name: 'work_center_id', label: '工作中心', type: 'remote', url: '/work-centers', displayName: 'work_center_name', width: 120 },
+          { name: 'op_types', label: '适用工序', form: false, width: 170, render: (v, r) => <OpTypesCell value={v} row={r} /> },
           { name: 'status', label: '状态', type: 'select', dict: 'equipment_status', default: 'NORMAL', width: 90 },
           { name: 'calibration_required', label: '需校准', type: 'switch', width: 80 },
           { name: 'calibration_cycle_days', label: '校准周期(天)', type: 'number', list: false },
@@ -210,7 +213,12 @@ export function EquipmentPage() {
           { name: 'remark', label: '备注', type: 'textarea', list: false },
         ]}
         filters={[{ name: 'status', label: '状态', dict: 'equipment_status' }, { name: 'equipment_type', label: '类型', dict: 'equipment_type' }]}
-        rowActions={(row) => (row.calibration_required ? <Button size="small" icon={<SafetyOutlined />} onClick={() => setCal(row)}>校准</Button> : null)}
+        rowActions={(row, reload) => (
+          <>
+            <OpTypesButton row={row} onSaved={reload} />
+            {row.calibration_required ? <Button size="small" icon={<SafetyOutlined />} onClick={() => setCal(row)}>校准</Button> : null}
+          </>
+        )}
       />
       <CalibrationDrawer eq={cal} onClose={() => setCal(null)} />
     </>
@@ -238,9 +246,11 @@ export function Locations() {
   return (
     <CrudPage
       title="库位"
-      sub="MSL 湿敏 LED 请放在“防潮柜”类型库位；不合格品区的库存不会被领料分配。"
+      sub="MSL 湿敏 LED 请放在“防潮柜”类型库位；不合格品区的库存不会被领料分配。客供料只能放“客供料仓”的库位，自有物料不能放客供料仓。"
       url="/locations"
       perm="master"
+      extra={<Button onClick={() => window.open('/wms/print/labels?location=all', '_blank')}>打印全部库位标签</Button>}
+      rowActions={(row) => <Button size="small" onClick={() => window.open(`/wms/print/labels?location=${row.id}`, '_blank')}>库位标签</Button>}
       fields={[
         { name: 'code', label: '库位编码', required: true, width: 120 },
         { name: 'name', label: '库位名称', width: 200 },

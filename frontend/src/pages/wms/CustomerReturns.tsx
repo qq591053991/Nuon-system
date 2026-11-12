@@ -2,7 +2,7 @@ import {
   Alert, Button, Card, Col, DatePicker, Descriptions, Drawer, Form, Input, InputNumber, Modal, Row, Segmented, Space, Table, Tag, Tooltip, Typography, message,
   type TableColumnsType,
 } from 'antd';
-import { CheckCircleOutlined, DeleteOutlined, PlusOutlined, ReloadOutlined, RollbackOutlined, ScanOutlined } from '@ant-design/icons';
+import { CheckCircleOutlined, DeleteOutlined, PlusOutlined, ReloadOutlined, RollbackOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { useEffect, useRef, useState, type MouseEvent } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
@@ -12,8 +12,13 @@ import Attachments from '../../components/Attachments';
 import { isCancel, useESign } from '../../components/ESign';
 import PageHeader from '../../components/PageHeader';
 import RemoteSelect, { CustomerSelect, LocationSelect, MaterialSelect } from '../../components/RemoteSelect';
+import ScanInput, { type ScanInputHandle } from '../../components/ScanInput';
 import StatusTag from '../../components/StatusTag';
+import type { ScanResult } from '../../utils/scan';
+import { errText, FeedbackBar, useFeedback } from './pda/kit';
 import { usePaged } from '../../components/usePaged';
+import ExportButton from '../../components/ExportButton';
+import ResponsiveTable, { useNarrow, type RColumn } from '../../components/ResponsiveTable';
 import { dictLabel } from '../../utils/dict';
 import { fmtDate, fmtDateTime, toDate } from '../../utils/format';
 import { LotLink, MaterialCell, Qty, SnLink } from './common';
@@ -34,15 +39,20 @@ const CLOSE_EFFECT: Record<string, string> = {
 
 const stop = (e: MouseEvent) => e.stopPropagation();
 
+/** 常用退货原因（点选即可，也可手输） */
+const REASONS = ['不亮 / 不开机', '亮度不足 / 光衰', '外观破损', '功能异常', '运输损坏', '客户无理由退货'];
+
 // ---------------- 登记客户退货 ----------------
 function CreateModal({ open, onClose, onDone }: { open: boolean; onClose: () => void; onDone: (r: Rec) => void }) {
+  const narrow = useNarrow(768);
   const [form] = Form.useForm();
   const [saving, setSaving] = useState(false);
   const [rejLoc, setRejLoc] = useState<number | undefined>();
-  const [scan, setScan] = useState('');
-  const scanRef = useRef<any>(null);
+  const { fb, show, clear } = useFeedback();
+  const scanRef = useRef<ScanInputHandle>(null);
   const customerId: number | undefined = Form.useWatch('customer_id', form);
   const soId: number | undefined = Form.useWatch('so_id', form);
+  const lineList: Rec[] = Form.useWatch('lines', form) || [];
 
   // 退货品默认放入不合格品仓（冻结，待 QA 评审）
   useEffect(() => {
@@ -55,28 +65,29 @@ function CreateModal({ open, onClose, onDone }: { open: boolean; onClose: () => 
     if (open) {
       form.resetFields();
       form.setFieldsValue({ return_date: dayjs(), lines: [] });
-      setScan('');
+      clear();
+      setTimeout(() => scanRef.current?.focus(), 200);
     }
-  }, [open, form]);
+  }, [open, form, clear]);
 
-  /** 扫描序列号：自动带出产品与批号，追加一行 */
-  const addBySn = async (raw: string) => {
-    const sn = raw.trim();
+  /** 扫描序列号或 UDI（带括号 / GS1 原始串）：自动带出产品、批号、客户、原订单、原发货单，追加一行；失败也清空扫码框并保持焦点 */
+  const addBySn = async (_code: string, p: ScanResult) => {
+    const sn = (p.sn || p.code).trim();
     if (!sn) return;
     const lines: Rec[] = form.getFieldValue('lines') || [];
-    if (lines.some((l) => l.sn === sn)) {
-      message.warning(`序列号 ${sn} 已在列表中`);
-      return;
-    }
+    if (lines.some((l) => l.sn === sn)) return show('err', `序列号 ${sn} 已在列表中，请勿重复扫描`);
     try {
-      const d = await get(`/mes/scan/${encodeURIComponent(sn)}`, undefined, true);
-      if (d.status !== 'SHIPPED') message.warning(`序列号 ${sn} 当前状态为【${dictLabel('sn_status', d.status)}】，不是已发货产品，提交时将被拒绝`);
-      form.setFieldsValue({ lines: [...lines, { sn, material_id: d.product?.id, lot_no: d.lot_no, qty: 1, location_id: rejLoc }] });
-      setScan('');
-    } catch {
-      message.error(`序列号 ${sn} 不存在`);
-    } finally {
-      scanRef.current?.focus();
+      const d = await get('/wms/rma-scan', { code: sn }, true);
+      const cur = form.getFieldValue('customer_id');
+      if (cur && d.customer_id && cur !== d.customer_id) return show('err', `${sn} 是发给“${d.customer_name}”的，与本退货单客户不同，请分开登记`);
+      const patch: Rec = { lines: [...lines, { sn, material_id: d.material_id, lot_no: d.lot_no, qty: 1, location_id: rejLoc }] };
+      if (!cur && d.customer_id) patch.customer_id = d.customer_id;
+      if (!form.getFieldValue('so_id') && d.so_id) patch.so_id = d.so_id;
+      if (!form.getFieldValue('shipment_id') && d.shipment_id) patch.shipment_id = d.shipment_id;
+      form.setFieldsValue(patch);
+      show('ok', <>✓ <b>{sn}</b> {d.material_code}｜客户 {d.customer_name}｜订单 {d.so_no ?? '-'}｜发货单 {d.shipment_no ?? '-'}（{fmtDate(d.ship_date)}）</>);
+    } catch (e) {
+      show('err', errText(e));
     }
   };
 
@@ -104,10 +115,27 @@ function CreateModal({ open, onClose, onDone }: { open: boolean; onClose: () => 
   };
 
   return (
-    <Modal open={open} title={<span><RollbackOutlined style={{ marginRight: 8 }} />登记客户退货（RMA）</span>} width={1100} okText="确认收货"
+    <Modal open={open} title={<span><RollbackOutlined style={{ marginRight: 8 }} />登记客户退货（RMA）</span>} width={narrow ? '100%' : 1100} okText="确认收货" cancelText="返回"
+      style={narrow ? { top: 0, maxWidth: '100vw', paddingBottom: 0 } : undefined}
+      styles={narrow ? { body: { maxHeight: 'calc(100vh - 130px)', overflowY: 'auto', overflowX: 'hidden' } } : undefined}
+      okButtonProps={{ size: narrow ? 'large' : 'middle' }} cancelButtonProps={{ size: narrow ? 'large' : 'middle' }}
       confirmLoading={saving} onOk={submit} onCancel={onClose} destroyOnHidden maskClosable={false}>
-      <Alert type="info" showIcon style={{ marginBottom: 16 }}
-        message="退货品一律以“冻结”状态入库（默认放不合格品仓，不能领用或发货），系统自动开具来源为“客户”的 NCR，由 QA 评审处置后关闭退货单。序列号产品请逐台扫描。" />
+      {!narrow && <Alert type="info" showIcon style={{ marginBottom: 12 }}
+        message="退货品一律以“冻结”状态入库（默认放不合格品仓，不能领用或发货），系统自动开具来源为“客户”的 NCR，由 QA 评审处置后关闭退货单。序列号产品请逐台扫描。" />}
+      <ScanInput ref={scanRef} onScan={addBySn} autoFocus captureGlobal placeholder="扫描产品序列号 / UDI，自动带出客户、订单、发货单" style={{ height: 50, fontSize: 17 }} />
+      <FeedbackBar fb={fb} />
+      {lineList.filter((l) => l?.sn).length > 0 && (
+        <div style={{ border: '1px solid #f0f0f0', borderRadius: 8, padding: 6, marginBottom: 12 }}>
+          <div style={{ fontWeight: 600, padding: '2px 4px' }}>已扫 {lineList.filter((l) => l?.sn).length} 台</div>
+          {lineList.map((l, i) => (l?.sn ? (
+            <div key={l.sn} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '3px 4px' }}>
+              <span className="mono" style={{ flex: 1, fontSize: 16 }}>{l.sn}</span>
+              <Button danger icon={<DeleteOutlined />} aria-label={`删除 ${l.sn}`} style={{ width: 44, height: 40 }}
+                onClick={() => { form.setFieldsValue({ lines: lineList.filter((_, j) => j !== i) }); show('info', `已移除 ${l.sn}`, false); scanRef.current?.focus(); }} />
+            </div>
+          ) : null))}
+        </div>
+      )}
       <Form form={form} layout="vertical">
         <Row gutter={16}>
           <Col xs={24} md={8}>
@@ -135,16 +163,15 @@ function CreateModal({ open, onClose, onDone }: { open: boolean; onClose: () => 
             </Form.Item>
           </Col>
           <Col xs={24} md={18}>
-            <Form.Item name="reason" label="退货原因" rules={[{ required: true, whitespace: true, message: '请填写退货原因' }]}>
+            <Form.Item name="reason" label="退货原因" rules={[{ required: true, whitespace: true, message: '请填写退货原因' }]} style={{ marginBottom: 6 }}>
               <Input placeholder="客户描述的故障现象 / 退货理由（将写入 NCR）" />
             </Form.Item>
+            <Space size={[6, 6]} wrap style={{ marginBottom: 12 }}>
+              {REASONS.map((r) => <Tag.CheckableTag key={r} checked={false} style={{ padding: '4px 10px', fontSize: 14, border: '1px solid #d9d9d9' }} onChange={() => form.setFieldsValue({ reason: r })}>{r}</Tag.CheckableTag>)}
+            </Space>
           </Col>
         </Row>
-        <Space style={{ marginBottom: 12 }} wrap>
-          <Input ref={scanRef} prefix={<ScanOutlined />} placeholder="扫描/输入产品序列号，回车添加" style={{ width: 320 }} className="mono"
-            value={scan} onChange={(e) => setScan(e.target.value)} onPressEnter={() => addBySn(scan)} autoFocus />
-          <Typography.Text type="secondary">序列号产品逐台扫描；非序列号物料点击“添加明细”。</Typography.Text>
-        </Space>
+        <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>序列号产品逐台扫描（上方扫码框）；非序列号物料点击“添加明细”。</Typography.Paragraph>
         <Form.List name="lines">
           {(fields, { add, remove }) => {
             const columns: TableColumnsType<(typeof fields)[number]> = [
@@ -234,9 +261,11 @@ function CloseModal({ rma, onClose, onDone }: { rma: Rec | null; onClose: () => 
         setTouched(true);
         if (restock && !locId) return;
         try {
-          const signature = await sign({ meaning: '客户退货关闭', description: `${rma!.no}：按 ${rma!.ncr_no} 处置【${dictLabel('disposition', disp)}】执行。${CLOSE_EFFECT[disp ?? ''] ?? ''}` });
           setSaving(true);
-          const r = await post(`/customer-returns/${rma!.id}/close`, { location_id: locId ?? null, remark: remark.trim() || null, signature });
+          const r = await sign({
+            meaning: '客户退货关闭', description: `${rma!.no}：按 ${rma!.ncr_no} 处置【${dictLabel('disposition', disp)}】执行。${CLOSE_EFFECT[disp ?? ''] ?? ''}`,
+            submit: (signature) => post(`/customer-returns/${rma!.id}/close`, { location_id: locId ?? null, remark: remark.trim() || null, signature }),
+          });
           message.success(`${rma!.no} 已关闭`);
           onDone(r);
           onClose();
@@ -267,6 +296,7 @@ function CloseModal({ rma, onClose, onDone }: { rma: Rec | null; onClose: () => 
 // ---------------- 详情 ----------------
 function RmaDrawer({ rma, onClose, onCloseIt }: { rma: Rec | null; onClose: () => void; onCloseIt: () => void }) {
   const { can } = useAuth();
+  const narrow = useNarrow(768);
   if (!rma) return <Drawer open={false} onClose={onClose} />;
   const ncrDone = rma.ncr_status && rma.ncr_status !== 'OPEN';
   const columns: TableColumnsType<Rec> = [
@@ -280,7 +310,7 @@ function RmaDrawer({ rma, onClose, onCloseIt }: { rma: Rec | null; onClose: () =
   return (
     <Drawer
       open
-      width={900}
+      width={narrow ? '100%' : 900}
       onClose={onClose}
       title={<Space>客户退货 <span className="mono">{rma.no}</span><StatusTag dict="rma_status" value={rma.status} /></Space>}
       extra={can('qa') && rma.status === 'RECEIVED' && (
@@ -320,12 +350,23 @@ function RmaDrawer({ rma, onClose, onCloseIt }: { rma: Rec | null; onClose: () =
 
 export default function CustomerReturns() {
   const { can } = useAuth();
-  const [sp] = useSearchParams();
+  const narrow = useNarrow();
+  const [sp, setSp] = useSearchParams();
   const qParam = sp.get('q') || '';
-  const [status, setStatus] = useState('');
-  const { rows, loading, setQuery, reload, pagination } = usePaged('/customer-returns', { q: qParam || undefined });
+  const [status, setStatus] = useState(sp.get('status') || '');
+  const { rows, loading, query, setQuery, reload, pagination } = usePaged('/customer-returns', { q: qParam || undefined, status: sp.get('status') || undefined });
   const [current, setCurrent] = useState<Rec | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  // /wms/customer-returns?new=1 直接打开登记（PDA 首页入口）
+  useEffect(() => {
+    if (sp.get('new') === '1' && can('wms', 'qa')) {
+      setCreateOpen(true);
+      const next = new URLSearchParams(sp);
+      next.delete('new');
+      setSp(next, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sp]);
   const [closing, setClosing] = useState<Rec | null>(null);
 
   const lastQ = useRef(qParam);
@@ -341,8 +382,8 @@ export default function CustomerReturns() {
   };
   const openRow = async (r: Rec) => setCurrent(await get(`/customer-returns/${r.id}`));
 
-  const columns: TableColumnsType<Rec> = [
-    { title: '退货单号', dataIndex: 'no', fixed: 'left', render: (v) => <Typography.Link className="mono" style={{ fontWeight: 600 }}>{v}</Typography.Link> },
+  const columns: RColumn[] = [
+    { title: '退货单号', dataIndex: 'no', fixed: narrow ? undefined : 'left', mobile: 'title', render: (v) => <Typography.Link className="mono" style={{ fontWeight: 600 }}>{v}</Typography.Link> },
     { title: '收货日期', dataIndex: 'return_date', render: (v) => fmtDate(v) },
     { title: '客户', dataIndex: 'customer_name' },
     {
@@ -356,15 +397,16 @@ export default function CustomerReturns() {
     },
     { title: '数量', dataIndex: 'total_qty', align: 'right' },
     { title: '退货原因', dataIndex: 'reason', width: 220, ellipsis: { showTitle: true } },
+    { title: '原发货单', dataIndex: 'shipment_no', mobile: 'hidden', render: (v) => v || '-' },
     {
       title: 'NCR', dataIndex: 'ncr_no',
       render: (v, r) => (v ? <Space size={4}><Link className="mono" to={`/quality/ncrs?q=${encodeURIComponent(v)}`} onClick={stop}>{v}</Link><StatusTag dict="ncr_status" value={r.ncr_status} /></Space> : '-'),
     },
     { title: '处置', dataIndex: 'ncr_disposition', render: (v) => (v ? <StatusTag dict="disposition" value={v} /> : '-') },
     { title: '状态', dataIndex: 'status', render: (v) => <StatusTag dict="rma_status" value={v} /> },
-    { title: '登记人', dataIndex: 'created_by' },
+    { title: '登记人', dataIndex: 'created_by', mobile: 'hidden' },
     {
-      title: '操作', key: 'op', fixed: 'right',
+      title: '操作', key: '_op', fixed: narrow ? undefined : 'right',
       render: (_, r) =>
         can('qa') && r.status === 'RECEIVED' && r.ncr_status && r.ncr_status !== 'OPEN' ? (
           <Button size="small" type="primary" onClick={(e) => { stop(e); setClosing(r); }}>关闭</Button>
@@ -384,8 +426,15 @@ export default function CustomerReturns() {
           <Segmented value={status} options={STATUS_TABS} onChange={(v) => { setStatus(v as string); setQuery({ status: (v as string) || undefined }); }} />
           <Input.Search key={qParam} allowClear placeholder="退货单号 / 序列号 / 批号 / 原因" defaultValue={qParam} style={{ width: 280 }} onSearch={(q) => setQuery({ q: q.trim() })} />
           <Button icon={<ReloadOutlined />} onClick={reload} />
+          <ExportButton url="/customer-returns" params={query} filename="客户退货" columns={[
+            { title: '退货单号', key: 'no' }, { title: '收货日期', key: 'return_date', type: 'date' }, { title: '客户', key: 'customer_name' },
+            { title: '原订单', key: 'so_no' }, { title: '原发货单', key: 'shipment_no' },
+            { title: '明细', value: (r) => (r.lines as Rec[]).map((l) => l.sn || `${l.material_code} ${l.lot_no || ''}×${l.qty}`).join('、') },
+            { title: '数量', key: 'total_qty', type: 'number' }, { title: '退货原因', key: 'reason' }, { title: 'NCR', key: 'ncr_no' },
+            { title: '处置', value: (r) => dictLabel('disposition', r.ncr_disposition) }, { title: '状态', value: (r) => dictLabel('rma_status', r.status) }, { title: '登记人', key: 'created_by' },
+          ]} />
         </Space>
-        <Table<Rec>
+        <ResponsiveTable
           rowKey="id"
           size="middle"
           columns={columns}

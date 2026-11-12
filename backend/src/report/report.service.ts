@@ -1,7 +1,6 @@
-/** 经营驾驶舱与“我的待办”（按权限）。日期按工厂时区计算。 */
+/** 经营驾驶舱（厂长视角的图表与汇总；金额按读权限裁剪）。日期按工厂时区计算。待办见 workbench.service.ts。 */
 import { Injectable } from '@nestjs/common';
-import { userPermissions } from '../auth/roles';
-import type { CurrentUser } from '../common/context';
+import { READ_PERMS, userPermissions } from '../auth/roles';
 import { addDays, fmtDate, localDateStr, today } from '../common/dates';
 import { g, round, round2 } from '../common/num';
 import type { Tx } from '../common/prisma.service';
@@ -27,7 +26,7 @@ export function localStart(d: Date): Date {
 const pct = (n: number, total: number) => round((n / total) * 100, 1);
 
 /** 待 QA 放行的工单数：已完工待整批放行，或生产中已有入库成品可分批放行 */
-async function pendingReleaseCount(tx: Tx): Promise<number> {
+export async function pendingReleaseCount(tx: Tx): Promise<number> {
   const rows = await tx.$queryRaw<{ n: number }[]>`
     SELECT COUNT(*)::int AS n FROM mes_work_order w
     WHERE w.dhr_status = 'OPEN' AND (
@@ -39,8 +38,15 @@ async function pendingReleaseCount(tx: Tx): Promise<number> {
 
 @Injectable()
 export class ReportService {
-  async dashboard(tx: Tx) {
+  /**
+   * 驾驶舱数据。金额按读权限矩阵裁剪：在手订单金额只给销售/财务（厂长已含），库存金额只给财务/采购；
+   * 无权限时这些字段为 null，相关预警不返回。user 省略时（内部调用）返回全部。
+   */
+  async dashboard(tx: Tx, user?: { roles: string }) {
     const t = today();
+    const perms = user ? userPermissions(user) : null;
+    const canSales = !perms || READ_PERMS.salesAmount.some((p) => perms.has(p));
+    const canStock = !perms || READ_PERMS.stockValue.some((p) => perms.has(p));
     const tMs = t.getTime();
     const openSo = await tx.salesOrder.findMany({
       where: { status: { in: ['CONFIRMED', 'IN_PRODUCTION', 'PARTIAL_SHIPPED'] } }, orderBy: { id: 'asc' }, include: { customer: true },
@@ -119,10 +125,10 @@ export class ReportService {
     return {
       kpi: {
         open_so: openSo.length,
-        open_so_amount: soBase.amount,
-        open_so_by_currency: openSoByCurrency,
+        open_so_amount: canSales ? soBase.amount : null,
+        open_so_by_currency: canSales ? openSoByCurrency : null,
         base_currency: book.base,
-        missing_rates: soBase.missing,
+        missing_rates: canSales ? soBase.missing : [],
         overdue_so: overdueSo.length,
         wip_wo: (woStatus.RELEASED ?? 0) + (woStatus.IN_PROGRESS ?? 0),
         wip_qty: round2(wipQty),
@@ -133,7 +139,7 @@ export class ReportService {
         open_ncr: await tx.ncr.count({ where: { status: 'OPEN' } }),
         open_capa: await tx.capa.count({ where: { status: { not: 'CLOSED' } } }),
         pending_release: await pendingReleaseCount(tx),
-        stock_value: round2(Number(stockValue) || 0),
+        stock_value: canStock ? round2(Number(stockValue) || 0) : null,
         below_safety: below.length,
         expiring_lots: expiring,
         calibration_due: calDue.length,
@@ -143,7 +149,7 @@ export class ReportService {
       fpy_by_op: fpy,
       ncr_by_source: ncrSrc.map((r) => ({ source: r.source, count: r._count._all })),
       alerts: [
-        ...soBase.missing.map((c) => ({
+        ...(canSales ? soBase.missing : []).map((c) => ({
           level: 'warning',
           text: `缺少 ${c} → ${book.base} 汇率，在手订单金额未包含 ${c} ${(openSoByCurrency.find((x) => x.currency === c)?.amount ?? 0).toFixed(2)}（请在“基础资料 → 汇率”中维护）`,
         })),
@@ -156,38 +162,5 @@ export class ReportService {
         ...overdueSo.slice(0, 10).map((s) => ({ level: 'error', text: `销售订单 ${s.no}（${s.customer?.name ?? ''}）已逾期，交期 ${fmtDate(s.delivery_date)}` })),
       ],
     };
-  }
-
-  async todos(tx: Tx, user: CurrentUser) {
-    const p = userPermissions(user);
-    const items: { key: string; title: string; count: number; path: string }[] = [];
-    const add = async (perm: string, key: string, title: string, count: () => Promise<number>, path: string) => {
-      if (!p.has(perm)) return;
-      const n = await count();
-      if (n) items.push({ key, title, count: n, path });
-    };
-    await add('qc', 'iqc', '待检验的来料（IQC）', () => tx.inspection.count({ where: { status: 'PENDING' } }), '/quality/inspections');
-    await add('qa', 'ncr', '待评审处置的不合格品（NCR）', () => tx.ncr.count({ where: { status: 'OPEN' } }), '/quality/ncrs');
-    await add('qa', 'dhr', '待审核放行的生产批（DHR，含可分批放行）', () => pendingReleaseCount(tx), '/quality/release');
-    await add('qa', 'capa', '进行中的 CAPA', () => tx.capa.count({ where: { status: { not: 'CLOSED' } } }), '/quality/capas');
-    await add('qa', 'complaint', '未关闭的客户投诉/不良事件', () => tx.complaint.count({ where: { status: { not: 'CLOSED' } } }), '/quality/complaints');
-    await add('qa', 'bom_submitted', '待批准的 BOM', () => tx.bom.count({ where: { status: 'SUBMITTED' } }), '/engineering/boms?status=SUBMITTED');
-    await add('qa', 'routing_submitted', '待批准的工艺路线', () => tx.routing.count({ where: { status: 'SUBMITTED' } }), '/engineering/routings?status=SUBMITTED');
-    await add('plan', 'so_no_wo', '已确认待排产的销售订单', () => tx.salesOrder.count({ where: { status: 'CONFIRMED' } }), '/sales/orders');
-    await add('plan', 'wo_planned', '待下达的生产工单', () => tx.workOrder.count({ where: { status: 'PLANNED' } }), '/mes/work-orders');
-    await add('purchase', 'po_draft', '待审批的采购订单', () => tx.purchaseOrder.count({ where: { status: 'DRAFT' } }), '/purchase/orders');
-    await add('wms', 'po_receive', '待收货的采购订单', () => tx.purchaseOrder.count({ where: { status: { in: ['APPROVED', 'PARTIAL_RECEIVED'] } } }), '/purchase/orders');
-    await add('wms', 'issue', '待过账的领料单', () => tx.materialIssue.count({ where: { status: 'DRAFT' } }), '/wms/issues');
-    await add('wms', 'ship', '待过账的发货单', () => tx.shipment.count({ where: { status: 'DRAFT' } }), '/wms/shipments');
-    await add('wms', 'fg', '待完工入库的工单', async () => {
-      const [{ n }] = await tx.$queryRaw<{ n: number }[]>`
-        SELECT COUNT(*)::int AS n FROM mes_work_order WHERE status IN ('IN_PROGRESS', 'COMPLETED') AND completed_qty > received_qty`;
-      return Number(n);
-    }, '/mes/work-orders');
-    await add('engineering', 'bom', '待提交的 BOM 草稿', () => tx.bom.count({ where: { status: 'DRAFT' } }), '/engineering/boms?status=DRAFT');
-    await add('engineering', 'routing', '待提交的工艺路线草稿', () => tx.routing.count({ where: { status: 'DRAFT' } }), '/engineering/routings?status=DRAFT');
-    await add('master', 'calib', '校准过期的设备', () => tx.equipment.count({ where: { calibration_required: true, next_calibration_date: { lt: today() } } }), '/master/equipment');
-    await add('sales', 'so_draft', '待确认的销售订单', () => tx.salesOrder.count({ where: { status: 'DRAFT' } }), '/sales/orders');
-    return items;
   }
 }

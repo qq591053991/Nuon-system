@@ -8,9 +8,10 @@ import { dateOnly } from '../common/dates';
 import { BizError, NotFound } from '../common/errors';
 import { inc, like, paginate, ser, serList } from '../common/paginate';
 import { PrismaService, type Tx } from '../common/prisma.service';
+import { AuthService } from '../auth/auth.service';
 import { SignatureDto } from '../core/esign.service';
 import { NumberingService } from '../core/numbering.service';
-import { ProductionService } from './production.service';
+import { OP_TYPE_TEXT, ProductionService } from './production.service';
 
 const WO_CHILDREN = ['materials', 'operations'];
 
@@ -39,6 +40,8 @@ class ReportDto {
   @IsOptional() @IsInt() seq?: number | null;
   /** 可选：人工判 FAIL（如外观不良） */
   @IsOptional() @IsString() result?: string | null;
+  /** 判不合格时点选的不良现象代码 */
+  @IsOptional() @IsString() defect_code?: string | null;
   @IsOptional() @IsObject() values?: Record<string, number | null> = {};
   @IsOptional() @IsInt() equipment_id?: number | null;
   @IsOptional() @IsString() remark?: string | null;
@@ -98,6 +101,19 @@ class ReworkPartsDto {
   @IsOptional() @IsString() remark?: string | null;
 }
 
+class StationAuthDto {
+  @IsString() password: string;
+}
+
+class StationResumeDto {
+  @IsString() badge_no: string;
+}
+
+class KeyPartCheckDto {
+  @IsString() sn: string;
+  @IsString() lot_no: string;
+}
+
 const WO_FIELDS = ['material_id', 'planned_qty', 'customer_id', 'so_id', 'so_line_id', 'bom_id', 'routing_id', 'planned_start', 'planned_end', 'priority', 'remark'] as const;
 
 /** 请求体 → 工单字段（只取请求中出现的字段；日期转纯日期） */
@@ -117,6 +133,7 @@ export class MesController {
     private readonly db: PrismaService,
     private readonly numbering: NumberingService,
     private readonly svc: ProductionService,
+    private readonly auth: AuthService,
   ) {}
 
   private async woOut(tx: Tx, id: number) {
@@ -228,9 +245,89 @@ export class MesController {
   }
 
   // ---------- 工位终端 ----------
+  /** 扫码：op = 本工位锁定的工序编码（返回 station 判定：能否在本工位作业、应送往哪道工序） */
   @Get('mes/scan/:sn')
-  scan(@Param('sn') sn: string) {
-    return this.svc.scanSerial(this.db.client, sn);
+  scan(@Param('sn') sn: string, @Query('op') op?: string) {
+    return this.svc.scanSerial(this.db.client, sn, op || null);
+  }
+
+  /** 工位工序清单（已发布工艺路线中的工序，按工序编码汇总），供班组长设定本工位工序 */
+  @Get('mes/station/ops')
+  async stationOps() {
+    const rows = await this.db.client.routingOperation.findMany({
+      where: { routing: { status: 'RELEASED' } },
+      include: { routing: { include: { material: true } }, work_center: true, params: { select: { id: true } } },
+      orderBy: [{ seq: 'asc' }, { id: 'asc' }],
+    });
+    const out = new Map<string, Record<string, any>>();
+    for (const o of rows) {
+      const k = o.code.toUpperCase();
+      let r = out.get(k);
+      if (!r) {
+        r = {
+          code: o.code, name: o.name, seq: o.seq, op_type: o.op_type, op_type_text: OP_TYPE_TEXT[o.op_type] ?? o.op_type,
+          work_center_id: o.work_center_id, work_center_name: o.work_center?.name ?? null, requires_equipment: o.requires_equipment,
+          has_params: false, products: [] as string[],
+        };
+        out.set(k, r);
+      }
+      r.requires_equipment ||= o.requires_equipment;
+      r.has_params ||= o.params.length > 0;
+      if (!r.products.includes(o.routing.material.code)) r.products.push(o.routing.material.code);
+    }
+    return [...out.values()];
+  }
+
+  /** 工位可选设备：逐台标注能否用于该工序（停用 / 校准过期 / 不适用本工序 → 工位置灰并说明原因） */
+  @Get('mes/station/equipment')
+  async stationEquipment(@Query('op_type') opType?: string, @Query('work_center_id') wc?: string, @Query('op_name') opName?: string) {
+    const rows = await this.db.client.equipment.findMany({ orderBy: { code: 'asc' }, include: { work_center: true } });
+    const op = opType ? { name: opName || OP_TYPE_TEXT[opType] || opType, op_type: opType, work_center_id: wc ? Number(wc) || null : null } : null;
+    return rows.map((e) => ({
+      id: e.id, code: e.code, name: e.name, model: e.model, equipment_type: e.equipment_type, op_types: e.op_types, status: e.status,
+      work_center_id: e.work_center_id, work_center_name: e.work_center?.name ?? null, calibration_required: e.calibration_required,
+      next_calibration_date: e.next_calibration_date, issue: this.svc.equipmentIssue(e, op)?.replace(`设备 ${e.code} ${e.name} `, '') ?? null,
+    }));
+  }
+
+  /** 终端账号授权（退出工位终端 / 终端设置 / 设定本工位工序）：校验当前登录的终端账号密码（班组长掌握） */
+  @Post('mes/station/authorize')
+  async stationAuthorize(@Body() b: StationAuthDto, @User() user: CurrentUser) {
+    const v = await this.auth.verifyUserPassword(user, b.password || '');
+    if (!v.ok) throw new BizError(`密码错误：请输入本工位终端登录账号（${user.full_name}）的密码，由班组长或管理员输入`);
+    return { ok: true, username: user.username, full_name: user.full_name };
+  }
+
+  /** 空闲锁定后本人刷工牌恢复（同一班次免 PIN、保留未提交数据）：工牌须属于当前操作员 */
+  @Post('mes/station/resume')
+  @Perms('mes')
+  async stationResume(@Body() b: StationResumeDto, @User() user: CurrentUser) {
+    const u = await this.db.client.user.findUnique({ where: { id: user.id } });
+    if (!u || !u.is_active) throw new BizError('账号已停用，请联系班组长');
+    if (!u.badge_no || u.badge_no.trim() !== (b.badge_no || '').trim()) throw new BizError('不是锁定前的操作员，请输入 PIN 登录');
+    return { ok: true };
+  }
+
+  /** 上岗资质预检（解锁时按本工位工序校验，F14） */
+  @Get('mes/station/qualification')
+  @Perms('mes')
+  async stationQualification(@Query('op_code') code: string | undefined, @User() user: CurrentUser) {
+    if (!code) return { ok: true, message: null };
+    const op = await this.db.client.routingOperation.findFirst({ where: { code, routing: { status: 'RELEASED' } } });
+    try {
+      await this.svc.checkQualification(this.db.client, user, { code, name: op?.name ?? code });
+      return { ok: true, message: null };
+    } catch (e) {
+      if (e instanceof BizError) return { ok: false, message: (e.getResponse() as { detail?: string }).detail ?? '资质校验未通过' };
+      throw e;
+    }
+  }
+
+  /** 关键件批号即时校验（扫码当场提示，F15） */
+  @Post('mes/station/key-part-check')
+  @Perms('mes')
+  keyPartCheck(@Body() b: KeyPartCheckDto) {
+    return this.svc.checkKeyPart(this.db.client, b.sn, b.lot_no);
   }
 
   @Post('mes/report')
@@ -238,7 +335,7 @@ export class MesController {
   report(@Body() b: ReportDto, @User() user: CurrentUser) {
     return this.db.tx((tx) =>
       this.svc.reportSerial(tx, user, {
-        sn: b.sn, seq: b.seq, result: b.result, values: b.values, equipment_id: b.equipment_id, remark: b.remark, key_parts: b.key_parts,
+        sn: b.sn, seq: b.seq, result: b.result, defect_code: b.defect_code, values: b.values, equipment_id: b.equipment_id, remark: b.remark, key_parts: b.key_parts,
       }),
     );
   }

@@ -1,182 +1,425 @@
-import { Alert, Button, Card, Col, Row, Space, Steps, Table, Tag, Typography, Upload, message, type UploadProps } from 'antd';
-import { CheckCircleFilled, CloudUploadOutlined, DownloadOutlined } from '@ant-design/icons';
-import { useState } from 'react';
-import { download, http, type Rec } from '../../api/http';
+import {
+  Alert, Button, Card, Col, Input, Modal, Popover, Radio, Result, Row, Space, Steps, Switch, Table, Tag, Tooltip, Typography, Upload, message, type UploadProps,
+} from 'antd';
+import {
+  CheckCircleFilled, CloudUploadOutlined, DownloadOutlined, FileSearchOutlined, InfoCircleOutlined, LockOutlined, ReloadOutlined, RollbackOutlined, UnlockOutlined,
+} from '@ant-design/icons';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { Link } from 'react-router-dom';
+import { download, get, http, post, type Rec } from '../../api/http';
 import { useAuth } from '../../auth';
 import PageHeader from '../../components/PageHeader';
+import StatusTag from '../../components/StatusTag';
+import { fmtDateTime } from '../../utils/format';
 
-type Entity = 'customers' | 'suppliers' | 'materials' | 'boms' | 'stock';
+export interface ImportColumn { field: string; header: string; aliases: string[]; required: boolean; note: string | null; options: string[] | null }
+export interface ImportEntity {
+  key: string; title: string; desc: string; perms: { code: string; name: string }[];
+  can_import: boolean; via_migration: boolean; reason: string | null; count: number; columns: ImportColumn[];
+}
+export interface ImportOptions { migration_mode: boolean; is_admin: boolean; entities: ImportEntity[] }
 
-interface ImportResult { ok: boolean; created: number; updated: number; errors: { row: number; message: string }[]; message?: string; file: string }
-
-interface EntityDef {
-  key: Entity;
-  step: number;
-  title: string;
-  desc: string;
-  columns: string[];
-  note?: string;
+export interface ImportResult {
+  ok: boolean; check?: boolean; total?: number; created: number; updated: number; unchanged?: number;
+  errors: { row: number; message: string }[]; message?: string; batch_no?: string | null;
+  duplicates?: { row: number; material_code: string; location_code: string; lot_no: string; current_qty: number; new_qty: number; prior_batch: string | null }[];
+  passwords?: Rec[];
 }
 
-const ENTITIES: EntityDef[] = [
-  {
-    key: 'suppliers', step: 0, title: '供应商',
-    desc: '按“供应商编码”新增或更新。状态列填“合格 / 待评 / 暂停”。',
-    columns: ['供应商编码', '供应商名称', '简称', '供应类别', '联系人', '电话', '地址', '状态', '备注'],
-  },
-  {
-    key: 'customers', step: 0, title: '客户',
-    desc: '按“客户编码”新增或更新。代工客户可填写注册人（医疗器械注册证持有人）。',
-    columns: ['客户编码', '客户名称', '简称', '国家', '联系人', '电话', '地址', '税号', '币别', '注册人', '备注'],
-  },
-  {
-    key: 'materials', step: 1, title: '物料',
-    desc: '按“物料编码”新增或更新。物料属性可填 原材料/外购、半成品/委外、成品/自制、包材、辅料。',
-    columns: ['物料编码', '物料名称', '规格型号', '物料属性', '基本单位', '安全库存', '采购提前期', '标准成本', '保质期(天)', '启用批号管理', '启用序列号管理', '默认供应商', '来料检验', '波长(nm)', '湿敏等级', '备注'],
-    note: '“默认供应商”填供应商编码或名称，需先导入供应商。',
-  },
-  {
-    key: 'boms', step: 2, title: 'BOM',
-    desc: '每行一个子项，按“父项编码 + 版本”分组生成 BOM。用量支持金蝶的 分子/分母 写法。',
-    columns: ['父项物料编码', 'BOM版本', '子项物料编码', '用量', '用量:分母', '损耗率', '位号'],
-    note: '导入后为“草稿”，需工程审核发布后才能用于生产；已存在的同版本 BOM 不会被覆盖。',
-  },
-  {
-    key: 'stock', step: 3, title: '期初库存',
-    desc: '系统上线时的现有库存，按批号记账，直接记为“合格”。',
-    columns: ['物料编码', '库位编码', '批号', '数量', '生产日期', '有效期至'],
-    note: '需先在“基础资料 → 仓库 / 库位”中建好库位；客供料按物料主数据的货主自动入账。',
-  },
-];
+/** 列说明：必填红色 *；悬停看说明与可选值 */
+export function ColumnTags({ columns }: { columns: ImportColumn[] }) {
+  return (
+    <div style={{ lineHeight: '26px' }}>
+      {columns.map((c) => {
+        const tip = [c.required ? '必填' : '选填', c.note, c.options ? `可选：${c.options.join('、')}` : null, c.aliases.length ? `也可识别：${c.aliases.join('、')}` : null]
+          .filter(Boolean).join('；');
+        return (
+          <Tooltip key={c.field} title={tip}>
+            <Tag color={c.required ? 'red' : undefined} style={{ marginBottom: 4, cursor: 'help' }}>
+              {c.required && '*'}{c.header}{c.options && <span style={{ opacity: 0.6 }}> ▾</span>}
+            </Tag>
+          </Tooltip>
+        );
+      })}
+    </div>
+  );
+}
 
+function ErrorTable({ errors }: { errors: ImportResult['errors'] }) {
+  return (
+    <Table
+      rowKey={(e) => `${e.row}-${e.message}`}
+      size="small"
+      dataSource={errors}
+      pagination={errors.length > 8 ? { pageSize: 8, size: 'small' } : false}
+      columns={[
+        { title: 'Excel 行号', dataIndex: 'row', width: 90 },
+        { title: '哪里错了 / 怎么改', dataIndex: 'message', render: (v) => <Typography.Text type="danger">{v}</Typography.Text> },
+      ]}
+    />
+  );
+}
+
+/**
+ * 导入流程（数据导入页与“批量导入用户”共用）：选择文件 → 自动预检查（不写入）→ 确认导入 → 结果。
+ * 期初库存可选“已有库存时：报错 / 覆盖为导入数”。
+ */
+export function ImportFlow({ entity, title, disabled, disabledReason, onImported, renderSuccess }: {
+  entity: string; title: string; disabled?: boolean; disabledReason?: ReactNode;
+  onImported?: (r: ImportResult) => void; renderSuccess?: (r: ImportResult) => ReactNode;
+}) {
+  const [file, setFile] = useState<File | null>(null);
+  const [busy, setBusy] = useState<'check' | 'import' | null>(null);
+  const [check, setCheck] = useState<ImportResult | null>(null);
+  const [result, setResult] = useState<ImportResult | null>(null);
+  const [dup, setDup] = useState<'error' | 'overwrite'>('error');
+  const isStock = entity === 'stock';
+
+  const send = async (f: File, mode: 'check' | 'import', onDup = dup): Promise<ImportResult> => {
+    const fd = new FormData();
+    fd.append('file', f);
+    fd.append('mode', mode);
+    if (isStock) fd.append('on_duplicate', onDup);
+    const resp = await http.post(`/import/${entity}`, fd);
+    return resp.data as ImportResult;
+  };
+
+  const runCheck = async (f: File, onDup = dup) => {
+    setBusy('check');
+    setResult(null);
+    setCheck(null);
+    try {
+      setCheck(await send(f, 'check', onDup));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const customRequest: UploadProps['customRequest'] = ({ file: f, onSuccess }) => {
+    setFile(f as File);
+    void runCheck(f as File).finally(() => onSuccess?.({}));
+  };
+
+  const doImport = async () => {
+    if (!file) return;
+    setBusy('import');
+    try {
+      const r = await send(file, 'import');
+      setResult(r);
+      setCheck(null);
+      if (r.ok) {
+        message.success(`${title}导入成功`);
+        onImported?.(r);
+      }
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const reset = () => {
+    setFile(null);
+    setCheck(null);
+    setResult(null);
+  };
+
+  const changeDup = (v: 'error' | 'overwrite') => {
+    setDup(v);
+    if (file && check) void runCheck(file, v);
+  };
+
+  if (disabled) {
+    return <Typography.Text type="secondary"><LockOutlined style={{ marginRight: 6 }} />当前账号不能导入：{disabledReason}</Typography.Text>;
+  }
+
+  return (
+    <Space direction="vertical" size={10} style={{ width: '100%' }}>
+      {isStock && (
+        <div>
+          <Typography.Text type="secondary">同一物料 + 库位 + 批号已有库存时：</Typography.Text>
+          <Radio.Group size="small" value={dup} onChange={(e) => changeDup(e.target.value)} style={{ marginTop: 4 }}>
+            <Radio value="error">报错（防止重复导入，推荐）</Radio>
+            <Radio value="overwrite">覆盖为导入数（按差额记库存调整）</Radio>
+          </Radio.Group>
+        </div>
+      )}
+      {!check && !result && (
+        <Upload accept=".xlsx,.csv" showUploadList={false} customRequest={customRequest} disabled={!!busy}>
+          <Button type="primary" icon={<CloudUploadOutlined />} loading={busy === 'check'}>
+            {busy === 'check' ? '正在预检查…' : `选择${title}文件`}
+          </Button>
+          <Typography.Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>选择后先自动预检查，不会写入</Typography.Text>
+        </Upload>
+      )}
+      {check && (
+        <>
+          <Alert
+            type={check.ok ? 'success' : 'error'}
+            showIcon
+            icon={check.ok ? undefined : <FileSearchOutlined />}
+            message={check.message}
+            description={<Typography.Text type="secondary" style={{ fontSize: 12 }}>文件：{file?.name}{check.ok && check.unchanged ? `；${check.unchanged} 行数量与现有库存相同，不调整` : ''}</Typography.Text>}
+          />
+          {!check.ok && <ErrorTable errors={check.errors} />}
+          {isStock && !check.ok && dup === 'error' && (check.duplicates?.length ?? 0) > 0 && (
+            <Alert
+              type="warning"
+              showIcon
+              message={`有 ${check.duplicates!.length} 行在系统中已有库存，这通常是同一文件重复上传。`}
+              description="如果确实要以本文件数量为准（例如盘点后的期初数），选择“覆盖为导入数”：系统按“导入数 − 当前库存”记库存调整流水，不会翻倍。"
+              action={<Button size="small" onClick={() => changeDup('overwrite')}>改为覆盖为导入数</Button>}
+            />
+          )}
+          <Space>
+            {check.ok && (
+              <Button type="primary" icon={<CloudUploadOutlined />} loading={busy === 'import'} onClick={doImport}>
+                确认导入{check.created ? ` ${check.created} 条` : ''}{check.updated ? `${check.created ? '、' : ' '}更新 ${check.updated} 条` : ''}
+              </Button>
+            )}
+            <Upload accept=".xlsx,.csv" showUploadList={false} customRequest={customRequest} disabled={!!busy}>
+              <Button icon={<ReloadOutlined />} loading={busy === 'check'}>{check.ok ? '换一个文件' : '修改后重新选择文件'}</Button>
+            </Upload>
+          </Space>
+        </>
+      )}
+      {result && (
+        <>
+          {result.ok ? (
+            <Alert
+              type="success"
+              showIcon
+              message={`导入成功：新增 ${result.created} 条${result.updated ? `，${isStock ? '调整' : '更新'} ${result.updated} 条` : ''}${result.unchanged ? `，${result.unchanged} 条无需调整` : ''}`}
+              description={(
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  文件：{file?.name}{result.batch_no ? `；导入批次 ${result.batch_no}（如传错可在下方“期初导入批次”整批撤销）` : ''}
+                </Typography.Text>
+              )}
+            />
+          ) : (
+            <>
+              <Alert type="error" showIcon message={result.message || `发现 ${result.errors.length} 行错误，已全部回滚`} />
+              <ErrorTable errors={result.errors} />
+            </>
+          )}
+          {result.ok && renderSuccess?.(result)}
+          <Button onClick={reset}>继续导入其他文件</Button>
+        </>
+      )}
+    </Space>
+  );
+}
+
+const STEP_OF: Record<string, number> = { suppliers: 0, customers: 0, materials: 1, boms: 2, stock: 3, users: 4 };
 const STEP_ITEMS = [
   { title: '供应商 / 客户', description: '往来单位' },
   { title: '物料', description: '编码、规格、属性' },
   { title: 'BOM', description: '父项 + 子项 + 用量' },
   { title: '期初库存', description: '物料 + 库位 + 批号' },
+  { title: '员工账号', description: '批量开户（管理员）' },
 ];
 
-function ResultView({ r }: { r: ImportResult }) {
-  if (r.ok) {
-    return (
-      <Alert
-        type="success"
-        showIcon
-        message={`导入成功：新增 ${r.created} 条${r.updated ? `，更新 ${r.updated} 条` : ''}`}
-        description={<Typography.Text type="secondary" style={{ fontSize: 12 }}>文件：{r.file}</Typography.Text>}
-      />
-    );
-  }
-  return (
-    <Space direction="vertical" style={{ width: '100%' }}>
-      <Alert type="error" showIcon message={r.message || `发现 ${r.errors.length} 行错误，已全部回滚`} description={<Typography.Text type="secondary" style={{ fontSize: 12 }}>文件：{r.file}。请按下表修正后重新上传整个文件。</Typography.Text>} />
-      <Table
-        rowKey={(e) => `${e.row}-${e.message}`}
-        size="small"
-        dataSource={r.errors}
-        pagination={r.errors.length > 10 ? { pageSize: 10, size: 'small' } : false}
-        columns={[
-          { title: 'Excel 行号', dataIndex: 'row', width: 90 },
-          { title: '错误原因', dataIndex: 'message', render: (v) => <Typography.Text type="danger">{v}</Typography.Text> },
-        ]}
-      />
-    </Space>
-  );
-}
-
-function ImportCard({ def, canImport, onSuccess }: { def: EntityDef; canImport: boolean; onSuccess: (e: Entity) => void }) {
-  const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<ImportResult | null>(null);
-
-  const customRequest: UploadProps['customRequest'] = ({ file, onSuccess: ok, onError }) => {
-    const f = file as File;
-    const fd = new FormData();
-    fd.append('file', f);
-    setBusy(true);
-    setResult(null);
-    http
-      .post(`/import/${def.key}`, fd)
-      .then((resp) => {
-        const d: Rec = resp.data;
-        const r: ImportResult = { ok: !!d.ok, created: d.created || 0, updated: d.updated || 0, errors: d.errors || [], message: d.message, file: f.name };
-        setResult(r);
-        if (r.ok) {
-          message.success(`${def.title}导入成功`);
-          onSuccess(def.key);
-        }
-        ok?.(d);
-      })
-      .catch((e) => onError?.(e))
-      .finally(() => setBusy(false));
-  };
-
+function ImportCard({ def, onDone }: { def: ImportEntity; onDone: () => void }) {
+  const isUsers = def.key === 'users';
   return (
     <Card
       size="small"
       style={{ height: '100%' }}
       title={(
         <Space>
-          <Tag color="purple" style={{ marginInlineEnd: 0 }}>第 {def.step + 1} 步</Tag>
+          <Tag color="purple" style={{ marginInlineEnd: 0 }}>第 {STEP_OF[def.key] + 1} 步</Tag>
           <span>{def.title}</span>
-          {result?.ok && <CheckCircleFilled style={{ color: '#52c41a' }} />}
+          {def.count > 0 && <Tooltip title={`系统中已有 ${def.count} 条${def.key === 'stock' ? '期初导入批次' : ''}`}><CheckCircleFilled style={{ color: '#52c41a' }} /></Tooltip>}
+          {def.via_migration && <Tooltip title="通过“上线迁移模式”导入（管理员）"><Tag color="orange" style={{ marginInlineEnd: 0 }}>迁移模式</Tag></Tooltip>}
         </Space>
       )}
-      extra={<Button size="small" type="link" icon={<DownloadOutlined />} onClick={() => download(`/import/templates/${def.key}`, `${def.key}_template.xlsx`)}>下载模板</Button>}
+      extra={<Button size="small" type="link" icon={<DownloadOutlined />} onClick={() => download(`/import/templates/${def.key}`, `${def.title}导入模板.xlsx`)}>下载模板</Button>}
     >
-      <Typography.Paragraph style={{ marginBottom: 8 }}>{def.desc}</Typography.Paragraph>
-      <div style={{ marginBottom: 8 }}>
-        {def.columns.map((c) => <Tag key={c} style={{ marginBottom: 4 }}>{c}</Tag>)}
+      <Typography.Paragraph style={{ marginBottom: 6 }}>{def.desc}</Typography.Paragraph>
+      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+        可导入：{def.perms.map((p) => p.name).join('、')}权限{def.key !== 'users' && '（管理员在迁移模式下也可）'}；
+        列（<span style={{ color: '#cf1322' }}>红色 * 为必填</span>，▾ 为模板中有下拉）：
+      </Typography.Text>
+      <ColumnTags columns={def.columns} />
+      <div style={{ marginTop: 8 }}>
+        {isUsers ? (
+          <Alert type="info" showIcon message={<span>批量开户请到 <Link to="/system/users?import=1">用户与角色 → 批量导入用户</Link>，导入后可直接下载初始密码清单。</span>} />
+        ) : (
+          <ImportFlow entity={def.key} title={def.title} disabled={!def.can_import} disabledReason={def.reason} onImported={onDone} />
+        )}
       </div>
-      {def.note && <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 12 }}>注：{def.note}</Typography.Paragraph>}
-      <Upload accept=".xlsx,.csv" showUploadList={false} customRequest={customRequest} disabled={!canImport || busy}>
-        <Button type="primary" icon={<CloudUploadOutlined />} loading={busy} disabled={!canImport}>
-          {busy ? '正在导入…' : `上传${def.title}文件`}
-        </Button>
-      </Upload>
-      {!canImport && <Typography.Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>需要主数据 / 工程 / 仓储权限</Typography.Text>}
-      {result && <div style={{ marginTop: 12 }}><ResultView r={result} /></div>}
+    </Card>
+  );
+}
+
+/** 期初导入批次：每次期初库存导入生成一张期初入库单，可整批撤销（反向流水） */
+function StockBatches({ refreshKey, onChanged }: { refreshKey: number; onChanged: () => void }) {
+  const [rows, setRows] = useState<Rec[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [reverting, setReverting] = useState<Rec | null>(null);
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(() => {
+    setLoading(true);
+    get('/import/stock/batches', undefined, true).then(setRows).catch(() => setRows([])).finally(() => setLoading(false));
+  }, []);
+  useEffect(load, [load, refreshKey]);
+  const revert = async () => {
+    if (!reverting) return;
+    setBusy(true);
+    try {
+      const r = await post(`/import/stock/batches/${reverting.id}/revert`, { reason });
+      message.success(`已撤销批次 ${r.no}：${r.reversed} 笔库存流水已反向`);
+      setReverting(null);
+      setReason('');
+      load();
+      onChanged();
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Card size="small" title="期初导入批次" extra={<Button size="small" icon={<ReloadOutlined />} onClick={load} />} style={{ marginTop: 16 }}>
+      <Table
+        rowKey="id"
+        size="small"
+        loading={loading}
+        dataSource={rows}
+        pagination={false}
+        scroll={{ x: 'max-content' }}
+        columns={[
+          { title: '批次号（期初入库单）', dataIndex: 'no', render: (v) => <Link className="mono" to={`/wms/receipts?q=${v}`}>{v}</Link> },
+          { title: '导入时间', dataIndex: 'created_at', render: (v) => fmtDateTime(v) },
+          { title: '导入人', dataIndex: 'created_by' },
+          { title: '新增行', dataIndex: 'line_count', align: 'right' },
+          { title: '覆盖调整', dataIndex: 'adjust_count', align: 'right', render: (v) => v || '-' },
+          { title: '状态', dataIndex: 'status', render: (v) => <StatusTag dict="doc_status" value={v} /> },
+          { title: '说明', dataIndex: 'remark', render: (v) => <Typography.Text type="secondary" style={{ fontSize: 12 }}>{v}</Typography.Text> },
+          {
+            title: '操作', key: '_op', fixed: 'right',
+            render: (_, r) => (r.status !== 'CANCELLED'
+              ? <Button size="small" danger type="link" icon={<RollbackOutlined />} onClick={() => setReverting(r)}>整批撤销</Button>
+              : <Typography.Text type="secondary">已撤销</Typography.Text>),
+          },
+        ]}
+      />
+      <Modal
+        open={!!reverting}
+        title={`撤销期初导入批次 ${reverting?.no ?? ''}`}
+        okText="确认撤销"
+        okButtonProps={{ danger: true, disabled: !reason.trim() }}
+        confirmLoading={busy}
+        onOk={revert}
+        onCancel={() => setReverting(null)}
+      >
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="按该批次的入库/调整流水逐笔记反向流水（不删除任何记录）。如果其中的库存已被领用或调拨，系统会提示库存不足并整批不撤销。"
+        />
+        <Input.TextArea autoFocus rows={2} placeholder="撤销原因（必填，如：传错文件、数量整体有误）" value={reason} onChange={(e) => setReason(e.target.value)} maxLength={200} />
+      </Modal>
     </Card>
   );
 }
 
 export default function DataImport() {
-  const { can } = useAuth();
-  const canImport = can('master', 'engineering', 'wms');
-  const [done, setDone] = useState<Set<Entity>>(new Set());
+  const { user } = useAuth();
+  const [opts, setOpts] = useState<ImportOptions | null>(null);
+  const [batchKey, setBatchKey] = useState(0);
+  const [modeBusy, setModeBusy] = useState(false);
 
-  const stepDone = (step: number) => ENTITIES.filter((e) => e.step === step).some((e) => done.has(e.key));
-  const current = STEP_ITEMS.findIndex((_, i) => !stepDone(i));
+  const load = useCallback(() => {
+    get<ImportOptions>('/import/options').then(setOpts).catch(() => undefined);
+  }, []);
+  useEffect(load, [load]);
+
+  const toggleMode = (enabled: boolean) => {
+    Modal.confirm({
+      title: enabled ? '开启上线迁移模式？' : '关闭上线迁移模式？',
+      content: enabled
+        ? '开启后系统管理员可导入全部业务数据（往来单位、物料、BOM、期初库存），用于系统上线初始化。操作记入审计追踪。'
+        : '上线完成后请关闭：关闭后管理员不能再导入业务数据，只能由对应岗位（主数据、工程、仓储）导入。操作记入审计追踪。',
+      okText: enabled ? '开启' : '关闭',
+      onOk: async () => {
+        setModeBusy(true);
+        try {
+          await post('/import/migration-mode', { enabled });
+          message.success(enabled ? '已开启上线迁移模式' : '已关闭上线迁移模式');
+          load();
+        } finally {
+          setModeBusy(false);
+        }
+      },
+    });
+  };
+
+  if (!opts) return <Card loading />;
+  const entities = opts.entities.filter((e) => e.key !== 'users' || opts.is_admin);
+  const allowed = entities.filter((e) => e.can_import && e.key !== 'users');
+  const denied = entities.filter((e) => !e.can_import && e.key !== 'users');
+  const steps = opts.is_admin ? STEP_ITEMS : STEP_ITEMS.slice(0, 4);
+  const stepDone = (i: number) => entities.some((e) => STEP_OF[e.key] === i && e.count > 0);
+  const current = steps.findIndex((_, i) => !stepDone(i));
+  const stockDef = entities.find((e) => e.key === 'stock');
 
   return (
     <>
-      <PageHeader title="数据导入（从金蝶迁移）" sub="把金蝶中的基础资料与期初库存一次性导入，按顺序 4 步完成。" />
+      <PageHeader title="数据导入（从金蝶迁移）" sub="按顺序导入往来单位 → 物料 → BOM → 期初库存。每个文件先自动预检查，确认无误再导入。" />
       <Card style={{ marginBottom: 16 }}>
         <Steps
-          current={current < 0 ? STEP_ITEMS.length : current}
-          items={STEP_ITEMS.map((s, i) => ({ ...s, status: stepDone(i) ? 'finish' : i === current ? 'process' : 'wait' }))}
+          size="small"
+          current={current < 0 ? steps.length : current}
+          items={steps.map((s, i) => ({ ...s, status: stepDone(i) ? 'finish' : i === current ? 'process' : 'wait' }))}
         />
         <Alert
-          type="info"
+          type={allowed.length ? 'info' : 'warning'}
           showIcon
-          style={{ marginTop: 20 }}
-          message="列名兼容金蝶 K/3 Cloud / 星空的导出格式"
+          icon={<InfoCircleOutlined />}
+          style={{ marginTop: 16 }}
+          message={(
+            <span>
+              当前账号 <b>{user?.full_name}</b>（{user?.role_names?.join('、') || '无角色'}）
+              {allowed.length ? <>可导入：{allowed.map((e) => <Tag key={e.key} color="green" style={{ marginInlineEnd: 4 }}>{e.title}</Tag>)}</> : '不能导入业务数据。'}
+              {denied.length > 0 && (
+                <>
+                  不能导入：
+                  {denied.map((e) => (
+                    <Popover key={e.key} content={e.reason}><Tag style={{ marginInlineEnd: 4, cursor: 'help' }}>{e.title}</Tag></Popover>
+                  ))}
+                </>
+              )}
+            </span>
+          )}
           description={(
-            <ul style={{ margin: 0, paddingLeft: 18 }}>
-              <li>在金蝶中“引出”Excel 后可直接上传：系统识别 编码 / 名称 / 规格型号 / 物料属性 / 基本单位 等常见列名（也可下载模板填写）。</li>
-              <li>支持 .xlsx 与 .csv（UTF-8 或 GBK）；文件顶部的标题行会被自动跳过。</li>
-              <li>按编码“有则更新、无则新增”，可重复导入。</li>
-              <li><b>任意一行出错，整个文件全部回滚</b>，不会产生“导入一半”的脏数据；按错误清单修正后重新上传即可。</li>
+            <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>
+              <li>可直接上传金蝶 K/3 Cloud / 星空“引出”的 Excel（识别 编码 / 名称 / 规格型号 / 物料属性 等常见列名），也可下载模板填写（模板含“填写说明”页和下拉选项）。</li>
+              <li>支持 .xlsx 与 .csv（UTF-8 或 GBK）；文件顶部的标题行自动跳过。往来单位、物料按编码“有则更新、无则新增”；BOM 不覆盖已有版本；<b>期初库存同一物料+库位+批号已有库存时默认报错，不会重复入账</b>。</li>
+              <li><b>任意一行出错，整个文件都不导入</b>，按“Excel 行号 + 原因”修正后重新选择文件即可。</li>
             </ul>
           )}
         />
+        {opts.is_admin && (
+          <Alert
+            type={opts.migration_mode ? 'warning' : 'success'}
+            showIcon
+            icon={opts.migration_mode ? <UnlockOutlined /> : <LockOutlined />}
+            style={{ marginTop: 12 }}
+            message={opts.migration_mode
+              ? '上线迁移模式：开启中 —— 系统管理员可导入全部业务数据。上线完成后请关闭，之后由各岗位导入。'
+              : '上线迁移模式：已关闭 —— 系统管理员不能导入业务数据（职责分离），由主数据/工程/仓储岗位导入。'}
+            action={<Space><Typography.Text type="secondary">迁移模式</Typography.Text><Switch checked={opts.migration_mode} loading={modeBusy} onChange={toggleMode} /></Space>}
+          />
+        )}
       </Card>
       <Row gutter={[16, 16]}>
-        {ENTITIES.map((def) => (
+        {entities.map((def) => (
           <Col key={def.key} xs={24} lg={12} xxl={8}>
-            <ImportCard def={def} canImport={canImport} onSuccess={(e) => setDone((s) => new Set(s).add(e))} />
+            <ImportCard def={def} onDone={() => { load(); setBatchKey((k) => k + 1); }} />
           </Col>
         ))}
       </Row>
+      {stockDef?.can_import && <StockBatches refreshKey={batchKey} onChanged={load} />}
+      {!entities.length && <Result status="403" title="无可导入的数据" />}
     </>
   );
 }

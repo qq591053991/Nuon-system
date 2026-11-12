@@ -1,14 +1,16 @@
 import { Alert, Button, Card, Col, DatePicker, Form, Input, InputNumber, Modal, Radio, Row, Select, Space, Table, Tag, Tooltip, Typography, message, type TableColumnsType } from 'antd';
-import { DeleteOutlined, FileSearchOutlined, ImportOutlined, InboxOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
+import { DeleteOutlined, FileSearchOutlined, ImportOutlined, InboxOutlined, MobileOutlined, PlusOutlined, PrinterOutlined, ReloadOutlined, TagsOutlined } from '@ant-design/icons';
 import { useEffect, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { get, post, type Rec } from '../../api/http';
 import { useAuth } from '../../auth';
+import ExportButton from '../../components/ExportButton';
 import PageHeader from '../../components/PageHeader';
 import { CustomerSelect, LocationSelect, MaterialSelect } from '../../components/RemoteSelect';
+import ResponsiveTable, { useNarrow, type RColumn } from '../../components/ResponsiveTable';
 import StatusTag from '../../components/StatusTag';
 import { usePaged } from '../../components/usePaged';
-import { dictOptions } from '../../utils/dict';
+import { dictLabel, dictOptions } from '../../utils/dict';
 import { fmtDate, toDate } from '../../utils/format';
 import { ExpiryDate, LotLink, MaterialCell, Qty } from './common';
 
@@ -49,6 +51,7 @@ function ReceiptLines({ lines }: { lines: Rec[] }) {
 /** 客供料收货 / 其他入库 / 期初 */
 function ReceiptModal({ kind, onClose, onDone }: { kind: ReceiptKind | null; onClose: () => void; onDone: () => void }) {
   const [form] = Form.useForm();
+  const [modal, holder] = Modal.useModal();
   const [saving, setSaving] = useState(false);
   const [picked, setPicked] = useState<Record<number, Rec | undefined>>({});
   const [csLocation, setCsLocation] = useState<number | undefined>();
@@ -89,6 +92,15 @@ function ReceiptModal({ kind, onClose, onDone }: { kind: ReceiptKind | null; onC
       message.warning('请至少录入一行收货明细');
       return;
     }
+    // 库位规则：自有/客供与仓库不符直接提示；湿敏物料放非防潮柜需确认
+    const checks = await Promise.all(lines.map((l: Rec) => post('/wms/placement-check', { material_id: l.material_id, location_id: l.location_id }, true).catch(() => null)));
+    const errs = checks.flatMap((c, i) => (c && !c.ok ? c.errors.map((e: string) => `第 ${i + 1} 行：${e}`) : []));
+    if (errs.length) {
+      message.error(errs.join('；'), 6);
+      return;
+    }
+    const warns = checks.flatMap((c, i) => (c?.warnings?.length ? c.warnings.map((w: string) => `第 ${i + 1} 行：${w}`) : []));
+    if (warns.length && !(await modal.confirm({ title: '库位确认', content: <div>{warns.map((w) => <div key={w}>{w}</div>)}<div style={{ marginTop: 8 }}>确定仍按所选库位收货？</div></div>, okText: '仍放入', cancelText: '返回修改' }))) return;
     setSaving(true);
     try {
       const rc = await post('/receipts', {
@@ -99,7 +111,9 @@ function ReceiptModal({ kind, onClose, onDone }: { kind: ReceiptKind | null; onC
         lines,
       });
       const iqc = (rc.lines as Rec[]).filter((l) => l.inspection_id).length;
-      message.success(`入库单 ${rc.no} 已生成${iqc ? `，${iqc} 行需来料检验，已自动生成 IQC 检验单` : ''}`, 5);
+      message.success(`入库单 ${rc.no} 已生成：${(rc.lines as Rec[]).map((l) => `${l.material_code}→${l.location_code}`).join('、')}${iqc ? `；${iqc} 行需来料检验，已自动生成 IQC 检验单` : ''}`, 6);
+      modal.confirm({ title: `入库单 ${rc.no} 已生成`, content: `共 ${rc.lines.length} 个批次。是否打印批次标签贴在料盘/包装上？`, okText: '打印批次标签', cancelText: '不用',
+        onOk: () => { window.open(`/wms/print/labels?receipt=${rc.id}`, '_blank'); } });
       onDone();
     } finally {
       setSaving(false);
@@ -118,6 +132,7 @@ function ReceiptModal({ kind, onClose, onDone }: { kind: ReceiptKind | null; onC
       destroyOnHidden
       maskClosable={false}
     >
+      {holder}
       <Form form={form} layout="vertical">
         <Row gutter={16}>
           <Col xs={24} md={10}>
@@ -173,7 +188,15 @@ function ReceiptModal({ kind, onClose, onDone }: { kind: ReceiptKind | null; onC
                       disabled={isCs && !customerId}
                       placeholder={isCs && !customerId ? '请先选择客户' : '输入编码或名称搜索'}
                       params={isCs ? { owner_customer_id: customerId, is_active: true } : { is_active: true }}
-                      onPick={(r) => setPicked((p) => ({ ...p, [f.key]: r }))}
+                      onPick={(r) => {
+                        setPicked((p) => ({ ...p, [f.key]: r }));
+                        // 物料默认库位 / 建议库位自动带出
+                        if (r?.id) {
+                          get('/wms/suggest-location', { material_id: r.id }, true).then((sug) => {
+                            if (sug?.id) form.setFieldValue(['lines', f.name, 'location_id'], sug.id);
+                          }).catch(() => undefined);
+                        }
+                      }}
                     />
                   </Form.Item>
                 ),
@@ -271,12 +294,14 @@ function ReceiptModal({ kind, onClose, onDone }: { kind: ReceiptKind | null; onC
 
 export default function Receipts() {
   const { can } = useAuth();
+  const nav = useNavigate();
+  const narrow = useNarrow();
   const [sp] = useSearchParams();
-  const { rows, loading, setQuery, reload, pagination } = usePaged('/receipts', { q: sp.get('q') || undefined });
+  const { rows, loading, query, setQuery, reload, pagination, onTableChange } = usePaged('/receipts', { q: sp.get('q') || undefined, receipt_type: sp.get('receipt_type') || undefined });
   const [kind, setKind] = useState<ReceiptKind | null>(null);
 
-  const columns: TableColumnsType<Rec> = [
-    { title: '入库单号', dataIndex: 'no', width: 130, fixed: 'left', render: (v) => <b className="mono">{v}</b> },
+  const columns: RColumn[] = [
+    { title: '入库单号', dataIndex: 'no', width: 130, sorter: true, fixed: narrow ? undefined : 'left', mobile: 'title', render: (v) => <b className="mono">{v}</b> },
     { title: '类型', dataIndex: 'receipt_type', width: 110, render: (v) => <StatusTag dict="receipt_type" value={v} /> },
     { title: '供应商 / 客户', dataIndex: 'partner_name', width: 200, ellipsis: true, render: (v) => v || '-' },
     { title: '采购订单', dataIndex: 'po_no', width: 130, render: (v, r) => (v ? <Link to={`/purchase/orders/${r.po_id}`}>{v}</Link> : '-') },
@@ -291,8 +316,17 @@ export default function Receipts() {
         return n ? <Tag color="gold" style={{ marginInlineEnd: 0 }}>{n}</Tag> : '-';
       },
     },
-    { title: '经办人', dataIndex: 'created_by', width: 90 },
-    { title: '备注', dataIndex: 'remark', width: 180, ellipsis: true, render: (v) => v || '-' },
+    { title: '经办人', dataIndex: 'created_by', width: 90, mobile: 'hidden' },
+    { title: '备注', dataIndex: 'remark', width: 180, ellipsis: true, mobile: 'hidden', render: (v) => v || '-' },
+    {
+      title: '打印', key: '_op', width: 150,
+      render: (_, r) => (
+        <Space size={4}>
+          <Button size={narrow ? 'large' : 'small'} icon={<PrinterOutlined />} onClick={(e) => { e.stopPropagation(); window.open(`/wms/print/receipt/${r.id}`, '_blank'); }}>入库单</Button>
+          <Button size={narrow ? 'large' : 'small'} icon={<TagsOutlined />} onClick={(e) => { e.stopPropagation(); window.open(`/wms/print/labels?receipt=${r.id}`, '_blank'); }}>标签</Button>
+        </Space>
+      ),
+    },
   ];
 
   return (
@@ -301,10 +335,11 @@ export default function Receipts() {
         title="收货入库"
         sub="所有入库单（采购收货、完工入库、客供料、期初）。点击行首“+”展开明细。"
         extra={can('wms') && (
-          <>
-            <Button type="primary" icon={<InboxOutlined />} onClick={() => setKind('CUSTOMER_SUPPLIED')}>客供料收货</Button>
-            <Button icon={<ImportOutlined />} onClick={() => setKind('OTHER')}>其他入库 / 期初</Button>
-          </>
+          <Space wrap>
+            <Button type="primary" icon={<MobileOutlined />} onClick={() => nav('/wms/pda/receive')}>扫码收货（采购）</Button>
+            <Button icon={<InboxOutlined />} onClick={() => (narrow ? nav('/wms/pda/receive?mode=cs') : setKind('CUSTOMER_SUPPLIED'))}>客供料收货</Button>
+            {!narrow && <Button icon={<ImportOutlined />} onClick={() => setKind('OTHER')}>其他入库 / 期初</Button>}
+          </Space>
         )}
       />
       <Alert
@@ -316,16 +351,24 @@ export default function Receipts() {
       <Card>
         <Space wrap style={{ marginBottom: 16 }}>
           <Input.Search allowClear placeholder="入库单号 / 送货单号" defaultValue={sp.get('q') || ''} style={{ width: 240 }} onSearch={(q) => setQuery({ q: q.trim() })} />
-          <Select allowClear placeholder="入库类型" style={{ width: 150 }} options={dictOptions('receipt_type')} onChange={(v) => setQuery({ receipt_type: v })} />
+          <Select allowClear placeholder="入库类型" style={{ width: 150 }} defaultValue={sp.get('receipt_type') || undefined} options={dictOptions('receipt_type')} onChange={(v) => setQuery({ receipt_type: v })} />
           <Button icon={<ReloadOutlined />} onClick={reload} />
+          <ExportButton url="/receipts" params={query} filename="入库明细" columns={[
+            { title: '入库单号', key: 'no' }, { title: '类型', value: (r) => dictLabel('receipt_type', r.receipt_type) }, { title: '供应商/客户', key: 'partner_name' },
+            { title: '采购订单', key: 'po_no' }, { title: '生产工单', key: 'wo_no' }, { title: '收货日期', key: 'receipt_date', type: 'date' },
+            { title: '送货单号', key: 'delivery_note' }, { title: '行数', value: (r) => r.lines?.length ?? 0, type: 'number' },
+            { title: '明细', value: (r) => (r.lines as Rec[] | undefined)?.map((l) => `${l.material_code} ${l.lot_no} ×${l.qty} @${l.location_code}`).join('；') },
+            { title: '经办人', key: 'created_by' }, { title: '备注', key: 'remark' },
+          ]} />
         </Space>
-        <Table
+        <ResponsiveTable
           rowKey="id"
           size="middle"
           columns={columns}
           dataSource={rows}
           loading={loading}
           pagination={pagination}
+          onChange={onTableChange}
           scroll={{ x: 'max-content' }}
           expandable={{ expandedRowRender: (r) => <ReceiptLines lines={r.lines || []} />, rowExpandable: (r) => !!r.lines?.length }}
         />

@@ -3,7 +3,7 @@ import { Perms, User } from '../auth';
 import type { CurrentUser } from '../common/context';
 import { BizError } from '../common/errors';
 import { BomDto, NewVersionDto, RejectDto, SignOnlyDto, SubmitDto } from './engineering.dto';
-import { EngineeringService } from './engineering.service';
+import { EngineeringService, qInt } from './engineering.service';
 
 /** 工程-BOM：草稿 →（工程师）提交 →（QA）批准发布 / 驳回 → 升版（ECN） */
 @Controller('boms')
@@ -20,6 +20,24 @@ export class BomController {
     const n = qty === undefined || qty === '' ? 1 : Number(qty);
     if (Number.isNaN(n)) throw new BizError(`参数格式错误：${qty}`);
     return this.svc.bomTree(id, n);
+  }
+
+  /** 电子签名记录（编制提交 / 驳回 / 批准） */
+  @Get(':id/signatures')
+  signatures(@Param('id', ParseIntPipe) id: number) {
+    return this.svc.signatures('bom', id);
+  }
+
+  /** 与上一版本的差异（新增 / 删除 / 修改；上下限变化标记 limit）；?base= 指定对比版本 */
+  @Get(':id/diff')
+  diff(@Param('id', ParseIntPipe) id: number, @Query('base') base?: string) {
+    return this.svc.bomDiff(id, qInt(base));
+  }
+
+  /** 未保存的编辑内容与上一版本的差异（编辑页实时对比，只读、无副作用） */
+  @Post(':id/diff')
+  diffDraft(@Param('id', ParseIntPipe) id: number, @Body() body: Record<string, any>, @Query('base') base?: string) {
+    return this.svc.bomDiff(id, qInt(base), body);
   }
 
   @Get(':id')

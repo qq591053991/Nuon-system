@@ -1,14 +1,27 @@
-import { Alert, Button, Card, Form, Input, Typography, Select, message } from 'antd';
+import { Alert, Button, Card, Form, Input, Segmented, Select, Tooltip, Typography, message, type InputRef } from 'antd';
 import { LockOutlined, UserOutlined } from '@ant-design/icons';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { get } from '../api/http';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { useAuth } from '../auth';
+import { LAST_USER_KEY, passwordDaysLeft, useAuth } from '../auth';
+import './workbench/shell.css';
 
-const DEMO = [
-  ['admin', '系统管理员'], ['manager', '厂长'], ['sales', '销售'], ['buyer', '采购'], ['pmc', 'PMC计划'], ['engineer', '工艺工程师'],
-  ['wh', '仓管员'], ['op1', '产线操作员'], ['qc', '质检员'], ['qa', 'QA质量工程师'], ['finance', '财务'],
-];
+interface LoginOptions {
+  /** 演示模式（G2：DEMO_MODE 或仍有使用公开演示密码的预置账号）；未提供时按 false 处理 */
+  demo?: boolean;
+  demo_accounts?: { username: string; full_name: string; role_names: string[] }[];
+  demo_password?: string | null;
+  kingdee_enabled?: boolean;
+  kingdee_name?: string;
+}
+
+const readLastUser = () => {
+  try {
+    return localStorage.getItem(LAST_USER_KEY) || '';
+  } catch {
+    return '';
+  }
+};
 
 export default function Login() {
   const { login } = useAuth();
@@ -16,10 +29,22 @@ export default function Login() {
   const [sp] = useSearchParams();
   const [loading, setLoading] = useState(false);
   const [form] = Form.useForm();
-  const [kingdee, setKingdee] = useState(false);
+  const [opts, setOpts] = useState<LoginOptions>({});
+  const [source, setSource] = useState<'LOCAL' | 'KINGDEE'>('LOCAL');
+  const lastUser = useRef(readLastUser());
+  const userRef = useRef<InputRef>(null);
+  const pwdRef = useRef<InputRef>(null);
+  const kingdee = !!opts.kingdee_enabled;
+  const kdName = opts.kingdee_name || '金蝶云星空';
+
   useEffect(() => {
-    get('/auth/options', undefined, true).then((o) => setKingdee(!!o.kingdee_enabled)).catch(() => undefined);
+    get<LoginOptions>('/auth/options', undefined, true).then(setOpts).catch(() => undefined);
+    // 记住了上次的账号：光标直接放在密码框
+    setTimeout(() => (lastUser.current ? pwdRef.current : userRef.current)?.focus(), 50);
   }, []);
+
+  const demoOptions = (opts.demo_accounts ?? []).map((a) => ({ value: a.username, label: `${a.role_names.join('/') || a.full_name}（${a.username}）` }));
+
   return (
     <div className="login-bg">
       <div className="login-hero">
@@ -33,36 +58,77 @@ export default function Login() {
         </ul>
       </div>
       <Card className="login-card" variant="borderless">
-        <Typography.Title level={3} style={{ marginTop: 0 }}>登录</Typography.Title>
+        <Typography.Title level={3} style={{ marginTop: 0 }}>登录 Nuon 智造云</Typography.Title>
         {sp.get('idle') === '1' && (
           <Alert type="warning" showIcon style={{ marginBottom: 16 }} message="由于长时间未操作，系统已自动退出登录，请重新登录。" />
         )}
-        {kingdee && (
-          <Alert type="info" showIcon style={{ marginBottom: 16 }} message="支持金蝶云星空账号登录" description="可直接使用您在金蝶云星空的用户名和密码登录。" />
+        <Segmented
+          block
+          style={{ marginBottom: 16 }}
+          value={source}
+          onChange={(v) => setSource(v as 'LOCAL' | 'KINGDEE')}
+          options={[
+            { value: 'LOCAL', label: '本系统账号' },
+            {
+              value: 'KINGDEE',
+              disabled: !kingdee,
+              label: kingdee ? `${kdName}账号` : (
+                <Tooltip title={`${kdName}登录未启用：需管理员在服务器上配置金蝶地址与数据中心并开启（KINGDEE_ENABLED=1）后才能使用`}>
+                  <span>金蝶账号</span>
+                </Tooltip>
+              ),
+            },
+          ]}
+        />
+        {source === 'KINGDEE' && (
+          <Alert type="info" showIcon style={{ marginBottom: 16 }} message={`使用您在${kdName}的用户名和密码登录`} description="首次登录会自动开通本系统账号，需管理员分配岗位后才能使用业务功能。" />
         )}
-        <Form form={form} size="large" initialValues={{ username: 'admin' }} onFinish={async (v) => {
+        {!kingdee && (
+          <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: -8 }}>
+            {kdName}账号登录未启用，请使用本系统账号；如需开通请联系系统管理员。
+          </Typography.Paragraph>
+        )}
+        <Form form={form} size="large" initialValues={{ username: lastUser.current }} onFinish={async (v) => {
           setLoading(true);
           try {
             const u = await login(v.username, v.password);
-            if (u.must_change_password) message.warning('您的密码已过期，请先修改密码');
+            if (u.must_change_password) {
+              message.warning(u.password_change_reason === 'INITIAL' ? '首次登录，请先设置您自己的密码' : '您的密码已过期，请先修改密码');
+              nav('/', { replace: true });
+              return;
+            }
+            const days = passwordDaysLeft(u);
+            if (days !== null && days <= 7) message.warning(`您的密码将在 ${days} 天后到期，请尽快修改`);
             nav(sp.get('redirect') || '/', { replace: true });
           } finally {
             setLoading(false);
           }
         }}>
           <Form.Item name="username" rules={[{ required: true, message: '请输入用户名' }]}>
-            <Input prefix={<UserOutlined />} placeholder={kingdee ? '用户名（本系统或金蝶云星空）' : '用户名'} autoComplete="username" />
+            <Input ref={userRef} prefix={<UserOutlined />} placeholder={source === 'KINGDEE' ? `用户名（${kdName}）` : '用户名'} autoComplete="username" />
           </Form.Item>
           <Form.Item name="password" rules={[{ required: true, message: '请输入密码' }]}>
-            <Input.Password prefix={<LockOutlined />} placeholder="密码" autoComplete="current-password" />
+            <Input.Password ref={pwdRef} prefix={<LockOutlined />} placeholder="密码" autoComplete="current-password" />
           </Form.Item>
           <Button type="primary" htmlType="submit" block loading={loading}>登 录</Button>
         </Form>
-        <div style={{ marginTop: 24 }}>
-          <Typography.Text type="secondary">演示账号（密码均为 Nuon@2026）：</Typography.Text>
-          <Select style={{ width: '100%', marginTop: 8 }} placeholder="快速选择演示角色" options={DEMO.map(([u, n]) => ({ value: u, label: `${n}（${u}）` }))}
-            onChange={(u) => form.setFieldsValue({ username: u, password: 'Nuon@2026' })} />
-        </div>
+        <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: 12, marginBottom: 0 }}>
+          忘记密码或账号被锁定？请联系系统管理员重置/解锁。
+        </Typography.Paragraph>
+        {opts.demo === true && (
+          <div style={{ marginTop: 20 }}>
+            <Typography.Text type="secondary">演示账号{opts.demo_password ? `（密码均为 ${opts.demo_password}）` : ''}：</Typography.Text>
+            <Select
+              style={{ width: '100%', marginTop: 8 }}
+              placeholder="快速选择演示角色"
+              options={demoOptions}
+              onChange={(u) => {
+                form.setFieldsValue({ username: u, password: opts.demo_password ?? undefined });
+                pwdRef.current?.focus();
+              }}
+            />
+          </div>
+        )}
       </Card>
     </div>
   );

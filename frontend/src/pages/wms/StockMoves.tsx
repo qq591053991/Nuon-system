@@ -1,12 +1,13 @@
-import { Alert, Button, Card, DatePicker, Input, Select, Space, Table, Typography, type TableColumnsType } from 'antd';
+import { Alert, Button, Card, DatePicker, Input, Select, Space, Typography } from 'antd';
 import { ArrowRightOutlined, LockOutlined, ReloadOutlined } from '@ant-design/icons';
 import type { ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import type { Rec } from '../../api/http';
+import ExportButton from '../../components/ExportButton';
 import PageHeader from '../../components/PageHeader';
+import ResponsiveTable, { useNarrow, type RColumn } from '../../components/ResponsiveTable';
 import StatusTag from '../../components/StatusTag';
 import { usePaged } from '../../components/usePaged';
-import { dictOptions } from '../../utils/dict';
+import { dictLabel, dictOptions } from '../../utils/dict';
 import { fmtDateTime, toDate } from '../../utils/format';
 import { CsTag, LotLink, MaterialCell, Qty, refLink } from './common';
 
@@ -26,13 +27,16 @@ function FromTo({ from, to }: { from: ReactNode | null; to: ReactNode | null }) 
 
 export default function StockMoves() {
   const [sp] = useSearchParams();
-  const { rows, loading, setQuery, reload, pagination } = usePaged('/stock-moves', { q: sp.get('q') || undefined }, 50);
+  const narrow = useNarrow();
+  const { rows, loading, query, setQuery, reload, pagination } = usePaged('/stock-moves', {
+    q: sp.get('q') || undefined, lot_no: sp.get('lot_no') || undefined, ref_no: sp.get('ref_no') || undefined, move_type: sp.get('move_type') || undefined,
+  }, 50);
 
-  const columns: TableColumnsType<Rec> = [
-    { title: '时间', dataIndex: 'ts', width: 140, fixed: 'left', render: (v) => fmtDateTime(v) },
+  const columns: RColumn[] = [
+    { title: '时间', dataIndex: 'ts', width: 140, fixed: narrow ? undefined : 'left', mobile: 'subtitle', render: (v) => fmtDateTime(v) },
     { title: '业务类型', dataIndex: 'move_type', width: 110, render: (v) => <StatusTag dict="move_type" value={v} /> },
     {
-      title: '物料', key: 'material', width: 220,
+      title: '物料', key: 'material', width: 220, mobile: 'title',
       render: (_, r) => <MaterialCell code={r.material_code} name={r.material_name} spec={r.material_spec} extra={r.owner_customer_id ? <CsTag /> : undefined} />,
     },
     { title: '批号', dataIndex: 'lot_no', width: 130, render: (v, r) => <LotLink code={r.material_code} lot={v} /> },
@@ -56,8 +60,8 @@ export default function StockMoves() {
       ),
     },
     { title: '来源单据', dataIndex: 'ref_no', width: 130, render: (v, r) => refLink(r.ref_type, r.ref_id, v) },
-    { title: '操作人', dataIndex: 'username', width: 90 },
-    { title: '备注', dataIndex: 'remark', width: 220, ellipsis: true, render: (v) => v || dash },
+    { title: '操作人', dataIndex: 'username', width: 90, mobile: 'hidden' },
+    { title: '备注', dataIndex: 'remark', width: 220, ellipsis: true, mobile: 'hidden', render: (v) => v || dash },
   ];
 
   return (
@@ -73,13 +77,20 @@ export default function StockMoves() {
       <Card>
         <Space wrap style={{ marginBottom: 16 }}>
           <Input.Search allowClear placeholder="物料编码 / 批号 / 单据号" defaultValue={sp.get('q') || ''} style={{ width: 260 }} onSearch={(q) => setQuery({ q: q.trim() })} />
-          <Select allowClear showSearch optionFilterProp="label" placeholder="业务类型" style={{ width: 150 }} options={dictOptions('move_type')} onChange={(v) => setQuery({ move_type: v })} />
+          <Select allowClear showSearch optionFilterProp="label" placeholder="业务类型" style={{ width: 150 }} defaultValue={sp.get('move_type') || undefined} options={dictOptions('move_type')} onChange={(v) => setQuery({ move_type: v })} />
           <DatePicker.RangePicker
             onChange={(v) => setQuery({ date_from: toDate(v?.[0]) || undefined, date_to: toDate(v?.[1]) || undefined })}
           />
           <Button icon={<ReloadOutlined />} onClick={reload} />
+          <ExportButton url="/stock-moves" params={query} filename="库存流水" columns={[
+            { title: '时间', key: 'ts', type: 'datetime' }, { title: '业务类型', value: (r) => dictLabel('move_type', r.move_type) },
+            { title: '物料编码', key: 'material_code' }, { title: '物料名称', key: 'material_name' }, { title: '批号', key: 'lot_no' },
+            { title: '数量', key: 'qty', type: 'number' }, { title: '单位', key: 'uom' }, { title: '从库位', key: 'from_location_code' }, { title: '到库位', key: 'to_location_code' },
+            { title: '原状态', value: (r) => dictLabel('stock_status', r.from_status) }, { title: '新状态', value: (r) => dictLabel('stock_status', r.to_status) },
+            { title: '来源单据', key: 'ref_no' }, { title: '操作人', key: 'username' }, { title: '备注', key: 'remark' },
+          ]} />
         </Space>
-        <Table rowKey="id" size="middle" columns={columns} dataSource={rows} loading={loading} pagination={pagination} scroll={{ x: 'max-content' }} />
+        <ResponsiveTable rowKey="id" size="middle" columns={columns} dataSource={rows} loading={loading} pagination={pagination} scroll={{ x: 'max-content' }} />
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>提示：点击批号可查看该批次从来料到客户的完整追溯链。</Typography.Text>
       </Card>
     </>

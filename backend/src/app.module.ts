@@ -10,6 +10,7 @@ import { HealthController } from './health.controller';
 // --- 业务模块（按领域划分） ---
 import { MasterModule } from './master/master.module';
 import { ErpModule } from './erp/erp.module';
+import { PlanModule } from './erp/plan.module';
 import { WmsModule } from './wms/wms.module';
 import { QmsModule } from './qms/qms.module';
 import { MesModule } from './mes/mes.module';
@@ -24,6 +25,7 @@ import { AttachmentsModule } from './attachments/attachments.module';
     SystemModule,
     MasterModule,
     ErpModule,
+    PlanModule,
     WmsModule,
     QmsModule,
     MesModule,

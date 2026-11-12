@@ -150,7 +150,7 @@ export class TraceService {
     const customers = new Map<string | null, number>();
     for (const [wid, qty] of woIds) {
       const wo = await tx.workOrder.findUniqueOrThrow({ where: { id: wid }, include: { material: true } });
-      const sns = await tx.serialNumber.findMany({ where: { wo_id: wid }, orderBy: { sn: 'asc' } });
+      const sns = await tx.serialNumber.findMany({ where: { wo_id: wid }, orderBy: { sn: 'asc' }, include: { location: true } });
       workOrders.push({
         id: wo.id, no: wo.no, lot_no: wo.lot_no, product_code: wo.material.code, product_name: wo.material.name,
         issued_qty: qty, status: wo.status, serial_count: sns.length, shipped_count: sns.filter((s) => s.status === 'SHIPPED').length,
@@ -159,9 +159,15 @@ export class TraceService {
         const sh = s.shipment_id ? await getShipment(s.shipment_id) : null;
         const customerName: string | null = sh ? sh.customer?.name ?? null : null;
         if (sh) customers.set(customerName, (customers.get(customerName) ?? 0) + 1);
+        // 召回清单：UDI、生产批号、在厂库位、收货客户及联系人
         serials.push({
-          sn: s.sn, wo_no: wo.no, status: s.status, key_part_bound: kpSns.has(s.id), key_part_removed: kpRemoved.has(s.id),
+          sn: s.sn, udi: s.udi, lot_no: s.lot_no ?? wo.lot_no, product_code: wo.material.code, product_name: wo.material.name,
+          wo_no: wo.no, status: s.status, key_part_bound: kpSns.has(s.id), key_part_removed: kpRemoved.has(s.id),
+          location_code: s.location?.code ?? null,
           shipment_no: sh?.no ?? null, customer_name: customerName, ship_date: sh?.ship_date ?? null,
+          customer_contact: sh?.customer?.contact ?? null, customer_phone: sh?.customer?.phone ?? null,
+          customer_email: sh?.customer?.email ?? null, customer_country: sh?.customer?.country ?? null, customer_address: sh?.customer?.address ?? null,
+          tracking_no: sh?.tracking_no ?? null,
         });
       }
     }
