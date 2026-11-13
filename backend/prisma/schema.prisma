@@ -225,6 +225,7 @@ model Material {
   key_parts        KeyPartBinding[]
   inspections      Inspection[]
   ncrs             Ncr[]
+  rfid_tags        RfidTag[]
 
   name_en String? @db.VarChar(200) // 英文品名（形式发票、装箱单）
 
@@ -419,6 +420,7 @@ model Warehouse {
 
   locations    Location[]
   stock_counts StockCount[]
+  rfid_readers RfidReader[]
 
   @@map("md_warehouse")
 }
@@ -443,6 +445,10 @@ model Location {
   shipment_lines ShipmentLine[]
   count_lines    StockCountLine[]
   serials        SerialNumber[]
+  rfid_tags      RfidTag[]
+  rfid_readers   RfidReader[]        @relation("RfidReaderLocation")
+  rfid_outside   RfidReader[]        @relation("RfidReaderOutside")
+  rfid_sessions  RfidSession[]
 
   @@index([warehouse_id])
   @@map("md_location")
@@ -1023,6 +1029,7 @@ model SerialNumber {
   release    ProductRelease?   @relation(fields: [release_id], references: [id])
   records    OperationRecord[]
   key_parts  KeyPartBinding[]
+  rfid_tags  RfidTag[]
 
   @@index([wo_id])
   @@index([status])
@@ -1439,4 +1446,170 @@ model SystemSetting {
   updated_at DateTime @updatedAt
 
   @@map("sys_setting")
+}
+
+// ============================ RFID（仓库） ============================
+
+/// RFID 读写器：桌面（收货台）、门式（库门/通道门，带进出方向）、手持（盘点）。接口密钥只存哈希。
+model RfidReader {
+  id                  Int       @id @default(autoincrement())
+  code                String    @unique @db.VarChar(32)
+  name                String    @db.VarChar(64)
+  reader_type         String    @db.VarChar(16) // DESKTOP=桌面 / GATE=门式 / HANDHELD=手持
+  purpose             String    @db.VarChar(16) // RECEIVE=收货 / GATE=库门 / SHIP=发货 / COUNT=盘点
+  warehouse_id        Int?
+  location_id         Int? // 绑定库位：收货台=默认收货库位；库门=库内侧默认库位；发货口/手持可空
+  outside_location_id Int? // 库门外侧对应库位（如线边仓），出库方向的目标库位
+  direction_mode      String    @default("NONE") @db.VarChar(16) // ANTENNA=按天线先后判定 / FIXED_IN=固定入库 / FIXED_OUT=固定出库 / NONE
+  inner_antenna       Int? // 库内侧天线号
+  outer_antenna       Int? // 库外侧天线号
+  rssi_min            Float? // 信号强度阈值（dBm），为空 = 系统默认 RFID_RSSI_MIN
+  key_hash            String?   @db.VarChar(128) // 接口密钥 sha256（明文只在生成时显示一次）
+  key_hint            String?   @db.VarChar(16) // 密钥末 4 位（便于核对）
+  is_active           Boolean   @default(true)
+  last_heartbeat_at   DateTime?
+  last_ip             String?   @db.VarChar(64)
+  remark              String?   @db.Text
+  created_at          DateTime  @default(now())
+  updated_at          DateTime  @default(now()) @updatedAt
+  created_by          String?   @db.VarChar(64)
+
+  warehouse        Warehouse?    @relation(fields: [warehouse_id], references: [id])
+  location         Location?     @relation("RfidReaderLocation", fields: [location_id], references: [id])
+  outside_location Location?     @relation("RfidReaderOutside", fields: [outside_location_id], references: [id])
+  tags_seen        RfidTag[]
+  reads            RfidRead[]
+  sessions         RfidSession[]
+
+  @@index([key_hash])
+  @@map("rfid_reader")
+}
+
+/// RFID 标签：PACKAGE=包装（原材料料盘/箱/托盘，一个标签 = 一个批次的一个包装，带数量）/ UNIT=单台（成品，绑定序列号）
+model RfidTag {
+  id                Int       @id @default(autoincrement())
+  epc               String    @unique @db.VarChar(64)
+  tag_type          String    @db.VarChar(16) // PACKAGE / UNIT
+  status            String    @default("ACTIVE") @db.VarChar(16) // ACTIVE=启用 / VOID=作废
+  material_id       Int?
+  lot_no            String?   @db.VarChar(64)
+  qty               Float? // 包装内数量（库存单位）；单台 = 1
+  owner_customer_id Int? // 货主（客供料）
+  serial_id         Int? // 单台：绑定的序列号
+  location_id       Int? // 当前已知库位（发卡、确认调拨、盘点后更新；为空 = 不在库）
+  receipt_id        Int? // 发卡来源入库单
+  last_reader_id    Int?
+  last_antenna      Int?
+  last_rssi         Float?
+  last_seen_at      DateTime?
+  void_reason       String?   @db.VarChar(256)
+  voided_by         String?   @db.VarChar(64)
+  voided_at         DateTime?
+  replaced_by_epc   String?   @db.VarChar(64) // 换标后的新 EPC
+  remark            String?   @db.Text
+  created_at        DateTime  @default(now())
+  updated_at        DateTime  @default(now()) @updatedAt
+  created_by        String?   @db.VarChar(64)
+
+  material    Material?     @relation(fields: [material_id], references: [id])
+  serial      SerialNumber? @relation(fields: [serial_id], references: [id])
+  location    Location?     @relation(fields: [location_id], references: [id])
+  last_reader RfidReader?   @relation(fields: [last_reader_id], references: [id])
+
+  @@index([material_id, lot_no])
+  @@index([serial_id])
+  @@index([location_id])
+  @@index([status])
+  @@map("rfid_tag")
+}
+
+/// RFID 作业会话：一次收货 / 过门 / 领料核对 / 完工入库 / 发货核对 / 盘点 / 客户退货的读取集合
+model RfidSession {
+  id            Int       @id @default(autoincrement())
+  no            String    @unique @db.VarChar(32)
+  session_type  String    @db.VarChar(16) // RECEIVE / GATE / ISSUE / FG_RECEIPT / SHIP / COUNT / RETURN
+  status        String    @default("OPEN") @db.VarChar(16) // OPEN=进行中 / CONFIRMED=已确认 / CANCELLED=已取消
+  reader_id     Int?
+  location_id   Int? // 盘点库位 / 完工入库库位 / 收货默认库位
+  po_id         Int?
+  issue_id      Int?
+  wo_id         Int?
+  shipment_id   Int?
+  count_id      Int?
+  ref_type      String?   @db.VarChar(32) // 生成的业务单据类型：RECEIPT / TRANSFER / ISSUE / SHIPMENT / STOCK_COUNT / CUSTOMER_RETURN
+  ref_id        Int?
+  ref_no        String?   @db.VarChar(256)
+  last_read_at  DateTime?
+  confirmed_by  String?   @db.VarChar(64)
+  confirmed_at  DateTime?
+  cancel_reason String?   @db.VarChar(256)
+  remark        String?   @db.Text
+  created_at    DateTime  @default(now())
+  updated_at    DateTime  @default(now()) @updatedAt
+  created_by    String?   @db.VarChar(64)
+
+  reader   RfidReader?      @relation(fields: [reader_id], references: [id])
+  location Location?        @relation(fields: [location_id], references: [id])
+  items    RfidSessionTag[]
+  reads    RfidRead[]
+
+  @@index([status, session_type])
+  @@index([reader_id, status])
+  @@map("rfid_session")
+}
+
+/// 会话内的标签（去重单位：同一会话同一 EPC 只算一次），含收货绑定信息、库门方向、处理结果
+model RfidSessionTag {
+  id           Int       @id @default(autoincrement())
+  session_id   Int
+  epc          String    @db.VarChar(64)
+  tag_id       Int?
+  source       String    @default("READER") @db.VarChar(16) // READER=读写器 / MANUAL=条码/手输兜底 / SIMULATED=模拟读取
+  first_seen   DateTime  @default(now())
+  last_seen    DateTime  @default(now())
+  read_count   Int       @default(1)
+  max_rssi     Float?
+  antennas     String?   @db.VarChar(64) // 天线先后顺序（连续相同只记一次），如 "2,1"
+  direction    String?   @db.VarChar(8) // 库门：IN / OUT（为空 = 方向不明）
+  sn           String?   @db.VarChar(64) // 兜底：无标签的序列号
+  // 收货绑定（发卡）
+  po_line_id   Int?
+  material_id  Int?
+  lot_no       String?   @db.VarChar(64)
+  supplier_lot String?   @db.VarChar(64)
+  qty          Float?
+  location_id  Int? // 收货库位 / 库门确认的目标库位
+  mfg_date     DateTime? @db.Date
+  expiry_date  DateTime? @db.Date
+  // 处理结果
+  action       String?   @db.VarChar(16) // 为空 = 待处理；DONE=已处理 / IGNORED=误读已忽略
+  action_note  String?   @db.VarChar(256)
+
+  session RfidSession @relation(fields: [session_id], references: [id])
+
+  @@unique([session_id, epc])
+  @@map("rfid_session_tag")
+}
+
+/// 原始读取（电子记录，只增不改；数据库触发器禁止修改/删除）
+model RfidRead {
+  id          Int      @id @default(autoincrement())
+  reader_id   Int
+  session_id  Int?
+  antenna     Int?
+  epc         String   @db.VarChar(64)
+  rssi        Float?
+  read_at     DateTime // 读写器时间（未提供 = 服务器接收时间）
+  received_at DateTime @default(now())
+  source      String   @default("READER") @db.VarChar(16) // READER / SIMULATED / MANUAL
+  result      String   @db.VarChar(16) // ACCEPTED=计入 / DUPLICATE=重复（已计入）/ LOW_RSSI=信号弱已过滤 / NO_SESSION=无进行中的作业 / LOCATION=库位标签
+  username    String?  @db.VarChar(64) // 模拟/手输的操作人
+
+  reader  RfidReader   @relation(fields: [reader_id], references: [id])
+  session RfidSession? @relation(fields: [session_id], references: [id])
+
+  @@index([session_id])
+  @@index([epc])
+  @@index([reader_id, received_at])
+  @@map("rfid_read")
 }
