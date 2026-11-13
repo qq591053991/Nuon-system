@@ -1,6 +1,7 @@
 /**
  * 仓库打印用小组件：Code 128（B 字符集）条码 SVG（自实现，不依赖第三方库）、批次标签、库位标签、标签打印。
  * 条码内容只能是 ASCII（批号、编码、单号均满足）；含中文时只显示文字。
+ * 仓库改用 RFID 后条码保留（标签读不到时兜底扫码），标签上加印 EPC，供 RFID 打印机写入芯片时核对。
  */
 import type { CSSProperties } from 'react';
 import { fmtDate, fmtQty } from '../../utils/format';
@@ -82,8 +83,22 @@ const LABEL: CSSProperties = {
   overflow: 'hidden', display: 'flex', flexDirection: 'column', fontFamily: 'sans-serif', breakInside: 'avoid',
 };
 
-/** 批次标签：物料、批号条码、数量、效期、库位（不印质量状态：IQC 判定后会变，以系统为准） */
+/** 库位标签 EPC（与后端 rfid/epc.ts 的 locationEpc 一致：4E55 03 00 + 库位 ID 的 16 位十六进制） */
+export const locationEpc = (id: number) => `4E550300${id.toString(16).toUpperCase().padStart(16, '0')}`;
+
+/** EPC 行（RFID 打印机写入芯片后放上读写器核对）；epc === null 表示该包装还没发卡 */
+function EpcLine({ epc }: { epc?: string | null }) {
+  if (epc === undefined) return null;
+  return (
+    <div className="mono" style={{ fontSize: 7.5, textAlign: 'center', letterSpacing: 0.3, whiteSpace: 'nowrap', overflow: 'hidden' }}>
+      {epc ? `EPC ${epc}` : 'EPC 未发卡（先在“标签管理”发卡）'}
+    </div>
+  );
+}
+
+/** 批次标签：物料、批号条码、数量、效期、库位、EPC（不印质量状态：IQC 判定后会变，以系统为准）；单台标签（有 sn）条码为序列号 */
 export function LotLabel({ r }: { r: Rec }) {
+  const code = r.sn || r.lot_no || r.material_code;
   return (
     <div className="wms-label" style={LABEL}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 4 }}>
@@ -91,8 +106,8 @@ export function LotLabel({ r }: { r: Rec }) {
         {/* 不印质量状态：IQC 判定后状态会变，以系统为准（扫批号可查） */}
       </div>
       <div style={{ fontSize: 8, lineHeight: 1.2, height: '2.4em', overflow: 'hidden' }}>{r.material_name}{r.material_spec ? ` | ${r.material_spec}` : ''}</div>
-      <Barcode value={r.lot_no || r.material_code} height={34} showText={false} style={{ margin: '1mm 0 0' }} />
-      <div className="mono" style={{ fontSize: 12, fontWeight: 700, textAlign: 'center' }}>{r.lot_no || '（无批号）'}</div>
+      <Barcode value={code} height={r.epc === undefined ? 34 : 28} showText={false} style={{ margin: '1mm 0 0' }} />
+      <div className="mono" style={{ fontSize: 12, fontWeight: 700, textAlign: 'center' }}>{r.sn ? `SN ${r.sn}` : r.lot_no || '（无批号）'}</div>
       <div style={{ fontSize: 9, display: 'flex', justifyContent: 'space-between' }}>
         <span>数量 <b>{fmtQty(r.qty)}</b> {r.uom}</span>
         <span>库位 <b>{r.location_code}</b></span>
@@ -101,6 +116,7 @@ export function LotLabel({ r }: { r: Rec }) {
         <span>{r.supplier_lot ? `原厂 ${r.supplier_lot}` : r.receipt_no ? `单号 ${r.receipt_no}` : ''}</span>
         <span>{r.expiry_date ? `效期 ${fmtDate(r.expiry_date)}` : r.received_date ? `收货 ${fmtDate(r.received_date)}` : ''}</span>
       </div>
+      <EpcLine epc={r.epc} />
     </div>
   );
 }
@@ -110,8 +126,9 @@ export function LocationLabel({ r }: { r: Rec }) {
   return (
     <div className="wms-label" style={{ ...LABEL, justifyContent: 'center', alignItems: 'stretch' }}>
       <div className="mono" style={{ fontSize: 22, fontWeight: 800, textAlign: 'center', lineHeight: 1.1 }}>{r.code}</div>
-      <Barcode value={r.code} height={42} showText={false} style={{ margin: '1.5mm 0' }} />
+      <Barcode value={r.code} height={38} showText={false} style={{ margin: '1.5mm 0' }} />
       <div style={{ fontSize: 9, textAlign: 'center' }}>{r.name ?? ''}{r.warehouse_name ? ` · ${r.warehouse_name}` : ''}</div>
+      <EpcLine epc={r.id ? locationEpc(r.id) : undefined} />
     </div>
   );
 }

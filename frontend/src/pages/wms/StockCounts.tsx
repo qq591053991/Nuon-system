@@ -1,5 +1,5 @@
 import { Alert, Button, Card, Descriptions, Drawer, Form, Input, InputNumber, Modal, Progress, Select, Space, Spin, Switch, Table, Tag, Typography, message, type InputRef, type TableColumnsType } from 'antd';
-import { AuditOutlined, MobileOutlined, PlusOutlined, PrinterOutlined, ReloadOutlined, RollbackOutlined, SaveOutlined, StopOutlined } from '@ant-design/icons';
+import { AuditOutlined, MobileOutlined, PlusOutlined, PrinterOutlined, ReloadOutlined, RollbackOutlined, SaveOutlined, StopOutlined, WifiOutlined } from '@ant-design/icons';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { get, post, put, type Rec } from '../../api/http';
@@ -259,7 +259,8 @@ function CountDrawer({ id, onClose, onChanged }: { id: number | null; onClose: (
   const statusExtra = d && (
     <Space wrap>
       <Button icon={<PrinterOutlined />} onClick={() => window.open(`/wms/print/count/${d.id}`, '_blank')}>打印盘点表</Button>
-      {editable && <Button icon={<MobileOutlined />} onClick={() => nav(`/wms/pda/count/${d.id}`)}>PDA 盘点</Button>}
+      {editable && <Button icon={<WifiOutlined />} onClick={() => nav('/wms/rfid/count')}>RFID 盘点（手持读写器）</Button>}
+      {editable && <Button icon={<MobileOutlined />} onClick={() => nav(`/wms/pda/count/${d.id}`)}>条码盘点（兜底）</Button>}
       {editable && <Button icon={<SaveOutlined />} disabled={!dirty} onClick={() => save()}>保存实盘</Button>}
       {editable && <Button danger icon={<StopOutlined />} onClick={doCancel}>作废</Button>}
       {editable && <Button type="primary" icon={<AuditOutlined />} loading={busy} onClick={doPost}>过账</Button>}

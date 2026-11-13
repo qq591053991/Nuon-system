@@ -7,7 +7,9 @@ flowchart TB
   subgraph 客户端
     PC[办公电脑浏览器]
     ST[车间工位终端 / 触摸屏 + 扫码枪]
+    RF[仓库 RFID 读写器<br/>收货台 · 库门 · 发货口 · 手持盘点]
   end
+  RF -- X-Reader-Key --> NG
   PC & ST --> NG[Nginx：静态前端 + /api 反向代理]
   NG --> API[NestJS 应用]
   API --> SVC[业务服务层<br/>inventory · production · quality · wms · mrp · trace]
@@ -33,6 +35,7 @@ flowchart TB
 | WMS | `wms_stock`（物料+库位+批次+质量状态+货主）、`wms_stock_move` 流水、`wms_receipt(+_line)`、`wms_issue(+_line)`、`wms_shipment(+_line)`、`wms_stock_count(+_line)` |
 | MES | `mes_work_order`、`mes_wo_material`（用料快照）、`mes_wo_operation`（工序/规格快照）、`mes_serial`（序列号/UDI）、`mes_op_record` 过站记录、`mes_test_value` 测试数据、`mes_key_part` 关键件绑定 |
 | QMS | `qms_inspection(+_item)`、`qms_ncr`、`qms_capa` |
+| RFID（仓库） | `rfid_reader` 读写器（用途、库位、门的方向规则、密钥哈希、心跳）、`rfid_tag` 标签（EPC 唯一；包装 = 物料+批号+数量+货主，单台 = 序列号；当前已知库位）、`rfid_session` 作业会话、`rfid_session_tag` 会话内标签（同一会话同一 EPC 一行 = 去重）、`rfid_read` 原始读取（电子记录，只增不改） |
 
 ## 关键业务规则（均由后端强制执行，并有自动化测试覆盖）
 
@@ -52,6 +55,12 @@ flowchart TB
 - FEFO：按有效期 → 入库时间排序推荐批次；过期批次不可用；不合格品区的库存不参与分配。
 - 客供料：按货主隔离，只能分配给该客户的工单。
 - 盘点：生成账面快照 → 录入实盘 → 过账自动生成差异调整。
+
+**仓库 RFID（代替 PDA 扫码；车间工位终端仍用扫码枪）**
+- 读写器/中间件用接口密钥推送读取（`POST /api/rfid/readings`）；每条读取都记原始记录；同一作业同一 EPC 只算一次；信号低于阈值、库位标签、无进行中作业的读取只记录不计入；未登记标签单独列出。
+- 所有库存变动仍走现有仓储服务（`WmsService` / `WmsOpsService` / `CustomerReturnsService` → `InventoryService`）：收货台确认 = `receive`（放置规则、湿敏确认、IQC、应付照常）后发卡；库门 = 待确认，仓管确认后 `transfer`；领料 = `pickLine` + `confirmIssue`；完工入库 = `fgReceiptSerials`；发货 = `confirmShipment`；盘点 = `createCount` / `saveCountLines` / `addCountLine` / `postCount`；客户退货 = `CustomerReturnsService.create`。
+- 误读不自动过账：库门只生成待确认；领料/发货/完工入库有不符的标签（多读、读错批次、未放行、不属于本单）时不能确认，须拿开并“标记为误读”（原始读取保留）。
+- 条码保留为兜底：各作业页可扫序列号/UDI、批号或输入 EPC；原 PDA 条码作业页 `/wms/pda/*` 保留，从 RFID 作业台进入。
 
 **MES**
 - 工单下达：快照已发布 BOM（含损耗，离散单位向上取整）与工艺（含测试规格）；生成批号、序列号、UDI。

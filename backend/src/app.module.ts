@@ -12,6 +12,7 @@ import { MasterModule } from './master/master.module';
 import { ErpModule } from './erp/erp.module';
 import { PlanModule } from './erp/plan.module';
 import { WmsModule } from './wms/wms.module';
+import { RfidModule } from './rfid/rfid.module';
 import { QmsModule } from './qms/qms.module';
 import { MesModule } from './mes/mes.module';
 import { ReportModule } from './report/report.module';
@@ -27,6 +28,7 @@ import { AttachmentsModule } from './attachments/attachments.module';
     ErpModule,
     PlanModule,
     WmsModule,
+    RfidModule,
     QmsModule,
     MesModule,
     ReportModule,

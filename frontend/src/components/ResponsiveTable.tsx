@@ -32,7 +32,7 @@ const cell = (col: RColumn, rec: Rec, i: number): ReactNode => {
 const titleText = (t: RColumn['title']): ReactNode => (typeof t === 'function' ? null : (t as ReactNode));
 
 /**
- * 响应式表格：用法与 antd Table 相同；屏幕宽度 < breakpoint（默认 600，即手机/PDA）时自动改为卡片列表，
+ * 响应式表格：用法与 antd Table 相同；屏幕宽度 < breakpoint（默认 600，即手机/手持终端）时自动改为卡片列表，
  * 不再横向滚动、不再被固定列遮挡。列可加 mobile 提示（见 MobileRole）；未标注时第一列作标题、key 为 _op 的列作操作区。
  */
 export default function ResponsiveTable<T extends Rec = Rec>({ breakpoint = 600, ...props }: TableProps<T> & { columns?: RColumn<T>[]; breakpoint?: number }) {

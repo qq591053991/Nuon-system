@@ -7,6 +7,7 @@ import { PrismaService, type Tx } from '../common/prisma.service';
 import { InventoryService } from '../core/inventory.service';
 import { NumberingService } from '../core/numbering.service';
 import { makeGtin14 } from '../core/udi';
+import { seedOpeningTags, seedRfidReaders } from './seed-rfid';
 
 export { DEMO_PASSWORD };
 
@@ -222,7 +223,11 @@ export async function seedBase(db: PrismaService, opts: SeedBaseOptions = {}): P
         await tx.receiptLine.create({ data: { receipt_id: rc.id, line_no: ++i, material_id: mm.id, qty, lot_no: lot, location_id: loc.get(lc)!, status: 'AVAILABLE', mfg_date: mfg, expiry_date: exp } });
         await inv.addStock(tx, { material_id: mm.id, location_id: loc.get(lc)!, lot_no: lot, status: 'AVAILABLE', qty, move_type: 'OPENING', ref, owner_customer_id: mm.owner_customer_id, mfg_date: mfg, expiry_date: exp });
       }
+      // RFID：期初库存按包装发卡（每个料盘/箱一张标签）
+      await seedOpeningTags(tx, numbering, rc.id);
     }
+    // RFID 演示读写器（收货台、原材料仓门、发货口、盘点手持机）
+    await seedRfidReaders(tx);
 
     // 销售订单
     if (!(await tx.salesOrder.findFirst())) {

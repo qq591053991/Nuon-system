@@ -119,7 +119,7 @@ function ShipmentDrawer({ id, onClose, onChanged }: { id: number | null; onClose
       render: (_, r) => (r.serial_list?.length ? <Tag color="geekblue">{r.serial_list.length} 台</Tag> : <Typography.Text type="secondary">非序列号产品</Typography.Text>),
     },
   ];
-  /** 窄屏（PDA）卡片：产品 · 批号 · 库位 · 数量，序列号直接列在卡片里 */
+  /** 窄屏（手机）卡片：产品 · 批号 · 库位 · 数量，序列号直接列在卡片里 */
   const cardColumns: RColumn[] = [
     { title: '产品', key: 'm', mobile: 'title', render: (_, r) => <MaterialCell code={r.material_code} name={r.material_name} spec={r.material_spec} /> },
     { title: '批号', dataIndex: 'lot_no', render: (v, r) => <LotLink code={r.material_code} lot={v} /> },

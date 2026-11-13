@@ -9,11 +9,11 @@ import { CustomerReturnsService } from './customer-returns.service';
 import { WmsOpsController } from './ops.controller';
 import { WmsOpsService } from './ops.service';
 
-/** 仓储：库存、收货、领料、发货、调拨、盘点（WmsService 供 ERP 采购收货、数据导入、演示数据调用） */
+/** 仓储：库存、收货、领料、发货、调拨、盘点（WmsService 供 ERP 采购收货、数据导入、演示数据调用；作业服务与客户退货供 RFID 模块复用） */
 @Module({
   imports: [QmsModule],
   controllers: [WmsController, ReturnsController, CustomerReturnsController, WmsOpsController],
   providers: [WmsService, ReturnsService, CustomerReturnsService, WmsOpsService],
-  exports: [WmsService],
+  exports: [WmsService, WmsOpsService, CustomerReturnsService],
 })
 export class WmsModule {}

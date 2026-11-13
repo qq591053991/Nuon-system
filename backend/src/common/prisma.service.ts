@@ -6,7 +6,7 @@ import { DATE_FIELDS } from './dates';
 export type Tx = Prisma.TransactionClient;
 
 /** 审计追踪不记录的模型（自身即为记录/流水） */
-const SKIP_MODELS = new Set(['AuditLog', 'ESignature', 'Sequence', 'StockMove']);
+const SKIP_MODELS = new Set(['AuditLog', 'ESignature', 'Sequence', 'StockMove', 'RfidRead']);
 const SKIP_FIELDS = new Set(['password_hash', 'pin_hash', 'updated_at', 'created_at']);
 const WRITE_OPS = new Set(['create', 'createMany', 'update', 'upsert', 'delete', 'updateMany', 'deleteMany']);
 

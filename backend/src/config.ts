@@ -70,4 +70,24 @@ export const config = {
   },
   /** 单个附件大小上限（MB） */
   attachmentMaxMb: numEnv('ATTACHMENT_MAX_MB', 20),
+  /** RFID（仓库）：读取过滤与在线判断；运行时读取便于测试覆盖 */
+  rfid: {
+    /** 信号强度阈值（dBm）：低于该值的读取视为误读（如隔壁货架、擦边），只记录不计入；读写器可单独设置 */
+    get rssiMin(): number {
+      return numEnv('RFID_RSSI_MIN', -70);
+    },
+    /** 库门：同一读写器在该秒数内的连续读取归为同一次过门 */
+    get gateWindowSeconds(): number {
+      return numEnv('RFID_GATE_WINDOW_SECONDS', 30);
+    },
+    /** 读写器心跳超过该秒数视为离线 */
+    get onlineSeconds(): number {
+      return numEnv('RFID_ONLINE_SECONDS', 120);
+    },
+    /** 模拟读取（没有硬件时演示/测试）：RFID_SIMULATE=1 开启、0 关闭；未设置时非生产环境（NODE_ENV≠production）开启 */
+    get simulate(): boolean {
+      const v = (process.env.RFID_SIMULATE || '').trim();
+      return v ? v === '1' : process.env.NODE_ENV !== 'production';
+    },
+  },
 };

@@ -21,7 +21,8 @@
 | 10 | 防火墙 | 只开放 443（及 80 跳转）；PostgreSQL 5432 不对外暴露（compose 默认未映射） | ☐ |
 | 11 | 监控 | 按 §8 配置健康检查、磁盘、备份失败告警 | ☐ |
 | 12 | 公司信息 | `.env` 中 `COMPANY_NAME` 等已填写（形式发票、采购单打印抬头）；`DEMO_MODE=0` | ☐ |
-| 13 | 版本记录 | 记录部署的 Git 提交号、数据库迁移版本（`_prisma_migrations` 最新一条） | ☐ |
+| 13 | RFID | `RFID_SIMULATE=0`（正式环境关闭模拟读取）；演示读写器的公开密钥已在“读写器管理”逐台**重新生成**；读写器/中间件与服务器 NTP 同步；`RFID_RSSI_MIN` 已按现场调好（见 §11） | ☐ |
+| 14 | 版本记录 | 记录部署的 Git 提交号、数据库迁移版本（`_prisma_migrations` 最新一条） | ☐ |
 
 部署命令：
 
@@ -200,7 +201,7 @@ docker compose exec backup sh /usr/local/bin/nuon-restore.sh /backups/db/nuon_20
 
 ## 6. 生产数据库账号加固
 
-数据库触发器已禁止 UPDATE/DELETE `sys_esignature`、`wms_stock_move`，并禁止修改/删除 `sys_audit_log` 内容。但**表属主或超级用户**仍可 `TRUNCATE`（不触发行级触发器）、`ALTER TABLE … DISABLE TRIGGER` 或 `DROP`。因此生产环境应区分账号：
+数据库触发器已禁止 UPDATE/DELETE `sys_esignature`、`wms_stock_move`、`rfid_read`（RFID 原始读取），并禁止修改/删除 `sys_audit_log` 内容。但**表属主或超级用户**仍可 `TRUNCATE`（不触发行级触发器）、`ALTER TABLE … DISABLE TRIGGER` 或 `DROP`。因此生产环境应区分账号：
 
 | 账号 | 用途 | 权限 |
 |---|---|---|
@@ -223,7 +224,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE nuon IN SCHEMA public GRANT SELECT, INSERT, UP
 ALTER DEFAULT PRIVILEGES FOR ROLE nuon IN SCHEMA public GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO nuon_app;
 
 -- 电子记录：只增不改
-REVOKE UPDATE, DELETE, TRUNCATE ON sys_esignature, wms_stock_move, sys_attachment FROM nuon_app;
+REVOKE UPDATE, DELETE, TRUNCATE ON sys_esignature, wms_stock_move, sys_attachment, rfid_read FROM nuon_app;
 -- 审计追踪：只允许插入，以及封存时写入哈希链三列
 REVOKE UPDATE, DELETE, TRUNCATE ON sys_audit_log FROM nuon_app;
 GRANT UPDATE (prev_hash, hash, seal_no) ON sys_audit_log TO nuon_app;
@@ -317,3 +318,18 @@ timedatectl                         # System clock synchronized: yes
 - 数据库 `sys_attachment` 记录原文件名、大小、sha256、上传人、时间；下载时重新校验 sha256，内容被篡改或损坏会拒绝下载并提示从备份恢复。
 - 附件是质量证据，系统不提供删除；上传错误时补充说明并重新上传正确文件。
 - 单个文件上限 20 MB（`ATTACHMENT_MAX_MB`）；前端 Nginx 的 `client_max_body_size` 需不小于该值。
+
+---
+
+## 11. RFID 读写器运维（仓库）
+
+仓库已从 PDA 扫码改为 RFID（收货台、库门、发货口固定读写器 + 盘点手持读写器），硬件选型与接口见 `docs/hardware-integration.md` 第九节。
+
+| 项目 | 做法 |
+|---|---|
+| 接口密钥 | 每台读写器一把密钥（请求头 `X-Reader-Key`），库里只存 sha256；在“仓储管理 → RFID 作业台 → 读写器管理”新增或“新密钥”时只显示一次。读写器更换、人员离职、密钥疑似泄露时立即重新生成（旧密钥立即失效）。演示数据的 4 台读写器使用公开演示密钥，正式环境必须全部重新生成或停用 |
+| 环境变量 | `RFID_SIMULATE`（`0` 关闭模拟读取；未设置时 `NODE_ENV=production` 自动关闭）、`RFID_RSSI_MIN`（默认 -70 dBm，单台可在读写器上覆盖）、`RFID_GATE_WINDOW_SECONDS`（过门时间窗，默认 30 秒）、`RFID_ONLINE_SECONDS`（心跳超时，默认 120 秒） |
+| 在线监控 | 读写器/中间件每 30 秒 `POST /api/rfid/heartbeat`；作业台首页显示在线/离线与最后心跳。离线超过 5 分钟应排查网络/供电；离线期间仓管用各页面的“条码/手输兜底”或“条码作业（兜底）”页面继续作业 |
+| 原始读取 | `rfid_read` 是电子记录，只增不改（触发器 + §6 撤销权限）。量大时（门式读写器每秒数十条）建议中间件先在 1 秒内对同一 EPC 去重再推送；按 §5 的保存期限与库存流水一并归档 |
+| 误读调参 | 门口货架常被读到：调高该门的信号阈值（如 -60 dBm）、加装屏蔽帘、调整天线角度；“方向不明”的过门记录不会自动移库，须仓管选择方向或标记误读 |
+| 标签数量 | 包装标签的数量在 RFID 领料核对时自动扣减；经条码兜底或电脑页面领用的，系统在盘点/过门时按账面自动纠正（同一库位同一批次的账面数量按发卡先后分配给标签，旧包先用完），不会因发卡数量误判盘盈 |

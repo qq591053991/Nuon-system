@@ -331,7 +331,7 @@ function ReceiveModal({ po, open, onClose, onDone }: { po: Rec; open: boolean; o
       .filter((l) => remainOf(l) > 0)
       .map((l) => ({ _key: String(l.id), po_line_id: l.id, line: l, qty: remainOf(l) }));
     setRows(base);
-    // 建议库位（与 PDA 收货同一规则）
+    // 建议库位（与 RFID 收货台同一规则）
     get('/wms/receive-context', { po: po.no }, true)
       .then((ctx: Rec) => {
         const sug = new Map<number, Rec>(((ctx?.lines || []) as Rec[]).map((x) => [x.po_line_id, x]));
@@ -504,10 +504,10 @@ function ReceiveModal({ po, open, onClose, onDone }: { po: Rec; open: boolean; o
         type="info"
         showIcon
         style={{ marginBottom: 16 }}
-        message="库位已按物料默认库位/防潮柜等规则带出（与 PDA 收货一致），提交前会校验：湿敏物料放非防潮库位需要确认，自有料不能进客供料仓。收货按库存单位登记，需检验的物料收货后为“待检”。"
+        message="库位已按物料默认库位/防潮柜等规则带出（与 RFID 收货台一致），提交前会校验：湿敏物料放非防潮库位需要确认，自有料不能进客供料仓。收货按库存单位登记，需检验的物料收货后为“待检”。"
         action={
-          <Button size="small" icon={<MobileOutlined />} onClick={() => nav(`/wms/pda/receive?po=${encodeURIComponent(po.no)}`)}>
-            PDA 扫码收货
+          <Button size="small" icon={<MobileOutlined />} onClick={() => nav(`/wms/rfid/receive?po_id=${po.id}`)}>
+            RFID 收货台
           </Button>
         }
       />

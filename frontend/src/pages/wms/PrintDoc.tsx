@@ -2,7 +2,8 @@
  * 仓库单据打印页（新标签页打开，屏幕上即为打印预览）：
  *   /wms/print/receipt/:id   入库单          /wms/print/issue/:id    拣料单（领料/退料单）
  *   /wms/print/shipment/:id  发货单 + 装箱单  /wms/print/count/:id    盘点表（盲盘不印账面）
- *   /wms/print/labels?receipt=ID | stock=1,2 | lot=批号 | location=1,2 | warehouse_id=ID   批次标签 / 库位标签
+ *   /wms/print/labels?receipt=ID | stock=1,2 | lot=批号 | location=1,2 | warehouse_id=ID | tags=1,2   批次标签 / 库位标签 / RFID 标签
+ *   批次标签按已发卡的包装标签逐包打印（每包一张，印 EPC）；未发卡的批次印“EPC 未发卡”。库位标签印库位 EPC。
  */
 import { Alert, Button, Card, Empty, Radio, Space, Spin, Typography } from 'antd';
 import { PrinterOutlined } from '@ant-design/icons';
@@ -50,7 +51,7 @@ function DocTable({ columns, rows }: { columns: { title: string; render: (r: Rec
   );
 }
 
-/** 单据标题（屏幕显示；打印时由 PrintHeader 提供抬头）+ 单号条码（屏幕与打印都显示，便于 PDA 扫单号） */
+/** 单据标题（屏幕显示；打印时由 PrintHeader 提供抬头）+ 单号条码（屏幕与打印都显示，便于扫码枪扫单号） */
 const Title = ({ text, no }: { text: string; no: string }) => (
   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: 8 }}>
     <div className="no-print" style={{ fontSize: 20, fontWeight: 700 }}>{text}</div>
@@ -189,6 +190,20 @@ function CountDoc({ d }: { d: Rec }) {
   );
 }
 
+/** 批次行 → 按已发卡的包装标签展开（每包一张，数量 = 包装数量，带 EPC）；没有标签的保留一张（EPC 未发卡） */
+async function withTags(rows: Rec[], receiptId?: number | null): Promise<Rec[]> {
+  const lots = [...new Set(rows.map((r) => r.lot_no).filter(Boolean))];
+  if (!lots.length) return rows.map((r) => ({ ...r, epc: null }));
+  const tags: Rec[] = (await get('/rfid/tags', { lot_no: lots.join(','), status: 'ACTIVE', tag_type: 'PACKAGE', page_size: 1000 }, true).catch(() => ({ items: [] }))).items;
+  const out: Rec[] = [];
+  for (const r of rows) {
+    const mine = tags.filter((t) => t.material_id === r.material_id && t.lot_no === r.lot_no && (receiptId ? t.receipt_id === receiptId : t.location_id === r.location_id));
+    if (!mine.length) out.push({ ...r, epc: null });
+    else for (const t of mine) out.push({ ...r, qty: t.qty, epc: t.epc, location_code: t.location_code ?? r.location_code });
+  }
+  return out;
+}
+
 function Labels() {
   const [sp] = useSearchParams();
   const [rows, setRows] = useState<Rec[] | null>(null);
@@ -198,10 +213,13 @@ function Labels() {
     (async () => {
       if (sp.get('receipt')) {
         const rc = await get(`/receipts/${sp.get('receipt')}`);
-        setRows((rc.lines as Rec[]).map((l) => ({ ...l, receipt_no: rc.no, received_date: rc.receipt_date })));
+        setRows(await withTags((rc.lines as Rec[]).map((l) => ({ ...l, receipt_no: rc.no, received_date: rc.receipt_date })), rc.id));
       } else if (sp.get('stock') || sp.get('lot')) {
         const d = await get('/stock', { ids: sp.get('stock') || undefined, lot_no: sp.get('lot') || undefined, page_size: 500 });
-        setRows(d.items);
+        setRows(await withTags(d.items));
+      } else if (sp.get('tags')) {
+        const d = await get('/rfid/tags', { ids: sp.get('tags'), page_size: 500 });
+        setRows((d.items as Rec[]).map((t) => ({ ...t, epc: t.epc })));
       } else if (sp.get('location') || sp.get('warehouse_id')) {
         setKind('location');
         const ids = (sp.get('location') || '').split(',').map(Number).filter(Boolean);
@@ -215,11 +233,11 @@ function Labels() {
     <>
       <Card className="no-print" style={{ marginBottom: 12 }}>
         <Space wrap>
-          <b>{kind === 'lot' ? '批次标签' : '库位标签'}（{rows.length} 张）</b>
+          <b>{kind === 'lot' ? '批次 / RFID 标签' : '库位标签'}（{rows.length} 张）</b>
           <Radio.Group value={size} onChange={(e) => setSize(e.target.value)} optionType="button" options={[{ value: 'roll', label: '标签打印机 60×40mm' }, { value: 'a4', label: 'A4 不干胶（3 列）' }]} />
           <Button type="primary" icon={<PrinterOutlined />} onClick={() => printLabels(size, kind === 'lot' ? '批次标签' : '库位标签')}>打印</Button>
         </Space>
-        <Typography.Paragraph type="secondary" style={{ margin: '8px 0 0' }}>条码为 Code 128，内容 = {kind === 'lot' ? '批号' : '库位编码'}，PDA 扫码即可识别。</Typography.Paragraph>
+        <Typography.Paragraph type="secondary" style={{ margin: '8px 0 0' }}>条码为 Code 128，内容 = {kind === 'lot' ? '批号（单台为序列号）' : '库位编码'}，标签读不到时扫码枪兜底。EPC 供 RFID 打印机写入芯片时核对：贴好后放上收货台读写器读一下，读出的 EPC 与标签上一致即写入正确。</Typography.Paragraph>
       </Card>
       {!rows.length ? <Empty /> : (
         <div className="wms-labels" style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>

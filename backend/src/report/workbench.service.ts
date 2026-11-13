@@ -74,6 +74,7 @@ export const PATHS = {
   shipDraft: '/wms/shipments?status=DRAFT',
   shipNew: '/wms/shipments?new=1',
   countOpen: '/wms/counts',
+  rfidGate: '/wms/rfid/gate',
   expiring: '/wms/stock?expiring_days=30',
   belowSafety: '/wms/stock?tab=summary&below_safety=1',
   stockSummary: '/wms/stock?tab=summary',
@@ -166,6 +167,8 @@ class Counters {
   supplierReturns = () => this.m('sr', () => this.tx.supplierReturn.count({ where: { status: 'PENDING' } }));
   customerReturns = () => this.m('rma', () => this.tx.customerReturn.count({ where: { status: 'RECEIVED' } }));
   countOpen = () => this.m('cnt', () => this.tx.stockCount.count({ where: { status: 'OPEN' } }));
+  /** RFID 库门待确认：进行中的过门会话里还没处理（确认移库/误读）的标签数 */
+  rfidGate = () => this.m('rfid_gate', () => this.tx.rfidSessionTag.count({ where: { action: null, session: { status: 'OPEN', session_type: 'GATE' } } }));
   expiringLots = () => this.m('exp', () => this.tx.stock.count({ where: { qty: { gt: 0 }, expiry_date: { not: null, lte: addDays(this.t, 30) } } }));
   belowSafety = () => this.m('below', async () => {
     const avail = new Map<number, number>();
@@ -325,6 +328,7 @@ export class WorkbenchService {
     // 仓管
     await add(['warehouse'], 'po_receive', '待收货的采购订单', c.poToReceive, PATHS.poReceive);
     await add(['warehouse'], 'putaway', '待上架的批次', c.putaway, PATHS.putaway);
+    await add(['warehouse'], 'rfid_gate', '库门待确认的过门标签', c.rfidGate, PATHS.rfidGate, 'warning');
     await add(['warehouse'], 'issue', '待发料的领料单', c.issueDraft, PATHS.issueDraft);
     await add(['warehouse'], 'ship', '待过账的发货单', c.shipDraft, PATHS.shipDraft);
     await add(['warehouse'], 'shippable', '已放行可发货的销售订单', async () => (await c.shippable()).length, PATHS.shipNew);

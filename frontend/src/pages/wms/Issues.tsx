@@ -115,7 +115,7 @@ function IssueDrawer({ issue, onClose, onChanged }: { issue: Rec | null; onClose
     () => [...(issue?.lines || [])].sort((a: Rec, b: Rec) => String(a.location_code).localeCompare(String(b.location_code)) || String(a.material_code).localeCompare(String(b.material_code))),
     [issue],
   );
-  // 窄屏（PDA）自动变卡片：库位 · 物料 · 批号 · 数量
+  // 窄屏（手机）自动变卡片：库位 · 物料 · 批号 · 数量
   const columns: RColumn[] = [
     { title: '#', key: 'idx', width: 40, mobile: 'hidden', render: (_, __, i) => i + 1 },
     { title: '库位', dataIndex: 'location_code', width: 90, render: (v) => <b className="mono" style={{ fontSize: 15 }}>{v}</b> },
@@ -320,7 +320,7 @@ export default function Issues() {
   const { can } = useAuth();
   const nav = useNavigate();
 
-  // /wms/issues?id=123 直接打开明细（全局搜索 / 待办跳转）；?return=1 直接新建退料单（PDA 九宫格“生产退料”）
+  // /wms/issues?id=123 直接打开明细（全局搜索 / 待办跳转）；?return=1 直接新建退料单（仓管九宫格“生产退料”）
   useEffect(() => {
     const id = Number(sp.get('id'));
     if (id) get(`/issues/${id}`).then(setCurrent).catch(() => undefined);

@@ -279,7 +279,7 @@ function FgReceiptModal({ wo, open, onClose, onDone }: { wo: Rec; open: boolean;
           <LocationSelect />
         </Form.Item>
         {wo.serial_control && (
-          <Alert type="success" showIcon style={{ marginBottom: 12 }} message={<>需要逐台扫码核对？<Link to={`/wms/pda/fg?wo=${wo.id}`}>打开扫码完工入库</Link>（PDA 可用）</>} />
+          <Alert type="success" showIcon style={{ marginBottom: 12 }} message={<>需要逐台核对？<Link to={`/wms/rfid/fg?wo_id=${wo.id}`}>RFID 完工入库</Link>（读单台标签）；标签读不到时用 <Link to={`/wms/pda/fg?wo=${wo.id}`}>条码完工入库</Link></>} />
         )}
         <Form.Item name="qty" label="入库数量" extra={wo.serial_control ? '留空 = 全部已完成全部工序的序列号入库' : '留空 = 全部可入库数量'}>
           <InputNumber min={1} max={avail} precision={wo.serial_control ? 0 : 4} style={{ width: 200 }} placeholder={`全部 ${num(avail)}`} />

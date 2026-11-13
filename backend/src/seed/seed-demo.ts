@@ -2,6 +2,7 @@
  * 演示业务流程（移植自 backend/app/seed.py 的 seed_demo）：
  *   SO → 工单 → 领料 → 逐台过站（含一次光学不合格返工换件、一次安规不合格报废）→ 完工入库 → DHR 放行 → 发货；
  *   再生成一张部分在制的工单（留一条待处置 NCR；已完工的 2 台入库并分批放行 1 台）和一张已到货待 IQC 的采购订单。
+ *   RFID 演示：成品单台标签、1 台完工待入库、1 张待过账发货单、1 张待过账领料单（BL-100 工单）、1 次待确认的仓门过门读取。
  * 每个业务步骤一个事务，并以对应操作人的身份运行（审计追踪记录真实操作人）。
  */
 import { AuthService } from '../auth/auth.service';
@@ -15,6 +16,7 @@ import { NumberingService } from '../core/numbering.service';
 import { nextOperation, opParams, ProductionService } from '../mes/production.service';
 import { QualityService } from '../qms/quality.service';
 import { WmsService } from '../wms/wms.service';
+import { RfidService } from '../rfid/rfid.service';
 import { DEMO_PASSWORD, type SeedContext } from './seed-base';
 
 /** 可复现的伪随机数（mulberry32，固定种子），保证每次生成的演示测试数据一致 */
@@ -42,6 +44,7 @@ export async function seedDemo(db: PrismaService, ctx: SeedContext): Promise<voi
   const prod = new ProductionService(numbering, inv, esign);
   const qms = new QualityService(inv, numbering, esign);
   const wms = new WmsService(inv, numbering, qms);
+  const rfid = new RfidService(numbering);
 
   const rand = prng(2026);
   const uniform = (a: number, b: number) => a + (b - a) * rand();
@@ -186,5 +189,44 @@ export async function seedDemo(db: PrismaService, ctx: SeedContext): Promise<voi
       }],
     }),
   );
+  // ---------------- RFID 演示数据 ----------------
+  // 工单 2 再完工 1 台（完工待入库，供“RFID 完工入库”演示）
+  await runSn(wo2.id, sns2[2], u.op1);
+  // 成品单台标签：两张工单已完工 / 在库 / 已发货的序列号
+  await step(u.wh, (tx) => rfid.issueForSerials(tx, u.wh, { wo_id: wo.id }));
+  await step(u.wh, (tx) => rfid.issueForSerials(tx, u.wh, { wo_id: wo2.id }));
+  // 待过账发货单：已放行在库的 1 台（供“RFID 发货核对”演示）
+  await step(u.sales, (tx) =>
+    wms.createShipment(tx, u.sales, so.id, [{ so_line_id: so.lines[0].id, qty: 1, serials: [sns2[0]] }], { carrier: 'SF', remark: 'RFID 发货核对演示' }),
+  );
+  // 工单 3：BL-100 × 2，已下达，生成待过账领料单（供“RFID 领料核对”演示）
+  const so2 = await db.client.salesOrder.findFirstOrThrow({ where: { customer_po: 'GY-2026-0931' }, include: { lines: true } });
+  const wo3 = await step(u.pmc, async (tx) => {
+    const w = await tx.workOrder.create({
+      data: {
+        no: await numbering.nextNo(tx, 'WO'), material_id: m.BL100.id, customer_id: so2.customer_id, so_id: so2.id, so_line_id: so2.lines[0].id,
+        planned_qty: 2, planned_start: t, status: 'PLANNED', source: so2.no, created_by: 'pmc',
+      },
+    });
+    await tx.salesOrder.update({ where: { id: so2.id }, data: { status: 'IN_PRODUCTION' } });
+    return prod.releaseWorkOrder(tx, w.id, u.pmc);
+  });
+  await step(u.wh, (tx) => wms.createIssue(tx, u.wh, wo3.id));
+  // 原材料仓门：一次过门读取（2 包出库到车间线边 + 1 包只被一侧天线读到），待仓管确认
+  const gate = await db.client.rfidReader.findUniqueOrThrow({ where: { code: 'RD-GATE-RAW' } });
+  const tagOf = (lot: string) => db.client.rfidTag.findFirstOrThrow({ where: { lot_no: lot, status: 'ACTIVE' }, orderBy: { id: 'asc' } });
+  const [hu, cb, fan] = [await tagOf('JS2609U'), await tagOf('HY2609C'), await tagOf('HY2609F')];
+  const now = Date.now();
+  const at = (s: number) => new Date(now - 60_000 + s * 1000).toISOString();
+  await step(u.wh, (tx) =>
+    rfid.ingest(tx, gate, [
+      { epc: hu.epc, antenna: 1, rssi: -52, ts: at(0) }, { epc: hu.epc, antenna: 2, rssi: -48, ts: at(1) },
+      { epc: cb.epc, antenna: 1, rssi: -55, ts: at(0) }, { epc: cb.epc, antenna: 2, rssi: -50, ts: at(2) },
+      { epc: fan.epc, antenna: 1, rssi: -66, ts: at(1) },
+      { epc: 'E28068940000500A1B2C3D4E', antenna: 2, rssi: -82, ts: at(1) }, // 弱信号（隔壁货架），被过滤
+    ], { source: 'SIMULATED', username: 'wh' }),
+  );
+  // 读写器心跳（演示：收货台、仓门、发货口刚上线；手持机未连接）
+  await db.client.$executeRaw`UPDATE rfid_reader SET last_heartbeat_at = (now() AT TIME ZONE 'UTC') WHERE code IN ('RD-RCV-01', 'RD-GATE-RAW', 'RD-SHIP-01')`;
   console.log('演示业务流程已生成');
 }

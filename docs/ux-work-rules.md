@@ -121,6 +121,6 @@
 - **公司信息（R1 实现，R2/R3/R5 打印使用）**：`/api/auth/options` 的 `company` 字段改为读 `sys_setting`（键 `company`，JSON：`{name, name_en, address, phone, tax_no, bank, swift}`），环境变量作默认值；前端继续用 `utils/company.ts` 的 `useCompany()`（R1 给接口加 `swift` 字段并更新类型）。
 - **工位授权与 PIN（R4 实现后端授权接口；R1 负责 PIN 规则）**：R4 新增 `POST /api/mes/station/authorize { badge_no, pin }` → 校验该工牌用户启用、PIN 正确、拥有 `mes_lead`，返回 `{ user: { username, full_name } }`（不切换会话，失败计入锁定）；工位设定/退出/终端设置一律用它。R1：管理员设置/重置 PIN 时置 `must_change_pin = true`，`badge-login` 响应的 `user.must_change_pin` 透出，`POST /api/auth/change-pin` 成功后清除（R4 读 `auth.controller.ts` 中该接口的请求格式，在刷卡后若须改 PIN 引导两次输入新 PIN）。
 - **空闲锁屏（R1）**：MainLayout 空闲超时改为锁屏（保留页面状态），同一账号密码解锁，或有工牌的用户刷工牌 + PIN 解锁；换人则退出重新登录。**`/mes/station` 不适用**（工位有自己的 IdleGuard）。
-- **PDA 九宫格（R5 定义，R1 复用）**：R5 在 `pages/wms/pda/tiles.ts` 导出 `PDA_TILES`（key、title、icon、path、badgeKey），R1 仓管工作台九宫格改为复用它（角标数据仍由工作台接口提供）。
+- **PDA 九宫格（R5 定义，R1 复用）**：R5 在 `pages/wms/pda/tiles.ts` 导出 `PDA_TILES`（key、title、icon、path、badgeKey），R1 仓管工作台九宫格改为复用它（角标数据仍由工作台接口提供）。**（2026-11-13 起仓库改用 RFID：工作台九宫格改用 `pages/wms/rfid/tiles.ts` 的 `RFID_TILES`，`PDA_TILES` 只用于条码兜底页 `/wms/pda`，见 ux-review 第七节。）**
 - **湿敏收货确认（R5 后端，R2 前端）**：`WmsService.receive` 对湿敏物料放非防潮库位的行，要求请求体 `confirm_placement: true`，否则 400，`detail` 以 `【需确认】` 开头并写明物料与库位；R5 同步改 PDA 收货与“其他/客供收货”页面，R2 改采购单详情收货弹窗（先调 `POST /api/wms/placement-check`，弹确认后带 `confirm_placement: true` 提交）。
 - **税率（R2）**：`Customer.tax_rate` / `Supplier.tax_rate` 为空时用 `DEFAULT_VAT_RATE`（环境变量，默认 0.13）；客户、供应商主数据页加税率字段（MasterPages 中客户段落归 R2，供应商段落归 R2）。

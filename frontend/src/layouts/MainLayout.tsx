@@ -15,7 +15,7 @@ import { menu, type MenuDef } from '../routes';
 
 const { Header, Sider, Content } = Layout;
 
-/** 窄屏（手机/PDA）断点：< 768 侧栏改抽屉、顶栏精简、控件加大 */
+/** 窄屏（手机/手持终端）断点：< 768 侧栏改抽屉、顶栏精简、控件加大 */
 const NARROW = 768;
 
 /** 我的待办（按岗位，点进去带筛选）；窄屏用底部抽屉，不会被裁掉 */

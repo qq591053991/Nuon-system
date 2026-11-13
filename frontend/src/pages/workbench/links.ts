@@ -21,6 +21,7 @@ const FALLBACK: [prefix: string, to: string][] = [
   ['/purchase/chase', '/purchase/orders?status=APPROVED,PARTIAL_RECEIVED'],
   ['/wms/putaway', '/wms/stock?status=AVAILABLE'],
   ['/quality/supplier-returns', '/quality/ncrs'],
+  ['/wms/rfid/', '/wms/receipts'],
   ['/wms/pda/', '/wms/receipts'],
 ];
 
@@ -30,7 +31,7 @@ export function resolvePath(path: string): string {
   return hit && hasRoute(hit[1]) ? hit[1] : '/';
 }
 
-/** 第一个存在的路径（如 PDA 收货页优先，没有就用电脑收货页） */
+/** 第一个存在的路径（如 RFID 收货台优先，没有就用电脑收货页） */
 export const firstRoute = (...paths: string[]) => paths.find((p) => hasRoute(p)) ?? paths[paths.length - 1];
 
 /** 菜单路径 → 所需权限（任一） */

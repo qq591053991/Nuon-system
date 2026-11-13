@@ -1,4 +1,7 @@
-/** PDA 仓库作业首页：大按钮九宫格（带待办数量），一手可点。九宫格定义见 tiles.ts（工作台复用）。 */
+/**
+ * 条码作业首页（原 PDA 作业，仓库改用 RFID 后保留为兜底）：RFID 标签损坏或读不到时，用扫码枪/手持终端按条码作业。
+ * 从 RFID 作业台“条码作业（兜底）”进入，不在菜单和工作台九宫格中。九宫格定义见 tiles.ts。
+ */
 import { Badge, Card, Col, Row, Typography } from 'antd';
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -24,7 +27,7 @@ export default function PdaHome() {
   }, []);
   const tiles = PDA_TILES.filter((t) => !t.perm || can(...t.perm));
   return (
-    <PdaPage title="仓库作业" sub="扫码 = 键入 + 回车；每个作业页都可连续扫码" back={null}>
+    <PdaPage title="条码作业（兜底）" sub="RFID 标签读不到时使用：扫码 = 键入 + 回车，可连续扫码" back="/wms/rfid">
       <Row gutter={[10, 10]}>
         {tiles.map((t) => {
           const count = t.badgeKey ? counts[t.badgeKey] : 0;

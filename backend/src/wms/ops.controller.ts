@@ -1,4 +1,4 @@
-/** 仓库作业接口（PDA 扫码、库位校验、待上架、拣料、冲销、盘点辅助、发货/退货扫码、逐台完工入库）。业务规则见 ops.service.ts。 */
+/** 仓库作业接口（条码扫码作业——仓库改用 RFID 后作为兜底、库位校验、待上架、拣料、冲销、盘点辅助、发货/退货扫码、逐台完工入库）。业务规则见 ops.service.ts。 */
 import { Body, Controller, Get, Param, ParseIntPipe, Post, Put, Query } from '@nestjs/common';
 import { Type } from 'class-transformer';
 import { IsArray, IsInt, IsNumber, IsOptional, IsString, Min, ValidateNested } from 'class-validator';
@@ -66,7 +66,7 @@ export class WmsOpsController {
   constructor(private readonly db: PrismaService, private readonly svc: WmsOpsService) {}
 
   // ---------- 收货 / 库位 ----------
-  /** PDA 收货：扫采购单号 → 未收行、物料属性、建议库位 */
+  /** 条码收货：扫采购单号 → 未收行、物料属性、建议库位 */
   @Get('wms/receive-context')
   @Perms('wms', 'purchase')
   receiveContext(@Query('po') po: string) {

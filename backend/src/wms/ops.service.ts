@@ -1,6 +1,6 @@
 /**
- * 仓库作业（PDA / 扫码 / 冲销）服务：
- *   receiveContext(tx, poKey)                       PDA 收货：扫采购单号 → 未收行 + 物料属性 + 建议库位
+ * 仓库作业（条码扫码 / 冲销）服务（RFID 作业见 src/rfid，复用本服务的拣料、盘点、完工入库、退货扫码）：
+ *   receiveContext(tx, poKey)                       条码收货：扫采购单号 → 未收行 + 物料属性 + 建议库位
  *   placementCheck(tx, args)                        扫库位：解析库位编码并校验放置规则（错误 / 需确认的警告）
  *   putawayList(tx, q)                              待上架清单（暂存区、放置不合规、不在默认库位）
  *   scan(tx, code)                                  扫码解析：库位 / 批号 / 原厂批号 / 序列号 / 物料编码 → 库存行
@@ -46,7 +46,7 @@ export class WmsOpsService {
 
   // ---------------- 收货 / 库位 ----------------
 
-  /** PDA 收货上下文：按采购单号（或 id）取未收完的订单行、物料属性（批次/保质期/MSL/检验/GTIN）与建议库位 */
+  /** 收货上下文（条码收货与 RFID 收货台共用）：按采购单号（或 id）取未收完的订单行、物料属性（批次/保质期/MSL/检验/GTIN）与建议库位 */
   async receiveContext(tx: Tx, key: string) {
     const k = String(key ?? '').trim();
     if (!k) throw new BizError('请扫描采购订单号');
@@ -120,7 +120,7 @@ export class WmsOpsService {
   }
 
   /**
-   * 扫码解析（PDA 通用）：依次匹配 库位编码 → 批号 → 原厂批号 → 序列号（取其批次）→ 物料编码 / GTIN。
+   * 扫码解析（条码作业通用）：依次匹配 库位编码 → 批号 → 原厂批号 → 序列号（取其批次）→ 物料编码 / GTIN。
    * 返回 kind 与该码对应的有库存行（含物料、库位信息）。
    */
   async scan(tx: Tx, raw: string, opts: { lot?: string | null; gtin?: string | null } = {}) {

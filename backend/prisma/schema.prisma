@@ -1,4 +1,4 @@
-// Nuon 智造云 数据模型（46 张表）
+// Nuon 智造云 数据模型（61 张表，含 RFID 5 张）
 // 约定：字段名使用 snake_case，与 REST 接口返回的 JSON 字段保持一致；
 //       数量/金额使用 Float（服务层统一 round4/round2），纯日期字段使用 @db.Date。
 

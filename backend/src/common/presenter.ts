@@ -11,7 +11,7 @@ type Props = Record<string, (o: any) => unknown>;
 interface View { include?: Record<string, any>; props?: Props; order?: Record<string, any> }
 
 const MODELS = new Map(Prisma.dmmf.datamodel.models.map((m) => [m.name, m]));
-const HIDDEN = new Set(['password_hash', 'pin_hash', 'params_json', 'serials']);
+const HIDDEN = new Set(['password_hash', 'pin_hash', 'params_json', 'serials', 'key_hash']);
 
 const nm = (o: any) => (o ? o.name ?? null : null);
 const matInclude = { material: true };
@@ -213,6 +213,33 @@ export const VIEWS: Record<string, View> = {
       replied_at: (o) => (o.replied_at ? new Date(o.replied_at).toISOString().slice(0, 10) : null),
     },
   },
+  // RFID（仓库）：读写器、标签、作业会话、原始读取
+  RfidReader: {
+    include: { warehouse: true, location: true, outside_location: true },
+    props: {
+      warehouse_name: (o) => nm(o.warehouse),
+      location_code: (o) => o.location?.code ?? null,
+      outside_location_code: (o) => o.outside_location?.code ?? null,
+      has_key: (o) => !!o.key_hash,
+    },
+  },
+  RfidTag: {
+    include: { ...matInclude, location: true, serial: true, last_reader: true },
+    props: {
+      ...matProps,
+      ...locProps,
+      sn: (o) => o.serial?.sn ?? null,
+      sn_status: (o) => o.serial?.status ?? null,
+      last_reader_code: (o) => o.last_reader?.code ?? null,
+      last_reader_name: (o) => nm(o.last_reader),
+    },
+  },
+  RfidSession: {
+    include: { reader: true, location: true },
+    props: { reader_code: (o) => o.reader?.code ?? null, reader_name: (o) => nm(o.reader), ...locProps },
+    order: { items: { id: 'asc' } },
+  },
+  RfidRead: { include: { reader: true }, props: { reader_code: (o) => o.reader?.code ?? null } },
 };
 
 interface Tree { [k: string]: Tree }

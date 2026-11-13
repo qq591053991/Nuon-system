@@ -1,5 +1,5 @@
 import { Alert, Button, Card, Col, DatePicker, Form, Input, InputNumber, Modal, Radio, Row, Select, Space, Table, Tag, Tooltip, Typography, message, type TableColumnsType } from 'antd';
-import { DeleteOutlined, FileSearchOutlined, ImportOutlined, InboxOutlined, MobileOutlined, PlusOutlined, PrinterOutlined, ReloadOutlined, TagsOutlined } from '@ant-design/icons';
+import { DeleteOutlined, FileSearchOutlined, ImportOutlined, InboxOutlined, MobileOutlined, PlusOutlined, PrinterOutlined, ReloadOutlined, TagsOutlined, WifiOutlined } from '@ant-design/icons';
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { get, post, type Rec } from '../../api/http';
@@ -337,7 +337,8 @@ export default function Receipts() {
         sub="所有入库单（采购收货、完工入库、客供料、期初）。点击行首“+”展开明细。"
         extra={can('wms') && (
           <Space wrap>
-            <Button type="primary" icon={<MobileOutlined />} onClick={() => nav('/wms/pda/receive')}>扫码收货（采购）</Button>
+            <Button type="primary" icon={<WifiOutlined />} onClick={() => nav('/wms/rfid/receive')}>RFID 收货台（采购）</Button>
+            <Button icon={<MobileOutlined />} onClick={() => nav('/wms/pda/receive')}>条码收货（兜底）</Button>
             <Button icon={<InboxOutlined />} onClick={() => (narrow ? nav('/wms/pda/receive?mode=cs') : setKind('CUSTOMER_SUPPLIED'))}>客供料收货</Button>
             {!narrow && <Button icon={<ImportOutlined />} onClick={() => setKind('OTHER')}>其他入库 / 期初</Button>}
           </Space>

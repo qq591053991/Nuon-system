@@ -227,7 +227,7 @@ function CreateModal({ open, onClose, onDone }: { open: boolean; onClose: () => 
             return (
               <>
                 {narrow ? (
-                  // PDA：每行一张卡片，删除按钮够大
+                  // 窄屏：每行一张卡片，删除按钮够大
                   fields.length ? fields.map((f, i) => (
                     <Card key={f.key} size="small" style={{ marginBottom: 8 }}
                       title={<span className="mono">{form.getFieldValue(['lines', f.name, 'sn']) || `明细 ${i + 1}`}</span>}
@@ -373,7 +373,7 @@ export default function CustomerReturns() {
   const { rows, loading, query, setQuery, reload, pagination } = usePaged('/customer-returns', { q: qParam || undefined, status: sp.get('status') || undefined });
   const [current, setCurrent] = useState<Rec | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
-  // /wms/customer-returns?new=1 直接打开登记（PDA 首页入口）
+  // /wms/customer-returns?new=1 直接打开登记（RFID 作业台“扫码登记退货”兜底入口）
   useEffect(() => {
     if (sp.get('new') === '1' && can('wms', 'qa')) {
       setCreateOpen(true);

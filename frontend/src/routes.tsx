@@ -20,6 +20,7 @@ export const ROUTE_PERMS: [string, string[], string][] = [
   ['/system/audit', ['audit', 'admin'], '审计查阅'],
   ['/system/esign', ['audit', 'admin'], '审计查阅'],
   ['/system/users', ['admin'], '系统管理'],
+  ['/wms/rfid/readers', ['wms', 'admin'], 'RFID 读写器管理'],
   ['/sales/orders', ['sales', 'plan', 'wms', 'finance', 'qa'], '销售订单查阅'],
   ['/purchase/orders', ['purchase', 'plan', 'wms', 'qc', 'qa', 'finance'], '采购订单查阅'],
   ['/purchase/chase', ['purchase', 'plan', 'wms', 'qc', 'qa', 'finance'], '采购订单查阅'],
@@ -76,8 +77,20 @@ export const routes: RouteDef[] = [
   { path: '/wms/shipments', element: lazy(() => import('./pages/wms/Shipments')) },
   { path: '/wms/counts', element: lazy(() => import('./pages/wms/StockCounts')) },
   { path: '/wms/customer-returns', element: lazy(() => import('./pages/wms/CustomerReturns')) },
-  // WMS · 待上架与 PDA 作业页（G7）
+  // WMS · 待上架
   { path: '/wms/putaway', element: lazy(() => import('./pages/wms/Putaway')) },
+  // WMS · RFID 作业台（仓库已改用 RFID：收货台 / 库门 / 领料 / 完工入库 / 发货 / 盘点 / 客户退货 / 标签 / 读写器）
+  { path: '/wms/rfid', element: lazy(() => import('./pages/wms/rfid/RfidHome')) },
+  { path: '/wms/rfid/receive', element: lazy(() => import('./pages/wms/rfid/RfidReceive')) },
+  { path: '/wms/rfid/gate', element: lazy(() => import('./pages/wms/rfid/RfidGate')) },
+  { path: '/wms/rfid/issue', element: lazy(() => import('./pages/wms/rfid/RfidIssue')) },
+  { path: '/wms/rfid/fg', element: lazy(() => import('./pages/wms/rfid/RfidFg')) },
+  { path: '/wms/rfid/ship', element: lazy(() => import('./pages/wms/rfid/RfidShip')) },
+  { path: '/wms/rfid/count', element: lazy(() => import('./pages/wms/rfid/RfidCount')) },
+  { path: '/wms/rfid/return', element: lazy(() => import('./pages/wms/rfid/RfidReturn')) },
+  { path: '/wms/rfid/tags', element: lazy(() => import('./pages/wms/rfid/RfidTags')) },
+  { path: '/wms/rfid/readers', element: lazy(() => import('./pages/wms/rfid/RfidReaders')) },
+  // WMS · 条码作业页（原 PDA 作业，改用 RFID 后保留为条码/手输兜底，从 RFID 作业台进入，不在菜单中）
   { path: '/wms/pda', element: lazy(() => import('./pages/wms/pda/PdaHome')) },
   { path: '/wms/pda/receive', element: lazy(() => import('./pages/wms/pda/PdaReceive')) },
   { path: '/wms/pda/putaway', element: lazy(() => import('./pages/wms/pda/PdaPutaway')) },
@@ -141,7 +154,7 @@ export const menu: MenuDef[] = [
   },
   {
     key: 'wms', label: '仓储管理 WMS', icon: <DatabaseOutlined />, children: [
-      { key: '/wms/pda', label: 'PDA 作业', perm: ['wms'] },
+      { key: '/wms/rfid', label: 'RFID 作业台', perm: ['wms'] },
       { key: '/wms/stock', label: '库存查询', perm: ['wms', 'plan', 'purchase', 'sales', 'qa', 'qc'] },
       { key: '/wms/putaway', label: '待上架', perm: ['wms'] },
       { key: '/wms/receipts', label: '收货入库', perm: ['wms'] },

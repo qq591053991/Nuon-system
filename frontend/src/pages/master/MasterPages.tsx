@@ -110,7 +110,7 @@ export function Materials() {
         { name: 'aql', label: 'AQL', type: 'number', default: 1.0, list: false, help: 'GB/T 2828.1 接收质量限，如 0.65 / 1.0 / 2.5' },
         { name: 'wavelength_nm', label: '波长(nm)', width: 80 },
         { name: 'msl_level', label: '湿敏等级 MSL', list: false, help: 'MSL 2a 及以上（2a、3、4、5、5a、6）须放防潮柜库位：放普通库位时收货/上架会要求确认' },
-        { name: 'default_location_id', label: '默认库位（收货/上架自动带出）', type: 'remote', url: '/locations', list: false, help: '如湿敏 LED → 防潮柜 DRY-01；PDA 收货、上架和“待上架”清单按此库位建议' },
+        { name: 'default_location_id', label: '默认库位（收货/上架自动带出）', type: 'remote', url: '/locations', list: false, help: '如湿敏 LED → 防潮柜 DRY-01；RFID 收货台、条码收货/上架和“待上架”清单按此库位建议' },
         { name: 'esd_sensitive', label: '静电敏感 ESD', type: 'switch', list: false },
         { name: 'model', label: '产品型号', list: false },
         { name: 'registration_no', label: '注册证/备案号', list: false },

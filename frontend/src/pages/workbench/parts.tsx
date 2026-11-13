@@ -11,7 +11,7 @@ import { isCancel, useESign } from '../../components/ESign';
 import ResponsiveTable, { type RColumn } from '../../components/ResponsiveTable';
 import { dictLabel } from '../../utils/dict';
 import { fmtDateTime, fmtMoney } from '../../utils/format';
-import { PDA_TILES } from '../wms/pda/tiles';
+import { RFID_TILES } from '../wms/rfid/tiles';
 import { canPath, useGo } from './links';
 
 /** ECharts 封装（支持点击下钻） */
@@ -266,14 +266,14 @@ export function OperatorHome({ o, kpis }: { o: Rec; kpis?: ReactNode }) {
 }
 
 /**
- * 仓管九宫格：与 /wms/pda 共用同一份定义（R5 的 PDA_TILES），角标取工作台待办（与 badgeKey 同名）。
- * 电脑和 PDA 进入同一批扫码作业页，避免两处入口不一致（B-N12）。
+ * 仓管九宫格：与 RFID 作业台 /wms/rfid 共用同一份定义（RFID_TILES），角标取工作台待办（与 badgeKey 同名）。
+ * 仓库已改用 RFID：九宫格进入 RFID 作业台各页面；条码作业页（/wms/pda/*）只作兜底，从作业台进入。
  */
 export function WarehouseGrid({ todos, narrow }: { todos: Rec[]; narrow: boolean }) {
   const go = useGo();
   const { can } = useAuth();
   const n = (key?: string) => (key ? todos.find((t) => t.key === key)?.count ?? 0 : 0);
-  const tiles = PDA_TILES.filter((t) => !t.perm || can(...t.perm));
+  const tiles = RFID_TILES.filter((t) => !t.perm || can(...t.perm));
   return (
     <div className="wh-grid">
       {tiles.map((t) => {

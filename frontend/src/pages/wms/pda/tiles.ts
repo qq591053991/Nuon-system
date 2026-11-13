@@ -1,9 +1,9 @@
 /**
- * PDA 仓库作业九宫格定义（/wms/pda 与仓管工作台共用）。
+ * 条码作业（兜底）九宫格定义（/wms/pda）。仓库已改用 RFID：仓管工作台九宫格改用 ../rfid/tiles.ts 的 RFID_TILES。
  *   key       唯一键
  *   title     显示文字
  *   icon      图标组件（用法 <t.icon />）
- *   path      进入的页面（PDA 作业页；“客户退货”“生产退料”“发货”直达登记/新建）
+ *   path      进入的页面（条码作业页；“客户退货”“生产退料”“发货”直达登记/新建）
  *   badgeKey  角标数据键（与工作台待办 key 一致；putaway = GET /api/wms/putaway 的 total）
  *   perm      需要的权限点（任一）
  */
