@@ -3,14 +3,14 @@
  * 应发 N 台、读到 M 台、多出 / 缺少 / 未放行 / 不属于本单逐条列出，全部一致才能确认发货（过账、序列号出库、生成应收）。
  */
 import { Alert, Button, Card, Col, Form, Result, Row, Space, Statistic, Table, Tag, message } from 'antd';
-import { CheckOutlined } from '@ant-design/icons';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { post, type Rec } from '../../../api/http';
 import PageHeader from '../../../components/PageHeader';
 import RemoteSelect from '../../../components/RemoteSelect';
 import { fmtQty } from '../../../utils/format';
-import { Blockers, ItemsTable, OpenSessions, ReaderPicker, RfidLinks, SessionBar, errText, useSession, useSessionParam } from './kit';
+import { ItemsTable, OpenSessions, ReaderPicker, RfidLinks, SessionBar, errText, useSession, useSessionParam } from './kit';
+import { AutoSession, Detected, primaryOf } from './live';
 
 const FALLBACK = { to: '/wms/shipments?status=DRAFT', text: '条码发货（兜底）' };
 
@@ -70,9 +70,9 @@ export default function RfidShip() {
   return (
     <div>
       <PageHeader title="RFID 发货核对" sub="发货口读到的成品与发货单逐台核对，全部一致才能发货" extra={<RfidLinks fallback={FALLBACK} />} />
-      {!sid ? <Start onStarted={setSid} /> : !d ? <Card loading /> : (
+      {!sid ? <><Detected type="SHIP" onEnter={setSid} waitText="把整托/整车推过发货口，系统自动识别发货单" /><Start onStarted={setSid} /></> : !d ? <Card loading /> : d.session.session_type === 'AUTO' ? <AutoSession d={d} onChange={setD} /> : (
         <>
-          <SessionBar d={d} onChange={setD} onClosed={() => setSid(null)} fallbackLink={FALLBACK} />
+          <SessionBar d={d} onChange={setD} onClosed={() => setSid(null)} fallbackLink={FALLBACK} primary={{ text: primaryOf(d).text, disabled: !primaryOf(d).enabled, loading: busy, onClick: confirm }} />
           {d.session.status === 'CONFIRMED' && (
             <Result status="success" title={`发货单 ${d.session.ref_no} 已发货`} extra={[
               <Button key="p" onClick={() => window.open(`/wms/print/shipment/${d.session.ref_id}`, '_blank')}>打印发货单/装箱单</Button>,
@@ -109,12 +109,6 @@ export default function RfidShip() {
           )}
           </>)}
           <Card size="small" title="读到的标签"><ItemsTable d={d} onChange={setD} /></Card>
-          {d.session.status === 'OPEN' && (
-            <Card size="small" style={{ marginTop: 12 }}>
-              <Blockers d={d} />
-              <Button type="primary" size="large" icon={<CheckOutlined />} loading={busy} disabled={!d.can_confirm || !c.all_match} onClick={confirm}>确认发货（{c.expected} 台）</Button>
-            </Card>
-          )}
         </>
       )}
     </div>

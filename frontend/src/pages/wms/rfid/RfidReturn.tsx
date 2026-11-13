@@ -3,14 +3,14 @@
  * （退货品冻结入库、序列号转“客户退回”、自动开具 NCR，规则同“客户退货”页）。
  */
 import { Button, Card, Form, Input, Result, Space, Table, message } from 'antd';
-import { CheckOutlined } from '@ant-design/icons';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { post, type Rec } from '../../../api/http';
 import PageHeader from '../../../components/PageHeader';
 import { LocationSelect } from '../../../components/RemoteSelect';
 import { fmtDate } from '../../../utils/format';
-import { Blockers, ItemsTable, OpenSessions, ReaderPicker, RfidLinks, SessionBar, errText, useSession, useSessionParam } from './kit';
+import { ItemsTable, OpenSessions, ReaderPicker, RfidLinks, SessionBar, errText, useSession, useSessionParam } from './kit';
+import { AutoSession, Detected, primaryOf } from './live';
 
 const FALLBACK = { to: '/wms/customer-returns?new=1', text: '扫码登记退货（兜底）' };
 
@@ -57,9 +57,14 @@ export default function RfidReturn() {
   return (
     <div>
       <PageHeader title="RFID 客户退货" sub="读单台标签识别序列号、客户与原发货单，登记退货（冻结入库并开 NCR）" extra={<RfidLinks fallback={FALLBACK} />} />
-      {!sid ? <Start onStarted={setSid} /> : !d ? <Card loading /> : (
+      {!sid ? <><Detected type="RETURN" onEnter={setSid} waitText="把客户退回的成品放上读写器，系统自动识别客户与原发货单" /><Start onStarted={setSid} /></> : !d ? <Card loading /> : d.session.session_type === 'AUTO' ? <AutoSession d={d} onChange={setD} /> : (
         <>
-          <SessionBar d={d} onChange={setD} onClosed={() => setSid(null)} fallbackLink={FALLBACK} />
+          <SessionBar d={d} onChange={setD} onClosed={() => setSid(null)} fallbackLink={FALLBACK} primary={{ text: primaryOf(d).text, disabled: !primaryOf(d).enabled, loading: busy, onClick: confirm }}>
+            <Space wrap style={{ marginTop: 10 }}>
+              <Input style={{ width: 320 }} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="退货原因（必填，如：客户反馈不亮）" />
+              <LocationSelect style={{ width: 240 }} placeholder={`入库库位（默认 ${d.check.location_code ?? '不合格品区'}）`} allowClear value={loc ?? undefined} onChange={(v) => setLoc((v as number) ?? null)} />
+            </Space>
+          </SessionBar>
           {d.session.status === 'CONFIRMED' && (
             <Result status="success" title={`已登记客户退货 ${d.session.ref_no}`} subTitle="退货品已冻结，待 QA 评审 NCR 处置"
               extra={[<Button key="r" onClick={() => nav('/wms/customer-returns')}>查看退货单</Button>, <Button key="n" type="primary" onClick={() => setSid(null)}>继续</Button>]} />
@@ -73,16 +78,6 @@ export default function RfidReturn() {
             ]} />
           </Card>
           <Card size="small" title="读到的标签"><ItemsTable d={d} onChange={setD} /></Card>
-          {d.session.status === 'OPEN' && (
-            <Card size="small" style={{ marginTop: 12 }}>
-              <Blockers d={d} />
-              <Space wrap>
-                <Input style={{ width: 320 }} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="退货原因（必填，如：客户反馈不亮）" />
-                <LocationSelect style={{ width: 240 }} placeholder={`入库库位（默认 ${d.check.location_code ?? '不合格品区'}）`} allowClear value={loc ?? undefined} onChange={(v) => setLoc((v as number) ?? null)} />
-                <Button type="primary" size="large" icon={<CheckOutlined />} loading={busy} disabled={!d.can_confirm} onClick={confirm}>登记客户退货（{d.check.serials.length} 台）</Button>
-              </Space>
-            </Card>
-          )}
         </>
       )}
     </div>

@@ -3,15 +3,15 @@
  *   读到（账面在此库位）/ 账面有但没读到 / 读到但账面不在此库位 / 账面有库存但没有标签（需人工清点）；
  * 确认 = 写入盘点单（沿用现有盘点单），可直接过账：调整量 = 实盘 − 过账时的当前账面。
  */
-import { Alert, Button, Card, Checkbox, Col, Form, Modal, Result, Row, Space, Statistic, Table, Tag, Typography, message } from 'antd';
-import { CheckOutlined } from '@ant-design/icons';
+import { Alert, Button, Card, Checkbox, Col, Form, Modal, Result, Row, Statistic, Table, Tag, Typography, message } from 'antd';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { post, type Rec } from '../../../api/http';
 import PageHeader from '../../../components/PageHeader';
 import { LocationSelect } from '../../../components/RemoteSelect';
 import { fmtQty } from '../../../utils/format';
-import { Blockers, ItemsTable, OpenSessions, ReaderPicker, RfidLinks, SessionBar, errText, useSession, useSessionParam } from './kit';
+import { ItemsTable, OpenSessions, ReaderPicker, RfidLinks, SessionBar, errText, useSession, useSessionParam } from './kit';
+import { AutoSession, Detected, diffText, primaryOf } from './live';
 
 const FALLBACK = { to: '/wms/pda/count', text: '条码盘点（兜底）' };
 
@@ -79,9 +79,11 @@ export default function RfidCount() {
   return (
     <div>
       <PageHeader title="RFID 盘点对账" sub="手持读写器批量读取一个库位，与账面逐包对比" extra={<RfidLinks fallback={FALLBACK} />} />
-      {!sid ? <Start onStarted={setSid} /> : !d ? <Card loading /> : (
+      {!sid ? <><Detected type="COUNT" onEnter={setSid} waitText="用手持机扫库位标签和货架，系统自动按库位开始盘点" /><Start onStarted={setSid} /></> : !d ? <Card loading /> : d.session.session_type === 'AUTO' ? <AutoSession d={d} onChange={setD} /> : (
         <>
-          <SessionBar d={d} onChange={setD} onClosed={() => setSid(null)} fallbackLink={FALLBACK} />
+          <SessionBar d={d} onChange={setD} onClosed={() => setSid(null)} fallbackLink={FALLBACK} readyText={diffText(d)} primary={{ text: primaryOf(d).text, disabled: !primaryOf(d).enabled, loading: busy, onClick: () => confirm(true) }}>
+            <div style={{ marginTop: 8, fontSize: 13 }}><a onClick={() => confirm(false)}>只写入盘点单（稍后在“库存盘点”复核过账）</a></div>
+          </SessionBar>
           {d.session.status === 'CONFIRMED' && (
             <Result status="success" title={`已写入盘点单 ${d.session.ref_no}`} subTitle="没有标签的库存需在盘点单中人工录入实盘；未过账的盘点单可在“库存盘点”中复核后过账。"
               extra={[<Button key="c" onClick={() => nav(`/wms/counts?id=${d.session.ref_id}`)}>打开盘点单</Button>, <Button key="n" type="primary" onClick={() => setSid(null)}>盘下一个库位</Button>]} />
@@ -129,15 +131,6 @@ export default function RfidCount() {
           </Row>
           </>)}
           <Card size="small" title={`全部读取（读到 ${here.length}）`}><ItemsTable d={d} onChange={setD} /></Card>
-          {d.session.status === 'OPEN' && (
-            <Card size="small" style={{ marginTop: 12 }}>
-              <Blockers d={d} />
-              <Space wrap>
-                <Button size="large" loading={busy} disabled={!d.can_confirm} onClick={() => confirm(false)}>写入盘点单（稍后复核过账）</Button>
-                <Button type="primary" size="large" icon={<CheckOutlined />} loading={busy} disabled={!d.can_confirm} onClick={() => confirm(true)}>写入并过账</Button>
-              </Space>
-            </Card>
-          )}
         </>
       )}
     </div>

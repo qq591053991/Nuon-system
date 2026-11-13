@@ -59,6 +59,7 @@ flowchart TB
 **仓库 RFID（代替 PDA 扫码；车间工位终端仍用扫码枪）**
 - 读写器/中间件用接口密钥推送读取（`POST /api/rfid/readings`）；每条读取都记原始记录；同一作业同一 EPC 只算一次；信号低于阈值、库位标签、无进行中作业的读取只记录不计入；未登记标签单独列出。
 - 所有库存变动仍走现有仓储服务（`WmsService` / `WmsOpsService` / `CustomerReturnsService` → `InventoryService`）：收货台确认 = `receive`（放置规则、湿敏确认、IQC、应付照常）后发卡；库门 = 待确认，仓管确认后 `transfer`；领料 = `pickLine` + `confirmIssue`；完工入库 = `fgReceiptSerials`；发货 = `confirmShipment`；盘点 = `createCount` / `saveCountLines` / `addCountLine` / `postCount`；客户退货 = `CustomerReturnsService.create`。
+- 不用先选单：读写器无进行中作业时读到标签，系统自动识别单据（发货单 / 完工工单 / 已发货成品 / 领料单 / 盘点库位），唯一匹配直接开核对；收货台选一次采购单后新标签自动绑定订单行（每包数量默认取采购换算率或最小包装量，批号沿用上一包）。每个作业只需仓管点一次确认。
 - 误读不自动过账：库门只生成待确认；领料/发货/完工入库有不符的标签（多读、读错批次、未放行、不属于本单）时不能确认，须拿开并“标记为误读”（原始读取保留）。
 - 条码保留为兜底：各作业页可扫序列号/UDI、批号或输入 EPC；原 PDA 条码作业页 `/wms/pda/*` 保留，从 RFID 作业台进入。
 

@@ -27,7 +27,7 @@ import { CustomerReturnsService } from '../wms/customer-returns.service';
 import { WmsOpsService } from '../wms/ops.service';
 import { suggestLocation } from '../wms/placement';
 import { WmsService } from '../wms/wms.service';
-import { normEpc } from './epc';
+import { locationEpc, locationIdOfEpc, normEpc } from './epc';
 import { RfidService, SESSION_TYPE } from './rfid.service';
 
 const SN_TEXT: Record<string, string> = {
@@ -44,8 +44,8 @@ export interface CreateSessionArgs {
 }
 
 export interface BindArgs {
-  epcs?: string[] | null; po_line_id: number; qty: number; lot_no?: string | null; supplier_lot?: string | null;
-  mfg_date?: string | null; expiry_date?: string | null; location_id: number;
+  epcs?: string[] | null; po_line_id: number; qty?: number | null; lot_no?: string | null; supplier_lot?: string | null;
+  mfg_date?: string | null; expiry_date?: string | null; location_id?: number | null;
 }
 
 export interface ConfirmArgs {
@@ -75,9 +75,12 @@ export class RfidSessionService {
 
   // ---------------- 开始 / 列表 ----------------
 
+  /**
+   * 开始作业（手工选单，兜底入口）。该读写器上若有“识别中”（AUTO）的会话，直接把它转为所选作业（已读到的标签保留）。
+   */
   async create(tx: Tx, user: CurrentUser, a: CreateSessionArgs) {
     const type = a.session_type;
-    if (!SESSION_TYPE[type]) throw new BizError('作业类型不正确');
+    if (!SESSION_TYPE[type] || type === 'AUTO') throw new BizError('作业类型不正确');
     if (type === 'GATE') throw new BizError('库门会话由门式读写器读到标签时自动生成，不需要手工开始');
     const r = await tx.rfidReader.findUnique({ where: { id: a.reader_id } });
     if (!r) throw new NotFound('读写器');
@@ -85,10 +88,20 @@ export class RfidSessionService {
     if (r.purpose === 'GATE') throw new BizError(`${r.name} 是库门读写器，只用于过门；请选择收货台、发货口或手持读写器`);
     await tx.$queryRaw`SELECT id FROM rfid_reader WHERE id = ${r.id} FOR UPDATE`; // 同一读写器同时只能有一个进行中的作业
     const busy = await tx.rfidSession.findFirst({ where: { reader_id: r.id, status: 'OPEN' } });
+    if (busy && busy.session_type === 'AUTO') return this.adopt(tx, user, busy.id, a);
     if (busy) {
       throw new BizError(`读写器 ${r.name} 正在用于${SESSION_TYPE[busy.session_type]}作业 ${busy.no}（${busy.created_by ?? ''}），请先确认或取消该作业，或换一台读写器`);
     }
-    const data: any = { session_type: type, reader_id: r.id, location_id: a.location_id ?? null, remark: a.remark ?? null };
+    const data = await this.contextData(tx, r, a);
+    const s = await tx.rfidSession.create({ data: { ...data, reader_id: r.id, no: await this.numbering.nextNo(tx, 'RF'), status: 'OPEN', created_by: user.username } });
+    if (type === 'RECEIVE') await this.autoBind(tx, s.id);
+    return this.detail(tx, s.id);
+  }
+
+  /** 作业上下文校验（单据状态）与默认库位 */
+  private async contextData(tx: Tx, r: RfidReader, a: Omit<CreateSessionArgs, 'reader_id'>) {
+    const type = a.session_type;
+    const data: any = { session_type: type, location_id: a.location_id ?? null, ...(a.remark ? { remark: a.remark } : {}), po_id: null, issue_id: null, wo_id: null, shipment_id: null };
     if (type === 'RECEIVE') {
       const po = a.po_id ? await tx.purchaseOrder.findUnique({ where: { id: a.po_id } }) : null;
       if (!po) throw new BizError('请选择采购订单（或扫送货单上的采购单号）');
@@ -119,8 +132,202 @@ export class RfidSessionService {
     } else if (type === 'RETURN') {
       data.location_id ??= (await tx.location.findFirst({ where: { is_active: true, location_type: 'REJECT' }, orderBy: { code: 'asc' } }))?.id ?? null;
     }
-    const s = await tx.rfidSession.create({ data: { ...data, no: await this.numbering.nextNo(tx, 'RF'), status: 'OPEN', created_by: user.username } });
+    return data;
+  }
+
+  /** 把“识别中”的会话转为具体作业（自动识别唯一匹配时由系统调用；多张匹配时仓管点选） */
+  async adopt(tx: Tx, user: CurrentUser, id: number, a: Omit<CreateSessionArgs, 'reader_id'>) {
+    const s = await this.mustOpen(tx, id, true);
+    if (s.session_type !== 'AUTO') throw new BizError(`作业 ${s.no} 已识别为${SESSION_TYPE[s.session_type]}，不能再改`);
+    if (!SESSION_TYPE[a.session_type] || ['AUTO', 'GATE'].includes(a.session_type)) throw new BizError('作业类型不正确');
+    const data = await this.contextData(tx, s.reader!, a);
+    await tx.rfidSession.update({ where: { id: s.id }, data: { ...data, remark: [s.remark, `识别为${SESSION_TYPE[a.session_type]}（${user.full_name}）`].filter(Boolean).join('；').slice(0, 2000) } });
+    if (a.session_type === 'RECEIVE') await this.autoBind(tx, s.id);
     return this.detail(tx, s.id);
+  }
+
+  /**
+   * 自动识别单据（读写器没有进行中作业时读到标签 → 系统开“识别中”会话，按读到的内容匹配）：
+   *   成品单台标签：在待过账发货单上 → 发货核对；完工待入库 → 按所属工单完工入库；已发货 → 客户退货；
+   *   包装标签：批次在待过账领料单上 → 领料核对；
+   *   手持盘点机：读到库位标签（或多数标签的账面库位）→ 盘点该库位。
+   * 按读写器用途排优先级；同一类只有一张单 = 唯一匹配（直接开核对），多张 = 列出让仓管点选，没有 = 给出提示。
+   */
+  async recognize(db: Tx, s: RfidSession, locationTags: string[] = []) {
+    const reader = s.reader_id ? await db.rfidReader.findUnique({ where: { id: s.reader_id } }) : null;
+    const items = await db.rfidSessionTag.findMany({ where: { session_id: s.id, action: null }, orderBy: { id: 'asc' } });
+    const tags = [...(await this.loadTags(db, items.map((i) => i.epc))).values()].filter((t) => t.status === 'ACTIVE');
+    const pseudo = items.filter((i) => i.epc.startsWith('SN:')).map((i) => i.epc.slice(3));
+    const units = [
+      ...tags.filter((t) => t.tag_type === 'UNIT' && t.serial).map((t) => t.serial!),
+      ...(pseudo.length ? await db.serialNumber.findMany({ where: { sn: { in: pseudo } }, include: { release: true, material: true } }) : []),
+    ];
+    const pkgs = tags.filter((t) => t.tag_type === 'PACKAGE' && t.material_id);
+    const blank = items.filter((i) => !i.epc.startsWith('SN:') && !tags.some((t) => t.epc === i.epc)).length;
+    const cands: { session_type: string; type_text: string; label: string; matched: number; total: number; shipment_id?: number; wo_id?: number; issue_id?: number; location_id?: number }[] = [];
+    // 发货：包含这些序列号的待过账发货单
+    const ship: typeof cands = [];
+    const sns = units.map((u) => u.sn);
+    if (sns.length) {
+      const lines = await db.shipmentLine.findMany({ where: { shipment: { status: 'DRAFT' }, OR: sns.map((x) => ({ serials: { contains: `"${x}"` } })) }, include: { shipment: { include: { customer: true } } } });
+      const by = new Map<number, { sh: any; hit: Set<string>; total: number }>();
+      for (const l of lines) {
+        const list: string[] = l.serials ? JSON.parse(l.serials) : [];
+        const e = by.get(l.shipment_id) ?? { sh: l.shipment, hit: new Set<string>(), total: 0 };
+        for (const x of list) if (sns.includes(x)) e.hit.add(x);
+        by.set(l.shipment_id, e);
+      }
+      for (const [id, e] of by) {
+        const all = await db.shipmentLine.findMany({ where: { shipment_id: id } });
+        const total = all.reduce((n, l) => n + (l.serials ? (JSON.parse(l.serials) as string[]).length : 0), 0);
+        ship.push({ session_type: 'SHIP', type_text: '发货核对', label: `发货单 ${e.sh.no}（${e.sh.customer?.name ?? ''}，应发 ${total} 台，读到其中 ${e.hit.size} 台）`, matched: e.hit.size, total, shipment_id: id });
+      }
+      ship.sort((a, b) => b.matched - a.matched);
+    }
+    // 完工入库：完工待入库的序列号所属工单
+    const fg: typeof cands = [];
+    const done = units.filter((u) => u.status === 'COMPLETED');
+    for (const woId of [...new Set(done.map((u) => u.wo_id))]) {
+      const wo = await db.workOrder.findUnique({ where: { id: woId } });
+      if (!wo || !['IN_PROGRESS', 'COMPLETED'].includes(wo.status)) continue;
+      const n = done.filter((u) => u.wo_id === woId).length;
+      fg.push({ session_type: 'FG_RECEIPT', type_text: '完工入库', label: `工单 ${wo.no}（读到完工待入库 ${n} 台）`, matched: n, total: n, wo_id: woId });
+    }
+    // 客户退货：已发货的成品
+    const ret: typeof cands = [];
+    const shipped = units.filter((u) => u.status === 'SHIPPED');
+    if (shipped.length) ret.push({ session_type: 'RETURN', type_text: '客户退货', label: `已发货的成品 ${shipped.length} 台（${shipped.slice(0, 3).map((u) => u.sn).join('、')}${shipped.length > 3 ? ' 等' : ''}）`, matched: shipped.length, total: shipped.length });
+    // 领料：含这些批次的待过账领料单
+    const iss: typeof cands = [];
+    if (pkgs.length) {
+      const lines = await db.materialIssueLine.findMany({
+        where: { issue: { status: 'DRAFT', issue_type: 'ISSUE' }, OR: pkgs.map((t) => ({ material_id: t.material_id!, lot_no: t.lot_no ?? '' })) },
+        include: { issue: { include: { work_order: true } } },
+      });
+      const by = new Map<number, { is: any; keys: Set<string> }>();
+      for (const l of lines) {
+        const e = by.get(l.issue_id) ?? { is: l.issue, keys: new Set<string>() };
+        e.keys.add(`${l.material_id}|${l.lot_no}`);
+        by.set(l.issue_id, e);
+      }
+      for (const [id, e] of by) {
+        const n = pkgs.filter((t) => e.keys.has(`${t.material_id}|${t.lot_no ?? ''}`)).length;
+        iss.push({ session_type: 'ISSUE', type_text: '领料核对', label: `领料单 ${e.is.no}（工单 ${e.is.work_order?.no ?? ''}，读到其中 ${n} 包）`, matched: n, total: pkgs.length, issue_id: id });
+      }
+      iss.sort((a, b) => b.matched - a.matched);
+    }
+    // 盘点：库位标签或多数标签所在库位
+    const cnt: typeof cands = [];
+    if (reader?.purpose === 'COUNT') {
+      let locId = locationTags.map((e) => locationIdOfEpc(e)).find((x) => !!x) ?? null;
+      if (!locId) {
+        const freq = new Map<number, number>();
+        for (const t of tags) if (t.location_id) freq.set(t.location_id, (freq.get(t.location_id) ?? 0) + 1);
+        locId = [...freq.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+      }
+      const loc = locId ? await db.location.findUnique({ where: { id: locId } }) : null;
+      if (loc) cnt.push({ session_type: 'COUNT', type_text: '盘点对账', label: `库位 ${loc.code}${loc.name ? ` ${loc.name}` : ''}`, matched: tags.length, total: tags.length, location_id: loc.id });
+    }
+    const order: Record<string, (typeof cands)[]> = {
+      SHIP: [ship, fg, ret], RECEIVE: [iss, fg, ret, ship], COUNT: [cnt], GATE: [],
+    };
+    const groups = order[reader?.purpose ?? 'RECEIVE'] ?? [ship, iss, fg, ret];
+    for (const g2 of groups) cands.push(...g2);
+    const first = groups.find((g2) => g2.length);
+    const unique = first && first.length === 1 ? first[0] : null;
+    let hint: string;
+    if (!items.length) hint = '等待读取：把货物放上读写器（或推过读写器）';
+    else if (unique) hint = `已识别：${unique.type_text} · ${unique.label}`;
+    else if (first) hint = `读到的标签对应 ${first.length} 张${first[0].type_text}单据，请点选要处理的一张`;
+    else if (reader?.purpose === 'SHIP' && units.length) hint = `读到 ${units.length} 台成品，但这些成品没有待发货的发货单（请先在“发货出库”新建发货单，或检查是否拿错货）`;
+    else if (reader?.purpose === 'COUNT') hint = '没有识别出库位：请扫库位标签，或手工选择库位开始盘点';
+    else if (blank && !units.length && !pkgs.length) hint = `读到 ${blank} 张新标签（未登记）：如是收货，请选择采购单`;
+    else if (pkgs.length) hint = `读到 ${pkgs.length} 包原材料，但没有包含这些批次的待过账领料单`;
+    else hint = `读到 ${items.length} 个标签，没有识别出对应的单据，请手工选单`;
+    return { candidates: cands, unique, hint, counts: { units: units.length, packages: pkgs.length, blank } };
+  }
+
+  /** 读取接入之后：识别中的会话自动识别（唯一匹配直接开核对）；收货会话把新标签自动绑定到订单行 */
+  async afterIngest(tx: Tx, user: CurrentUser, readerId: number, out: { session_id: number | null; location_tags: string[] } & Record<string, any>) {
+    let sid = out.session_id;
+    if (!sid && out.location_tags?.length) {
+      // 手持盘点机只扫了库位标签：直接开该库位的盘点
+      const r = await tx.rfidReader.findUnique({ where: { id: readerId } });
+      const locId = locationIdOfEpc(out.location_tags[0]);
+      const open = await tx.rfidSession.findFirst({ where: { reader_id: readerId, status: 'OPEN' } });
+      if (r?.purpose === 'COUNT' && locId && !open) {
+        const s = await tx.rfidSession.create({ data: { no: await this.numbering.nextNo(tx, 'RF'), session_type: 'COUNT', status: 'OPEN', reader_id: r.id, location_id: locId, created_by: `rfid:${r.code}` } });
+        sid = s.id;
+      }
+    }
+    if (!sid) return out;
+    const s = await tx.rfidSession.findUnique({ where: { id: sid } });
+    if (!s || s.status !== 'OPEN') return out;
+    if (s.session_type === 'AUTO') {
+      const r = await this.recognize(tx, s, out.location_tags);
+      if (r.unique) {
+        const u = r.unique;
+        await this.adopt(tx, user, s.id, { session_type: u.session_type, shipment_id: u.shipment_id, wo_id: u.wo_id, issue_id: u.issue_id, location_id: u.location_id });
+        out.recognized = { session_type: u.session_type, label: u.label };
+      } else {
+        out.recognized = null;
+        out.hint = r.hint;
+      }
+    } else if (s.session_type === 'RECEIVE') {
+      await this.autoBind(tx, s.id);
+    }
+    return out;
+  }
+
+  /** 一包的默认绑定（见 autoBind 说明）；放置规则有错误或该行已收满时返回 null */
+  private async defaultsFor(tx: Tx, s: RfidSession, line: any, bound: RfidSessionTag[], waiting: number) {
+    const left = round(line.qty - (line.received_qty || 0) - bound.filter((b) => b.po_line_id === line.id).reduce((n, b) => n + (b.qty ?? 0), 0));
+    if (left <= EPS) return null;
+    const prev = [...bound].filter((b) => b.po_line_id === line.id).sort((a, b) => b.id - a.id)[0];
+    const m = line.material;
+    const qty = round(Math.min(left, m.purchase_factor > 1 ? m.purchase_factor : prev?.qty ? prev.qty : m.min_order_qty > 0 ? m.min_order_qty : left / Math.max(1, waiting)));
+    const locId = prev?.location_id ?? (await suggestLocation(tx, m))?.id ?? s.location_id;
+    if (!locId) return null;
+    if (!prev) {
+      const place = await this.inv.checkPlacement(tx, { material_id: m.id, location_id: locId, owner_customer_id: m.owner_customer_id });
+      if (place.errors.length) return null;
+    }
+    return {
+      po_line_id: line.id, material_id: m.id, qty, location_id: locId, lot_no: prev?.lot_no ?? null, supplier_lot: prev?.supplier_lot ?? null,
+      mfg_date: prev?.mfg_date ?? null, expiry_date: prev?.expiry_date ?? null,
+    };
+  }
+
+  /**
+   * 收货台自动绑定：读到的新标签按顺序绑定到“还有未收数量”的订单行——只剩一行未收时直接绑；多行时沿用上一包的行（仓管第一次点一下物料后连续收不用再点）。
+   * 每包数量默认：物料采购单位换算率（>1）→ 同一行上一包数量 → 最小包装量（最小订货量）→ 剩余未收平均分；都不超过该行剩余未收。
+   * 批号、原厂批号、生产日期、库位默认沿用同一行上一包；第一包库位取建议库位（放置规则有错误时不自动绑，等仓管选择）。
+   */
+  async autoBind(tx: Tx, sessionId: number) {
+    const s = await tx.rfidSession.findUnique({ where: { id: sessionId } });
+    if (!s || s.status !== 'OPEN' || s.session_type !== 'RECEIVE' || !s.po_id) return 0;
+    const items = await tx.rfidSessionTag.findMany({ where: { session_id: s.id, action: null }, orderBy: { id: 'asc' } });
+    const known = new Set((await tx.rfidTag.findMany({ where: { epc: { in: items.map((i) => i.epc) } }, select: { epc: true } })).map((x) => x.epc));
+    const fresh = items.filter((i) => !known.has(i.epc) && !i.epc.startsWith('SN:'));
+    const unbound = fresh.filter((i) => !i.po_line_id);
+    if (!unbound.length) return 0;
+    const lines = await tx.purchaseOrderLine.findMany({ where: { order_id: s.po_id }, orderBy: { line_no: 'asc' }, include: { material: true } });
+    const bound = fresh.filter((i) => i.po_line_id);
+    const leftOf = (l: (typeof lines)[number]) => round(l.qty - (l.received_qty || 0) - bound.filter((b) => b.po_line_id === l.id).reduce((n, b) => n + (b.qty ?? 0), 0));
+    let n = 0;
+    for (const it of unbound) {
+      const open = lines.filter((l) => leftOf(l) > EPS);
+      if (!open.length) break;
+      const last = [...bound].sort((a, b) => b.id - a.id)[0];
+      const line = open.length === 1 ? open[0] : last ? open.find((l) => l.id === last.po_line_id) : undefined;
+      if (!line) break; // 多行未收且还没点过物料：等仓管点一下
+      const data = await this.defaultsFor(tx, s, line, bound, unbound.length - n);
+      if (!data) break;
+      await tx.rfidSessionTag.update({ where: { id: it.id }, data });
+      bound.push({ ...it, ...data });
+      n += 1;
+    }
+    return n;
   }
 
   sessionOut(s: any, extra: Record<string, unknown> = {}) {
@@ -216,7 +423,12 @@ export class RfidSessionService {
       else if (!it.known && !it.sn) { it.level = 'warn'; it.message = '未登记的标签（系统中没有这个 EPC）'; }
     }
     const type = s.session_type;
-    if (type === 'RECEIVE') await this.evalReceive(db, ctx);
+    if (type === 'AUTO') {
+      const r = await this.recognize(db, s);
+      ctx.check = r;
+      for (const it of items) if (!it.action && it.level === 'info' && !it.message) it.message = it.sn ? `${it.sn}（${it.sn_status_text}）` : it.material_code ? `${it.material_code} 批次 ${it.lot_no || '-'}` : '';
+      if (s.status === 'OPEN') ctx.blockers.push(r.candidates.length ? '请点选要处理的单据' : r.hint);
+    } else if (type === 'RECEIVE') await this.evalReceive(db, ctx);
     else if (type === 'GATE') await this.evalGate(db, ctx);
     else if (type === 'ISSUE') await this.evalIssue(db, ctx);
     else if (type === 'FG_RECEIPT') await this.evalFg(db, ctx);
@@ -226,7 +438,7 @@ export class RfidSessionService {
     const active = items.filter((i) => !i.action);
     if (s.status === 'OPEN') {
       const bad = active.filter((i) => i.level === 'error');
-      if (bad.length && type !== 'GATE') ctx.blockers.unshift(`有 ${bad.length} 个标签不符合本次作业（红色行），请把实物拿开并“标记为误读”，或按提示处理`);
+      if (bad.length && type !== 'GATE' && type !== 'AUTO') ctx.blockers.unshift(`有 ${bad.length} 个标签不符合本次作业（红色行），请把实物拿开并“标记为误读”，或按提示处理`);
     }
     const out = items.map(({ _tag, _serial, ...rest }) => rest);
     const unknown = out.filter((i) => !i.known && !i.sn && !i.action).map((i) => i.epc);
@@ -649,7 +861,7 @@ export class RfidSessionService {
     }
     if (!epc && asEpc) epc = asEpc; // 新标签（收货台）或未登记标签
     if (!epc) throw new BizError(`“${c}”不是已登记的 EPC、序列号或带标签的批号；请核对后重输，或到“标签管理”换标`);
-    const r = await this.rfid.ingest(tx, s.reader, [{ epc, antenna: null, rssi: null }], { source: 'MANUAL', username: user.username, session_id: s.id });
+    const r = await this.afterIngest(tx, user, s.reader.id, await this.rfid.ingest(tx, s.reader, [{ epc, antenna: null, rssi: null }], { source: 'MANUAL', username: user.username, session_id: s.id }));
     return { epc, ingest: r };
   }
 
@@ -683,34 +895,57 @@ export class RfidSessionService {
   }
 
   /** 收货台：把读到的新标签绑定到订单行（每张标签 = 一包，数量 qty）；放置规则错误立即提示，湿敏警告在确认时确认 */
+  /**
+   * 收货台绑定：
+   *   只给订单行（不填数量）= “点一下物料”：所选新标签（默认第一张未绑定的）按默认值绑定到该行，之后读到的新标签自动沿用这一行；
+   *   填了数量 = 修改：所选标签（默认全部未绑定的）按填写的每包数量、批号、库位绑定（放置规则错误立即提示，湿敏警告确认时再确认）。
+   */
   async bind(tx: Tx, user: CurrentUser, id: number, a: BindArgs) {
     const s = await this.mustOpen(tx, id, true);
     if (s.session_type !== 'RECEIVE') throw new BizError('只有收货作业需要绑定');
     const pl = await tx.purchaseOrderLine.findUnique({ where: { id: a.po_line_id }, include: { material: true } });
     if (!pl || pl.order_id !== s.po_id) throw new BizError('订单行不属于本采购单');
-    const qty = round(Number(a.qty));
-    if (!(qty > 0)) throw new BizError('每包数量必须大于 0');
-    const loc = await tx.location.findUnique({ where: { id: a.location_id } });
-    if (!loc || !loc.is_active) throw new BizError('请选择有效的收货库位');
-    const place = await this.inv.checkPlacement(tx, { material_id: pl.material_id, location_id: loc.id, owner_customer_id: pl.material.owner_customer_id });
-    if (place.errors.length) throw new BizError(place.errors.join('；'));
-    const mfg = dateOnly(a.mfg_date ?? null);
-    const exp = dateOnly(a.expiry_date ?? null);
-    const all = await tx.rfidSessionTag.findMany({ where: { session_id: s.id, action: null } });
+    const all = await tx.rfidSessionTag.findMany({ where: { session_id: s.id, action: null }, orderBy: { id: 'asc' } });
     const known = new Set((await tx.rfidTag.findMany({ where: { epc: { in: all.map((x) => x.epc) } }, select: { epc: true } })).map((x) => x.epc));
+    const fresh = all.filter((x) => !known.has(x.epc) && !x.epc.startsWith('SN:'));
     const want = a.epcs?.length ? new Set(a.epcs.map((e) => normEpc(e) ?? e)) : null;
-    const targets = all.filter((x) => !known.has(x.epc) && !x.epc.startsWith('SN:') && (want ? want.has(x.epc) : !x.po_line_id));
-    if (!targets.length) throw new BizError(want ? '所选标签不是本次读到的新标签' : '没有未绑定的新标签：把贴好空白标签的包装放上收货台');
-    for (const x of targets) {
-      await tx.rfidSessionTag.update({
-        where: { id: x.id },
-        data: {
-          po_line_id: pl.id, material_id: pl.material_id, qty, lot_no: String(a.lot_no ?? '').trim() || null, supplier_lot: String(a.supplier_lot ?? '').trim() || null,
-          location_id: loc.id, mfg_date: mfg, expiry_date: exp,
-        },
-      });
+    let warnings: string[] = [];
+    let targets: RfidSessionTag[];
+    if (a.qty === undefined || a.qty === null) {
+      targets = want ? fresh.filter((x) => want.has(x.epc)) : fresh.filter((x) => !x.po_line_id).slice(0, 1);
+      if (!targets.length) throw new BizError(want ? '所选标签不是本次读到的新标签' : '没有未绑定的新标签：把贴好空白标签的包装放上收货台');
+      const bound = fresh.filter((x) => x.po_line_id && !targets.includes(x));
+      for (const x of targets) {
+        const data = await this.defaultsFor(tx, s, pl, bound, targets.length);
+        if (!data) throw new BizError(`第 ${pl.line_no} 行 ${pl.material.code} 已收满或没有合适的库位，请在“修改”中填写数量和库位`);
+        await tx.rfidSessionTag.update({ where: { id: x.id }, data });
+        bound.push({ ...x, ...data });
+      }
+      await this.autoBind(tx, s.id);
+    } else {
+      const qty = round(Number(a.qty));
+      if (!(qty > 0)) throw new BizError('每包数量必须大于 0');
+      targets = fresh.filter((x) => (want ? want.has(x.epc) : !x.po_line_id));
+      if (!targets.length) throw new BizError(want ? '所选标签不是本次读到的新标签' : '没有未绑定的新标签：把贴好空白标签的包装放上收货台');
+      const locId = a.location_id ?? targets.find((x) => x.location_id)?.location_id ?? (await suggestLocation(tx, pl.material))?.id;
+      const loc = locId ? await tx.location.findUnique({ where: { id: locId } }) : null;
+      if (!loc || !loc.is_active) throw new BizError('请选择有效的收货库位');
+      const place = await this.inv.checkPlacement(tx, { material_id: pl.material_id, location_id: loc.id, owner_customer_id: pl.material.owner_customer_id });
+      if (place.errors.length) throw new BizError(place.errors.join('；'));
+      warnings = place.warnings;
+      const mfg = dateOnly(a.mfg_date ?? null);
+      const exp = dateOnly(a.expiry_date ?? null);
+      for (const x of targets) {
+        await tx.rfidSessionTag.update({
+          where: { id: x.id },
+          data: {
+            po_line_id: pl.id, material_id: pl.material_id, qty, lot_no: String(a.lot_no ?? '').trim() || null, supplier_lot: String(a.supplier_lot ?? '').trim() || null,
+            location_id: loc.id, mfg_date: mfg, expiry_date: exp,
+          },
+        });
+      }
     }
-    return { ...(await this.detail(tx, s.id)), warnings: place.warnings, bound: targets.length };
+    return { ...(await this.detail(tx, s.id)), warnings, bound: targets.length };
   }
 
   async unbind(tx: Tx, id: number, epcs: string[]) {
@@ -748,6 +983,7 @@ export class RfidSessionService {
     const d = await this.detail(tx, s.id);
     if (s.session_type !== 'ISSUE' && s.session_type !== 'GATE' && d.blockers.length) throw new BizError(`还不能确认：${d.blockers.join('；')}`);
     switch (s.session_type) {
+      case 'AUTO': throw new BizError('还没有识别出单据，请先点选要处理的单据');
       case 'RECEIVE': return this.confirmReceive(tx, user, s, d, body);
       case 'GATE': return this.confirmGate(tx, user, s, body);
       case 'ISSUE': return this.confirmIssue(tx, user, s, d, body);
@@ -1003,7 +1239,39 @@ export class RfidSessionService {
     const incl = { material: true, location: true, serial: { include: { release: true } } } as const;
     const out: any[] = [];
     const type = s?.session_type ?? (reader.purpose === 'GATE' ? 'GATE' : null);
-    if (type === 'RECEIVE' || !type) return { blank: true, items: out };
+    if (type === 'RECEIVE') return { blank: true, items: out };
+    if (!type || type === 'AUTO') {
+      // 没有进行中作业（自动识别演示）：按读写器用途给出可能读到的货物
+      if (reader.purpose === 'SHIP') {
+        const drafts = await db.shipmentLine.findMany({ where: { shipment: { status: 'DRAFT' } }, include: { shipment: true } });
+        for (const l of drafts) {
+          const sns: string[] = l.serials ? JSON.parse(l.serials) : [];
+          const tags = await db.rfidTag.findMany({ where: { status: 'ACTIVE', serial: { sn: { in: sns } } }, include: incl });
+          out.push(...tags.map((t) => pick(t, 'expected', `待发货：${l.shipment.no}`)));
+        }
+        const fg = await db.rfidTag.findMany({ where: { status: 'ACTIVE', serial: { status: 'COMPLETED' } }, include: incl, take: 4 });
+        const other = await db.rfidTag.findMany({ where: { status: 'ACTIVE', tag_type: 'UNIT', serial: { status: 'IN_STOCK' }, epc: { notIn: out.map((x) => x.epc) } }, include: incl, take: 4 });
+        out.push(...fg.map((t) => pick(t, 'other', '完工待入库')), ...other.map((t) => pick(t, 'other', t.serial?.release?.status === 'RELEASED' ? '在库，不在待发货单上' : '在库，未放行')));
+      } else if (reader.purpose === 'COUNT') {
+        const one = await db.rfidTag.findFirst({ where: { status: 'ACTIVE', location_id: { not: null }, tag_type: 'PACKAGE' }, orderBy: { id: 'asc' } });
+        if (one?.location_id) {
+          const loc = await db.location.findUnique({ where: { id: one.location_id } });
+          out.push({ epc: locationEpc(one.location_id), kind: 'expected', tag_type: 'LOCATION', material_code: `库位标签 ${loc?.code ?? ''}`, lot_no: null, qty: null, sn: null, location_code: loc?.code ?? null, note: '库位标签' });
+          const here = await db.rfidTag.findMany({ where: { status: 'ACTIVE', location_id: one.location_id }, include: incl, take: 30 });
+          out.push(...here.map((t) => pick(t, 'expected')));
+        }
+      } else {
+        const lines = await db.materialIssueLine.findMany({ where: { issue: { status: 'DRAFT', issue_type: 'ISSUE' } }, include: { issue: true }, take: 20 });
+        for (const l of lines) {
+          const t = await db.rfidTag.findFirst({ where: { status: 'ACTIVE', material_id: l.material_id, lot_no: l.lot_no, location_id: { not: null } }, include: incl });
+          if (t && !out.some((x) => x.epc === t.epc)) out.push(pick(t, 'expected', `待领料：${l.issue.no}`));
+        }
+        const ret = await db.rfidTag.findMany({ where: { status: 'ACTIVE', serial: { status: 'SHIPPED' } }, include: incl, take: 3 });
+        out.push(...ret.map((t) => pick(t, 'other', '已发货（客户退货）')));
+        return { blank: true, items: out, gate: null };
+      }
+      return { blank: false, items: out, gate: null };
+    }
     if (type === 'GATE') {
       const inside = reader.warehouse_id ? await db.rfidTag.findMany({ where: { status: 'ACTIVE', location: { warehouse_id: reader.warehouse_id } }, include: incl, take: 12, orderBy: { id: 'asc' } }) : [];
       const outside = reader.outside_location_id ? await db.rfidTag.findMany({ where: { status: 'ACTIVE', location_id: reader.outside_location_id }, include: incl, take: 8 }) : [];

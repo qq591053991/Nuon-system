@@ -3,15 +3,15 @@
  * 多读（不在单上 / 本批次已够数）、少读（还差多少）、读错批次都明确标红；全部够数后确认 = 拣料 + 领料过账（标签数量随之扣减）。
  * 有少读行时可“部分过账”：少读的行转入新领料单。
  */
-import { Button, Card, Col, Form, Modal, Result, Row, Space, Table, Tag, message } from 'antd';
-import { CheckOutlined } from '@ant-design/icons';
+import { Alert, Button, Card, Col, Form, Modal, Result, Row, Space, Table, Tag, message } from 'antd';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { post, type Rec } from '../../../api/http';
 import PageHeader from '../../../components/PageHeader';
 import RemoteSelect from '../../../components/RemoteSelect';
 import { fmtQty } from '../../../utils/format';
-import { Blockers, ItemsTable, OpenSessions, ReaderPicker, RfidLinks, SessionBar, errText, useSession, useSessionParam } from './kit';
+import { ItemsTable, OpenSessions, ReaderPicker, RfidLinks, SessionBar, errText, useSession, useSessionParam } from './kit';
+import { AutoSession, Detected, primaryOf } from './live';
 
 const FALLBACK = { to: '/wms/pda/pick', text: '条码拣料（兜底）' };
 const ST: Record<string, [string, string]> = { OK: ['够数', 'green'], PARTIAL: ['少读', 'orange'], MISSING: ['未读到', 'red'] };
@@ -74,9 +74,13 @@ export default function RfidIssue() {
   return (
     <div>
       <PageHeader title="RFID 领料核对" sub="读到的包装与领料单逐行核对批次、数量；一致后确认即拣料并过账" extra={<RfidLinks fallback={FALLBACK} />} />
-      {!sid ? <Start onStarted={setSid} /> : !d ? <Card loading /> : (
+      {!sid ? <><Detected type="ISSUE" onEnter={setSid} waitText="把拣好的料盘/料箱放上读写器，系统自动识别领料单" /><Start onStarted={setSid} /></> : !d ? <Card loading /> : d.session.session_type === 'AUTO' ? <AutoSession d={d} onChange={setD} /> : (
         <>
-          <SessionBar d={d} onChange={setD} onClosed={() => setSid(null)} fallbackLink={FALLBACK} />
+          <SessionBar d={d} onChange={setD} onClosed={() => setSid(null)} fallbackLink={FALLBACK} primary={{ text: primaryOf(d).text, disabled: !primaryOf(d).enabled, loading: busy, onClick: () => confirm(false) }}>
+            {d.check.need_partial && d.check.ok_lines > 0 && d.can_confirm && (
+              <Alert type="info" showIcon style={{ marginTop: 10 }} message={`还有 ${d.check.short_lines} 行少读；可以继续读，或只过账够数的行`} action={<Button size="small" loading={busy} onClick={() => confirm(true)}>部分过账（少读行转新单）</Button>} />
+            )}
+          </SessionBar>
           {d.session.status === 'CONFIRMED' && (
             <Result status="success" title={`领料单 ${d.session.ref_no} 已过账`} extra={[
               <Button key="i" onClick={() => nav(`/wms/issues?id=${d.session.ref_id}`)}>查看领料单</Button>,
@@ -102,15 +106,6 @@ export default function RfidIssue() {
               <Card size="small" title="读到的标签"><ItemsTable d={d} onChange={setD} /></Card>
             </Col>
           </Row>
-          {d.session.status === 'OPEN' && (
-            <Card size="small" style={{ marginTop: 12 }}>
-              <Blockers d={d} />
-              <Space wrap>
-                <Button type="primary" size="large" icon={<CheckOutlined />} loading={busy} disabled={!d.can_confirm || d.check.need_partial} onClick={() => confirm(false)}>确认领料（拣料并过账）</Button>
-                {d.check.need_partial && d.check.ok_lines > 0 && <Button size="large" loading={busy} disabled={!d.can_confirm} onClick={() => confirm(true)}>部分过账（少读行转新单）</Button>}
-              </Space>
-            </Card>
-          )}
         </>
       )}
     </div>

@@ -43,12 +43,13 @@ describe('RFID 仓库作业', () => {
     expect([r.status, r.body.detail]).toEqual([401, expect.stringContaining('密钥无效')]);
     r = await push(KEY.rcv, { reader_code: 'RD-SHIP-01', reads: [{ epc }] });
     expect([r.status, r.body.detail]).toEqual([401, expect.stringContaining('与请求中的 RD-SHIP-01 不符')]);
-    // 收货台没有进行中的作业：只记录不计入
+    // 收货台没有进行中的作业：自动开“识别中”会话（识别不出单据时给出提示）
     r = await push(KEY.rcv, { reader_code: 'RD-RCV-01', reads: [{ epc, antenna: 1, rssi: -50 }, { epc: 'xyz' }] });
     expect(r.status).toBe(200);
-    expect([r.body.no_session, r.body.accepted, r.body.invalid]).toEqual([1, 0, ['xyz']]);
+    expect([r.body.no_session, r.body.accepted, r.body.invalid, r.body.recognized]).toEqual([0, 1, ['xyz'], null]);
+    expect(r.body.hint).toContain('没有包含这些批次的待过账领料单'); // 读到的是期初库存的包装标签
     const hb = await request(t.app.getHttpServer()).post('/api/rfid/heartbeat').set('X-Reader-Key', KEY.rcv).send({});
-    expect([hb.status, hb.body.reader_code, hb.body.session]).toEqual([200, 'RD-RCV-01', null]);
+    expect([hb.status, hb.body.reader_code, hb.body.session.session_type]).toEqual([200, 'RD-RCV-01', 'AUTO']);
     expect((await t.api.as('wh').ok('get', '/api/rfid/overview')).readers.find((x: any) => x.code === 'RD-RCV-01').online).toBe(true);
     // 停用后拒绝
     await t.api.as('wh').ok('put', `/api/rfid/readers/${readers['RD-RCV-01'].id}`, { is_active: false });
@@ -67,7 +68,7 @@ describe('RFID 仓库作业', () => {
     await expect(t.db.base.rfidRead.update({ where: { id: raw.id }, data: { rssi: -10 } })).rejects.toThrow(/电子记录不可修改或删除/);
     await expect(t.db.base.rfidRead.delete({ where: { id: raw.id } })).rejects.toThrow(/电子记录不可修改或删除/);
     const reads = await t.api.as('wh').ok('get', '/api/rfid/reads', { reader_id: readers['RD-RCV-01'].id });
-    expect(reads.items.map((x: any) => x.result)).toContain('NO_SESSION');
+    expect(reads.items.map((x: any) => x.result)).toContain('ACCEPTED');
   });
 
   test('收货台：去重与 RSSI 过滤、未登记标签单独列出；新标签绑定到货明细 → 确认生成入库单并发卡（湿敏库位须确认）', async () => {
@@ -95,12 +96,14 @@ describe('RFID 仓库作业', () => {
     expect(s.items.length).toBe(3);
     expect(s.items.find((i: any) => i.epc === A).read_count).toBe(3);
     expect(s.items.find((i: any) => i.epc === old.epc).message).toContain('不参与本次收货');
-    expect(s.check.unbound).toBe(2);
+    // 只有一行未收：第一包自动绑定（每包默认 = 最小包装量 1000，库位 = 建议库位 DRY-01）；该行已收满，第二包不自动绑
+    expect(s.items.find((i: any) => i.epc === A)).toMatchObject({ po_line_id: s.check.lines[0].po_line_id, bind_qty: 1000, bind_location_code: 'DRY-01' });
+    expect([s.check.bound, s.check.unbound]).toEqual([1, 1]);
     expect(s.can_confirm).toBe(false);
-    expect(s.blockers[0]).toContain('还有 2 张新标签没有绑定');
+    expect(s.blockers[0]).toContain('还有 1 张新标签没有绑定');
     // 绑定到普通库位 RAW-A01（湿敏物料）→ 确认时须确认放置
     const line = s.check.lines[0];
-    s = await api.as('wh').ok('post', `/api/rfid/sessions/${s.session.id}/bind`, { po_line_id: line.po_line_id, qty: 500, supplier_lot: 'W2611-01', mfg_date: '2026-11-01', location_id: ref.loc['RAW-A01'] });
+    s = await api.as('wh').ok('post', `/api/rfid/sessions/${s.session.id}/bind`, { epcs: [A, B], po_line_id: line.po_line_id, qty: 500, supplier_lot: 'W2611-01', mfg_date: '2026-11-01', location_id: ref.loc['RAW-A01'] });
     expect(s.warnings[0]).toContain('湿敏物料');
     expect([s.check.bound, s.check.lines[0].bound_qty, s.can_confirm]).toEqual([2, 1000, true]);
     // 自有料不能绑定到客供仓（放置规则立即拦截）
@@ -123,7 +126,7 @@ describe('RFID 仓库作业', () => {
     // 已确认的作业不能再读、再确认
     expect((await api.as('wh').post(`/api/rfid/sessions/${s.session.id}/confirm`, {})).body.detail).toContain('已确认');
     const again = await push(KEY.rcv, { reads: [{ epc: A }] });
-    expect(again.body.no_session).toBe(1);
+    expect(again.body.session_id).not.toBe(s.session.id); // 新开“识别中”会话
   });
 
   test('库门：过门生成待确认（不自动移库），仓管确认后才调拨；方向不明须选择或标记误读', async () => {
@@ -317,6 +320,102 @@ describe('RFID 仓库作业', () => {
     expect([it.qty, it.tag_qty, it.qty_note]).toEqual([50, 80, '标签发卡 80，账面剩 50']);
     const line = s.check.lines.find((l: any) => l.lot_no === 'HY2609F');
     expect([line.book_qty, line.read_qty, line.diff]).toEqual([50, 50, 0]);
+  });
+
+  test('收货连续多包：多行时点一下物料，之后每包自动绑定（默认数量、沿用批号），收满一行自动转下一行', async () => {
+    const { api } = t;
+    const ref: Ref = await api.ids();
+    const sup = await api.find('/api/suppliers', { q: 'S001' });
+    const po = await api.as('buyer').ok('post', '/api/purchase-orders', { supplier_id: sup.id, lines: [
+      { material_id: ref.m['LED-660-3030'], qty: 3000, unit_price: 0.35 }, { material_id: ref.m['LED-850-3030'], qty: 2000, unit_price: 0.42 },
+    ] });
+    await api.as('buyer').ok('post', `/api/purchase-orders/${po.id}/approve`);
+    // 不先开作业：读到新标签 → 识别中；选采购单后转为收货（已读的标签保留）
+    const T = (n: number) => `E28068940000500022220${n.toString(16).toUpperCase().padStart(3, '0')}`;
+    const r0 = await push(KEY.rcv, { reads: [{ epc: T(1) }] });
+    let s = await api.as('wh').ok('post', '/api/rfid/sessions', { session_type: 'RECEIVE', reader_id: readers['RD-RCV-01'].id, po_id: po.id });
+    expect(s.session.id).toBe(r0.body.session_id);
+    expect([s.check.unbound, s.check.bound]).toEqual([1, 0]); // 两行都未收：等仓管点物料
+    const [l1, l2] = s.check.lines;
+    // 点一下物料（第 1 行）→ 默认每包 1000（最小包装量）；改成本批号
+    s = await api.as('wh').ok('post', `/api/rfid/sessions/${s.session.id}/bind`, { epcs: [T(1)], po_line_id: l1.po_line_id });
+    expect(s.items[0]).toMatchObject({ bind_qty: 1000, bind_location_code: 'DRY-01' });
+    s = await api.as('wh').ok('post', `/api/rfid/sessions/${s.session.id}/bind`, { epcs: [T(1)], po_line_id: l1.po_line_id, qty: 1000, lot_no: 'LOT-RF-1', supplier_lot: 'SUP-9' });
+    // 连续两包：0 次输入，自动沿用第 1 行、每包 1000、批号 LOT-RF-1
+    await push(KEY.rcv, { reads: [{ epc: T(2) }, { epc: T(3) }] });
+    s = await detail(s.session.id);
+    expect(s.items.slice(1).map((i: any) => [i.po_line_id, i.bind_qty, i.bind_lot_no, i.bind_supplier_lot])).toEqual([[l1.po_line_id, 1000, 'LOT-RF-1', 'SUP-9'], [l1.po_line_id, 1000, 'LOT-RF-1', 'SUP-9']]);
+    // 第 1 行收满，只剩第 2 行 → 下一包自动绑第 2 行
+    await push(KEY.rcv, { reads: [{ epc: T(4) }, { epc: T(5) }] });
+    s = await detail(s.session.id);
+    expect(s.items.slice(3).map((i: any) => [i.po_line_id, i.bind_qty])).toEqual([[l2.po_line_id, 1000], [l2.po_line_id, 1000]]);
+    expect([s.check.unbound, s.can_confirm]).toEqual([0, true]);
+    const c = await api.as('wh').ok('post', `/api/rfid/sessions/${s.session.id}/confirm`, {});
+    const rc = await api.as('wh').ok('get', `/api/receipts/${c.result.receipt_id}`);
+    expect(rc.lines.map((l: any) => [l.material_code, l.qty, l.lot_no === 'LOT-RF-1'])).toEqual([['LED-660-3030', 3000, true], ['LED-850-3030', 2000, false]]);
+  });
+
+  test('自动识别单据：发货口识别发货单（唯一/多张/没有）、完工入库、客户退货、领料单、手持机扫库位标签开盘点', async () => {
+    const { api, db } = t;
+    const ref: Ref = await api.ids();
+    const inv = t.app.get(InventoryService);
+    const so = await api.as('wh').ok('get', `/api/sales-orders/${(await api.as('wh').find('/api/sales-orders', { q: 'LUM-PO-26-118' })).id}`);
+    const fg = ref.m['FG-RL300'];
+    const wo = await db.client.workOrder.create({ data: { no: 'WO-AU-1', material_id: fg, customer_id: so.customer_id, so_id: so.id, planned_qty: 6, completed_qty: 6, status: 'COMPLETED', lot_no: 'B-AU-1' } });
+    const rel = await db.client.productRelease.create({ data: { no: 'FX-AU-1', wo_id: wo.id, qty: 5, status: 'RELEASED', released_by: 'QA', released_at: new Date() } });
+    for (let i = 1; i <= 6; i++) {
+      await db.client.serialNumber.create({ data: { sn: `AU00${i}`, wo_id: wo.id, material_id: fg, lot_no: 'B-AU-1', status: i <= 5 ? 'IN_STOCK' : 'COMPLETED', location_id: i <= 5 ? ref.loc['FG-01'] : null, release_id: i <= 5 ? rel.id : null } });
+    }
+    await db.tx((tx) => inv.addStock(tx, { material_id: fg, location_id: ref.loc['FG-01'], lot_no: 'B-AU-1', status: 'AVAILABLE', qty: 5, move_type: 'FG_RECEIPT', ref: { ref_no: 'T' } }));
+    const epc = Object.fromEntries((await api.as('wh').ok('post', '/api/rfid/tags/issue-serials', { wo_id: wo.id })).created.map((x: any) => [x.sn, x.epc]));
+    const sh1 = await api.as('wh').ok('post', '/api/shipments', { so_id: so.id, lines: [{ so_line_id: so.lines[0].id, qty: 2, serials: ['AU001', 'AU002'] }] });
+    const sh2 = await api.as('wh').ok('post', '/api/shipments', { so_id: so.id, lines: [{ so_line_id: so.lines[0].id, qty: 1, serials: ['AU003'] }] });
+    // 唯一匹配：直接开发货核对，全部一致 → 一次确认
+    let r = await push(KEY.ship, { reads: [{ epc: epc.AU001 }, { epc: epc.AU002 }] });
+    expect(r.body.recognized).toMatchObject({ session_type: 'SHIP' });
+    let s = await detail(r.body.session_id);
+    expect([s.session.session_type, s.session.shipment_id, s.check.all_match, s.can_confirm]).toEqual(['SHIP', sh1.id, true, true]);
+    await api.as('wh').ok('post', `/api/rfid/sessions/${s.session.id}/confirm`, {});
+    // 多张匹配：列出候选，仓管点选
+    r = await push(KEY.ship, { reads: [{ epc: epc.AU003 }, { epc: epc.AU001 }] });
+    // AU001 已发货：发货类优先，只有 sh2 含待发 → 唯一
+    expect((await detail(r.body.session_id)).session.shipment_id).toBe(sh2.id);
+    await api.as('wh').ok('post', `/api/rfid/sessions/${r.body.session_id}/cancel`, {});
+    const sh3 = await api.as('wh').ok('post', '/api/shipments', { so_id: so.id, lines: [{ so_line_id: so.lines[0].id, qty: 1, serials: ['AU004'] }] });
+    r = await push(KEY.ship, { reads: [{ epc: epc.AU003 }, { epc: epc.AU004 }] });
+    s = await detail(r.body.session_id);
+    expect(s.session.session_type).toBe('AUTO');
+    expect(s.check.candidates.filter((c: any) => c.session_type === 'SHIP').map((c: any) => c.shipment_id).sort()).toEqual([sh2.id, sh3.id].sort());
+    expect(s.can_confirm).toBe(false);
+    s = await api.as('wh').ok('post', `/api/rfid/sessions/${s.session.id}/adopt`, { session_type: 'SHIP', shipment_id: sh3.id });
+    expect([s.session.session_type, s.check.missing, s.check.extra.length + s.check.not_mine.length]).toEqual(['SHIP', [], 1]);
+    await api.as('wh').ok('post', `/api/rfid/sessions/${s.session.id}/cancel`, {});
+    // 没有匹配：提示
+    r = await push(KEY.ship, { reads: [{ epc: epc.AU005 }] });
+    expect(r.body.hint).toContain('没有待发货的发货单');
+    await api.as('wh').ok('post', `/api/rfid/sessions/${r.body.session_id}/cancel`, {});
+    // 完工待入库的成品 → 按工单开完工入库
+    r = await push(KEY.ship, { reads: [{ epc: epc.AU006 }] });
+    s = await detail(r.body.session_id);
+    expect([s.session.session_type, s.session.wo_id, s.check.read_ok]).toEqual(['FG_RECEIPT', wo.id, 1]);
+    await api.as('wh').ok('post', `/api/rfid/sessions/${s.session.id}/cancel`, {});
+    // 已发货的成品（AU001）→ 客户退货
+    r = await push(KEY.rcv, { reads: [{ epc: epc.AU001 }] });
+    expect((await detail(r.body.session_id)).session.session_type).toBe('RETURN');
+    await api.as('wh').ok('post', `/api/rfid/sessions/${r.body.session_id}/cancel`, {});
+    // 包装标签 → 含该批次的待过账领料单
+    const so2 = await api.as('sales').ok('get', `/api/sales-orders/${(await api.as('sales').find('/api/sales-orders', { q: 'GY-2026-0931' })).id}`);
+    let w2 = await api.as('pmc').ok('post', '/api/work-orders', { material_id: ref.m['FG-BL100'], planned_qty: 1, so_id: so2.id, so_line_id: so2.lines[0].id });
+    w2 = await api.as('pmc').ok('post', `/api/work-orders/${w2.id}/release`);
+    const issue = await api.as('wh').ok('post', `/api/work-orders/${w2.id}/issues`, {});
+    r = await push(KEY.rcv, { reads: [{ epc: (await tagsOf('JS2609ST'))[0].epc }] });
+    s = await detail(r.body.session_id);
+    expect([s.session.session_type, s.session.issue_id]).toEqual(['ISSUE', issue.id]);
+    // 手持盘点机扫库位标签（4E5503…）→ 直接开该库位盘点
+    const locEpc = `4E550300${ref.loc['RAW-A02'].toString(16).toUpperCase().padStart(16, '0')}`;
+    r = await push(KEY.hh, { reads: [{ epc: locEpc }, { epc: (await tagsOf('HY2609F'))[0].epc }] });
+    s = await detail(r.body.session_id);
+    expect([s.session.session_type, s.session.location_id, s.check.read_here]).toEqual(['COUNT', ref.loc['RAW-A02'], 1]);
   });
 
   test('完工入库、客户退货、标签维护（换标/作废）', async () => {

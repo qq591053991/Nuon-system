@@ -25,7 +25,7 @@ import { locationIdOfEpc, mustEpc, newEpc, normEpc } from './epc';
 export const READER_TYPE: Record<string, string> = { DESKTOP: '桌面读写器', GATE: '门式读写器', HANDHELD: '手持读写器' };
 export const READER_PURPOSE: Record<string, string> = { RECEIVE: '收货台', GATE: '库门', SHIP: '发货口', COUNT: '盘点' };
 export const SESSION_TYPE: Record<string, string> = {
-  RECEIVE: '收货', GATE: '过门', ISSUE: '领料核对', FG_RECEIPT: '完工入库', SHIP: '发货核对', COUNT: '盘点对账', RETURN: '客户退货',
+  AUTO: '识别中', RECEIVE: '收货', GATE: '过门', ISSUE: '领料核对', FG_RECEIPT: '完工入库', SHIP: '发货核对', COUNT: '盘点对账', RETURN: '客户退货',
 };
 
 export interface ReadInput { epc: string; antenna?: number | null; rssi?: number | null; ts?: string | null }
@@ -155,7 +155,12 @@ export class RfidService {
         },
       });
     }
-    return tx.rfidSession.findFirst({ where: { reader_id: r.id, status: 'OPEN' }, orderBy: { id: 'desc' } });
+    const open = await tx.rfidSession.findFirst({ where: { reader_id: r.id, status: 'OPEN' }, orderBy: { id: 'desc' } });
+    if (open || !create) return open;
+    // 没有进行中的作业：开一个“识别中”会话，由 RfidSessionService.afterIngest 按读到的内容自动识别单据
+    return tx.rfidSession.create({
+      data: { no: await this.numbering.nextNo(tx, 'RF'), session_type: 'AUTO', status: 'OPEN', reader_id: r.id, location_id: r.location_id, created_by: `rfid:${r.code}`, remark: `${r.name} 自动识别` },
+    });
   }
 
   /**
@@ -163,7 +168,7 @@ export class RfidService {
    *   - EPC 规范化（十六进制大写），格式不对的列入 invalid、不入库；
    *   - RSSI 低于阈值（读写器设置或 RFID_RSSI_MIN）→ LOW_RSSI，只记录不计入（隔壁货架、擦边读取）；
    *   - 库位标签（4E5503…）→ LOCATION，只记录；
-   *   - 没有进行中的作业会话 → NO_SESSION，只记录（库门读写器会自动开会话）；
+   *   - 没有进行中的作业：库门读写器自动开“过门”会话，其他读写器自动开“识别中”会话（按读到的内容自动识别单据）；
    *   - 计入会话：同一会话同一 EPC 第一次 = ACCEPTED，之后 = DUPLICATE（累加读取次数、天线顺序、最强信号）。
    */
   async ingest(tx: Tx, r: RfidReader, reads: ReadInput[], opts: { source: ReadSource; username?: string | null; session_id?: number | null }) {

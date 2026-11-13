@@ -1,13 +1,14 @@
-/** RFID 作业台首页：九宫格入口（带待办数）、各读写器在线状态、进行中的作业、库门待确认、近 24 小时读取统计；条码作业作为兜底入口。 */
+/** RFID 作业台首页：“现场”区（读写器读到了什么、识别成哪张单、一键确认）、九宫格入口（带待办数）、各读写器在线状态、进行中的作业、库门待确认、近 24 小时读取统计；条码作业作为兜底入口。 */
 import { Alert, Badge, Button, Card, Col, Empty, Row, Space, Statistic, Table, Tag, Typography } from 'antd';
-import { BarcodeOutlined, SettingOutlined, TagsOutlined } from '@ant-design/icons';
+import { BarcodeOutlined, ExperimentOutlined, SettingOutlined, TagsOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { get, type Rec } from '../../../api/http';
 import { useAuth } from '../../../auth';
 import PageHeader from '../../../components/PageHeader';
-import { OnlineBadge, sessionUrl, useRfidOptions } from './kit';
+import { OnlineBadge, SimulateModal, sessionUrl, useRfidOptions } from './kit';
+import { EmptyLive, LiveCard, useLiveSessions } from './live';
 import { RFID_TILES } from './tiles';
 
 export default function RfidHome() {
@@ -15,6 +16,8 @@ export default function RfidHome() {
   const { can } = useAuth();
   const opts = useRfidOptions();
   const [ov, setOv] = useState<Rec | null>(null);
+  const live = useLiveSessions(null);
+  const [sim, setSim] = useState<Rec | null>(null);
   const [counts, setCounts] = useState<Record<string, number>>({});
   const load = useCallback(() => {
     get('/rfid/overview', undefined, true).then(setOv).catch(() => undefined);
@@ -49,11 +52,18 @@ export default function RfidHome() {
           </>
         }
       />
-      {!!ov?.gate_pending && (
-        <Alert type="warning" showIcon style={{ marginBottom: 12 }}
-          message={<span>库门有 <b>{ov.gate_pending}</b> 个过门标签待确认（确认后才移库，防止误读改库存）</span>}
-          action={<Button type="primary" size="small" onClick={() => nav('/wms/rfid/gate')}>去确认</Button>} />
-      )}
+      <Card size="small" style={{ marginBottom: 12 }}
+        title={<Space><span style={{ fontSize: 16 }}>现场：读写器读到了什么</span><Typography.Text type="secondary" style={{ fontSize: 12 }}>放货 / 过门 → 自动识别单据 → 在这里点一次确认</Typography.Text></Space>}>
+        {!live.list ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="读取中…" /> : !live.list.length ? <EmptyLive /> : (
+          <Row gutter={[12, 12]}>
+            {live.list.map((d) => (
+              <Col key={d.session.id} xs={24} xl={12}>
+                <LiveCard d={d} onChanged={() => { live.reload(); load(); }} />
+              </Col>
+            ))}
+          </Row>
+        )}
+      </Card>
       <Row gutter={[12, 12]}>
         {tiles.map((t) => {
           const n = badge(t.badgeKey);
@@ -76,6 +86,7 @@ export default function RfidHome() {
                 { title: '读写器', dataIndex: 'name', render: (v: string, r: Rec) => <div><b>{v}</b><div style={{ fontSize: 12, color: '#8c8c8c' }}>{r.code} · {r.purpose_text}</div></div> },
                 { title: '状态', key: 's', width: 120, render: (_: any, r: Rec) => <div><OnlineBadge r={r} /><div style={{ fontSize: 12, color: '#8c8c8c' }}>{r.last_heartbeat_at ? `心跳 ${dayjs(r.last_heartbeat_at).format('MM-DD HH:mm')}` : '从未连接'}</div></div> },
                 { title: '作业', key: 'o', render: (_: any, r: Rec) => (r.open_session ? <a onClick={() => nav(sessionUrl(r.open_session))}>{r.open_session.type_text} {r.open_session.no}</a> : '-') },
+                ...(opts?.simulate ? [{ title: '', key: 'sim', render: (_: any, r: Rec) => <a onClick={() => setSim(r)}><ExperimentOutlined /> 模拟读取</a> }] : []),
               ]} />
             )}
           </Card>
@@ -106,15 +117,16 @@ export default function RfidHome() {
             <Alert type="info" showIcon message="作业方式"
               description={
                 <ul style={{ margin: 0, paddingLeft: 18 }}>
-                  <li>收货台：选采购单 → 贴好空白标签的料盘/箱放上读写器 → 绑定到订单行 → 确认生成入库单（同时发卡）。</li>
+                  <li>收货台：选一次采购单 → 每包放上读写器自动绑定（数量、批号默认带出）→ 点一次确认生成入库单并发卡。</li>
                   <li>库门：货物过门自动生成“待确认”，仓管核对后一键确认才调拨；方向不明、弱信号、未登记的一律不自动过账。</li>
-                  <li>领料 / 发货：读到的标签与领料单、发货单逐条核对（多读、少读、读错批次、未放行、不属于本单），全部一致才能过账。</li>
+                  <li>领料 / 发货 / 完工入库 / 退货：不用先选单，读到标签自动识别单据，在“现场”区或作业页点一次确认；多读、少读、读错批次、未放行、不属于本单时不能确认。</li>
                   <li>盘点：手持读写器扫过整个库位后上传，按“读到 / 账面有没读到 / 读到但账面不在此库位”对账，写入盘点单并按当前账面过账。</li>
                 </ul>
               } />
           </Space>
         </Col>
       </Row>
+      {sim && <SimulateModal readerId={sim.id} sessionId={sim.open_session?.session_type !== 'GATE' && sim.purpose !== 'GATE' ? sim.open_session?.id : undefined} onClose={() => setSim(null)} onDone={() => { setSim(null); live.reload(); load(); }} />}
     </div>
   );
 }

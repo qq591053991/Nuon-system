@@ -115,6 +115,15 @@ class SessionDto {
   @IsOptional() @IsString() remark?: string | null;
 }
 
+class AdoptDto {
+  @IsIn(['RECEIVE', 'ISSUE', 'FG_RECEIPT', 'SHIP', 'COUNT', 'RETURN']) session_type: string;
+  @IsOptional() @Type(() => Number) @IsInt() po_id?: number | null;
+  @IsOptional() @Type(() => Number) @IsInt() issue_id?: number | null;
+  @IsOptional() @Type(() => Number) @IsInt() wo_id?: number | null;
+  @IsOptional() @Type(() => Number) @IsInt() shipment_id?: number | null;
+  @IsOptional() @Type(() => Number) @IsInt() location_id?: number | null;
+}
+
 class ManualDto {
   @IsString() code: string;
 }
@@ -129,13 +138,13 @@ class BindDto {
   /** 为空 = 所有未绑定的新标签 */
   @IsOptional() @IsArray() @IsString({ each: true }) epcs?: string[] | null;
   @Type(() => Number) @IsInt() po_line_id: number;
-  /** 每包（每张标签）数量 */
-  @Type(() => Number) @IsNumber() qty: number;
+  /** 每包（每张标签）数量；不填 = 按默认值绑定（“点一下物料”） */
+  @IsOptional() @Type(() => Number) @IsNumber() qty?: number | null;
   @IsOptional() @IsString() lot_no?: string | null;
   @IsOptional() @IsString() supplier_lot?: string | null;
   @IsOptional() @IsString() mfg_date?: string | null;
   @IsOptional() @IsString() expiry_date?: string | null;
-  @Type(() => Number) @IsInt() location_id: number;
+  @IsOptional() @Type(() => Number) @IsInt() location_id?: number | null;
 }
 
 class GateItemDto {
@@ -182,7 +191,7 @@ export class RfidController {
     const as = { id: 0, username: `rfid:${r.code}`, full_name: r.name, roles: '', password_hash: '', is_active: true } as CurrentUser;
     return als.run({ ...(als.getStore() ?? {}), user: as }, () =>
       this.db.tx(async (tx) => {
-        const out = await this.rfid.ingest(tx, r, b.reads, { source: 'READER', session_id: b.session_id ?? null });
+        const out = await this.sessions.afterIngest(tx, as, r.id, await this.rfid.ingest(tx, r, b.reads, { source: 'READER', session_id: b.session_id ?? null }));
         await tx.$executeRaw`UPDATE rfid_reader SET last_ip = ${String(ip ?? '').slice(0, 64) || null} WHERE id = ${r.id}`;
         return out;
       }),
@@ -296,7 +305,7 @@ export class RfidController {
         const s = await tx.rfidSession.findUnique({ where: { id: b.session_id } });
         if (!s || s.reader_id !== r.id) throw new BizError('会话不属于该读写器');
       }
-      return this.rfid.ingest(tx, r, b.reads, { source: 'SIMULATED', username: user.username, session_id: b.session_id ?? null });
+      return this.sessions.afterIngest(tx, user, r.id, await this.rfid.ingest(tx, r, b.reads, { source: 'SIMULATED', username: user.username, session_id: b.session_id ?? null }));
     });
   }
 
@@ -394,6 +403,13 @@ export class RfidController {
   @Get('sessions/:id')
   session(@Param('id', ParseIntPipe) id: number) {
     return this.sessions.detail(this.db.client, id);
+  }
+
+  /** 识别中的会话转为具体作业（多张单据匹配时仓管点选；也可手工指定） */
+  @Post('sessions/:id/adopt')
+  @Perms('wms')
+  adopt(@Param('id', ParseIntPipe) id: number, @Body() b: AdoptDto, @User() user: CurrentUser) {
+    return this.db.tx((tx) => this.sessions.adopt(tx, user, id, b));
   }
 
   /** 条码/手输兜底：EPC、序列号（UDI）、批号 */

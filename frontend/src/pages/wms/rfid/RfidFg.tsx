@@ -2,14 +2,15 @@
  * RFID 完工入库：选工单与入库库位 → 成品（每台一张单台标签，绑定序列号）推过读写器 → 只入库读到且“完工待入库”的序列号。
  * 没有标签的成品：点“为本工单发卡”生成单台标签（RFID 打印机写入）；标签损坏：扫机身 SN 条码兜底。
  */
-import { Button, Card, Col, Form, Result, Row, Space, Statistic, Tag, Typography, message } from 'antd';
-import { CheckOutlined, TagsOutlined } from '@ant-design/icons';
+import { Button, Card, Col, Form, Result, Row, Statistic, Tag, Typography, message } from 'antd';
+import { TagsOutlined } from '@ant-design/icons';
 import { useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { get, post } from '../../../api/http';
+import { post } from '../../../api/http';
 import PageHeader from '../../../components/PageHeader';
 import RemoteSelect, { LocationSelect } from '../../../components/RemoteSelect';
-import { Blockers, ItemsTable, OpenSessions, ReaderPicker, RfidLinks, SessionBar, errText, useSession, useSessionParam } from './kit';
+import { ItemsTable, OpenSessions, ReaderPicker, RfidLinks, SessionBar, errText, useSession, useSessionParam } from './kit';
+import { AutoSession, Detected, primaryOf } from './live';
 
 const FALLBACK = { to: '/wms/pda/fg', text: '条码完工入库（兜底）' };
 
@@ -68,9 +69,9 @@ export default function RfidFg() {
   return (
     <div>
       <PageHeader title="RFID 完工入库" sub="读到的成品单台标签对应序列号；只入库本工单完工待入库的" extra={<RfidLinks fallback={FALLBACK} />} />
-      {!sid ? <Start onStarted={setSid} /> : !d ? <Card loading /> : (
+      {!sid ? <><Detected type="FG_RECEIPT" onEnter={setSid} waitText="把完工的成品推过读写器，系统自动按工单开始入库核对" /><Start onStarted={setSid} /></> : !d ? <Card loading /> : d.session.session_type === 'AUTO' ? <AutoSession d={d} onChange={setD} /> : (
         <>
-          <SessionBar d={d} onChange={setD} onClosed={() => setSid(null)} fallbackLink={FALLBACK} />
+          <SessionBar d={d} onChange={setD} onClosed={() => setSid(null)} fallbackLink={FALLBACK} primary={{ text: primaryOf(d).text, disabled: !primaryOf(d).enabled, loading: busy, onClick: confirm }} />
           {d.session.status === 'CONFIRMED' && (
             <Result status="success" title={`完工入库单 ${d.session.ref_no}`} subTitle={c.wo.dhr_status === 'RELEASED' ? '已放行，入库为合格' : 'DHR 尚未放行，入库为“待检/待放行”，QA 放行后才能发货'}
               extra={[<Button key="w" onClick={() => nav(`/mes/work-orders/${c.wo.id}`)}>查看工单</Button>, <Button key="n" type="primary" onClick={() => setSid(null)}>下一工单</Button>]} />
@@ -90,13 +91,6 @@ export default function RfidFg() {
             <Typography.Paragraph type="secondary">还没读到：{c.missing.map((x: string) => <Tag key={x}>{x}</Tag>)}（不在场的可以下次再入库）</Typography.Paragraph>
           )}
           <Card size="small" title="读到的标签"><ItemsTable d={d} onChange={setD} /></Card>
-          {d.session.status === 'OPEN' && (
-            <Card size="small" style={{ marginTop: 12 }}>
-              <Blockers d={d} />
-              <Space><Button type="primary" size="large" icon={<CheckOutlined />} loading={busy} disabled={!d.can_confirm} onClick={confirm}>确认入库 {c.read_ok} 台</Button>
-                <Button onClick={() => get(`/rfid/sessions/${d.session.id}`).then(setD)}>刷新</Button></Space>
-            </Card>
-          )}
         </>
       )}
     </div>

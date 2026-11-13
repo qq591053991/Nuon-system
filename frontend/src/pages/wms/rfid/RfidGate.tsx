@@ -20,6 +20,7 @@ function GateSession({ d, onChanged }: { d: Rec; onChanged: () => void }) {
   const [sel, setSel] = useState<string[]>([]);
   const [over, setOver] = useState<Record<string, { direction?: string; to_location_id?: number }>>({});
   const [busy, setBusy] = useState(false);
+  const [scan, setScan] = useState(false);
   const pending: Rec[] = (d.items as Rec[]).filter((i) => !i.action);
   const done: Rec[] = (d.items as Rec[]).filter((i) => i.action);
   const okKeys = pending.filter((i) => i.level === 'ok' || i.level === 'info').map((i) => i.epc);
@@ -75,7 +76,7 @@ function GateSession({ d, onChanged }: { d: Rec; onChanged: () => void }) {
             render: (_: any, r: Rec) => (r.direction
               ? <Tag color={r.direction === 'OUT' ? 'blue' : 'cyan'}>{r.direction_text}</Tag>
               : r.known ? <Select size="small" style={{ width: 110 }} placeholder="选择方向" value={over[r.epc]?.direction}
-                  onChange={(v) => setOver({ ...over, [r.epc]: { ...over[r.epc], direction: v } })}
+                  onChange={(v) => { setOver({ ...over, [r.epc]: { ...over[r.epc], direction: v } }); setSel((cur) => (cur.includes(r.epc) ? cur : [...cur, r.epc])); }}
                   options={[{ value: 'OUT', label: '出库' }, { value: 'IN', label: '进库' }]} /> : '-'),
           },
           { title: '从', dataIndex: 'location_code', width: 80, render: (v: string) => v || '-' },
@@ -90,17 +91,27 @@ function GateSession({ d, onChanged }: { d: Rec; onChanged: () => void }) {
           { title: '核对说明', dataIndex: 'message', render: (v: string) => <span style={{ whiteSpace: 'normal' }}>{v}</span> },
           { title: '读取', key: 'rd', render: (_: any, r: Rec) => <Typography.Text type="secondary" style={{ fontSize: 12 }}>天线 {r.antennas ?? '-'} · {r.read_count} 次 · {r.max_rssi ?? '-'} dBm<div className="mono">{r.epc}</div></Typography.Text> },
         ]} />
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10, alignItems: 'center' }}>
-        <Button type="primary" icon={<CheckOutlined />} loading={busy} disabled={!okKeys.length} onClick={() => confirm(okKeys)}>确认全部绿色/无需移库（{okKeys.length}）</Button>
-        <Button loading={busy} disabled={!sel.length} onClick={() => confirm(sel)}>确认选中（{sel.length}）</Button>
-        <Popconfirm title="把选中的标签标记为误读？" description="不移库；原始读取记录保留。" onConfirm={() => ignore(sel)} okText="标记误读" cancelText="返回">
-          <Button disabled={!sel.length}>选中的标记为误读</Button>
-        </Popconfirm>
-        <Button onClick={() => ignore(pending.filter((i) => !i.known || i.tag_status !== 'ACTIVE' || i.level === 'error').map((i) => i.epc))}
-          disabled={!pending.some((i) => !i.known || i.tag_status !== 'ACTIVE' || i.level === 'error')}>未登记/不能移库的全部忽略</Button>
-        <div style={{ flex: 1 }} />
-        <div style={{ width: 360 }}><ScanInput size="middle" autoFocus={false} onScan={manual} placeholder="兜底：补记一包（EPC / 批号 / 序列号）回车" /></div>
-      </div>
+      {(() => {
+        const bad = pending.filter((i) => !i.known || i.tag_status !== 'ACTIVE' || i.level === 'error');
+        const unclear = pending.filter((i) => i.known && !i.direction && !over[i.epc]?.direction);
+        return (
+          <>
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 12, alignItems: 'center' }}>
+              <Button type="primary" size="large" icon={<CheckOutlined />} loading={busy} disabled={!okKeys.length} onClick={() => confirm(okKeys)}
+                style={{ height: 48, minWidth: 220, fontSize: 17, fontWeight: 600, ...(okKeys.length ? { background: '#389e0d', borderColor: '#389e0d' } : {}) }}>
+                确认移库（{okKeys.length}）
+              </Button>
+              {!!sel.length && <Button loading={busy} onClick={() => confirm(sel)}>只确认选中的 {sel.length} 个</Button>}
+              {!!sel.length && <Popconfirm title="把选中的标签标记为误读？" description="不移库；原始读取记录保留。" onConfirm={() => ignore(sel)} okText="标记误读" cancelText="返回"><Button>选中的标为误读</Button></Popconfirm>}
+              {!!bad.length && <Button onClick={() => ignore(bad.map((i) => i.epc))}>忽略 {bad.length} 个未登记/不能移库的</Button>}
+              {!!unclear.length && <Typography.Text type="warning">{unclear.length} 个方向不明：在“方向”列选择后勾选确认，或标为误读</Typography.Text>}
+              <div style={{ flex: 1 }} />
+              <a style={{ fontSize: 13 }} onClick={() => setScan((v) => !v)}>标签读不到？条码/手输</a>
+            </div>
+            {scan && <div style={{ width: 420, marginTop: 8 }}><ScanInput size="middle" onScan={manual} placeholder="补记一包：EPC / 批号 / 序列号，回车" /></div>}
+          </>
+        );
+      })()}
       {!!done.length && (
         <Typography.Paragraph type="secondary" style={{ margin: '8px 0 0', fontSize: 12 }}>
           已处理：{done.map((i) => `${i.material_code ?? i.epc}（${i.action === 'IGNORED' ? '误读' : i.action_note}）`).join('；')}

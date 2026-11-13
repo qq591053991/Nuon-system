@@ -3,7 +3,7 @@
  * 面向电脑/仓库大屏（1366×768 及以上）：读写器自动读取，页面每 1.5 秒刷新读取结果，仓管只需核对并点确认。
  */
 import { Alert, Badge, Button, Card, Checkbox, Empty, InputNumber, Modal, Popconfirm, Radio, Select, Space, Spin, Table, Tag, Tooltip, Typography, message } from 'antd';
-import { ExperimentOutlined, ReloadOutlined, StopOutlined, WifiOutlined } from '@ant-design/icons';
+import { BarcodeOutlined, CheckOutlined, ExperimentOutlined, ReloadOutlined, StopOutlined, WifiOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
@@ -28,7 +28,7 @@ export function useRfidOptions(): RfidOptions | null {
 export const SESSION_PATH: Record<string, string> = {
   RECEIVE: '/wms/rfid/receive', GATE: '/wms/rfid/gate', ISSUE: '/wms/rfid/issue', FG_RECEIPT: '/wms/rfid/fg', SHIP: '/wms/rfid/ship', COUNT: '/wms/rfid/count', RETURN: '/wms/rfid/return',
 };
-export const sessionUrl = (s: Rec) => (s.session_type === 'GATE' ? SESSION_PATH.GATE : `${SESSION_PATH[s.session_type]}?session=${s.id}`);
+export const sessionUrl = (s: Rec) => (s.session_type === 'GATE' ? SESSION_PATH.GATE : s.session_type === 'AUTO' ? '/wms/rfid' : `${SESSION_PATH[s.session_type]}?session=${s.id}`);
 
 /** 会话详情轮询：进行中每 interval 毫秒刷新一次（页面不可见时暂停） */
 export function useSession(id: number | null, interval = 1500) {
@@ -209,18 +209,39 @@ export function Blockers({ d }: { d: Rec }) {
   return <Alert type="warning" showIcon style={{ marginBottom: 12 }} message="还不能确认" description={<ul style={{ margin: 0, paddingLeft: 18 }}>{d.blockers.map((b: string) => <li key={b}>{b}</li>)}</ul>} />;
 }
 
+export interface PrimaryAction { text: ReactNode; onClick: () => void; disabled?: boolean; loading?: boolean }
+
+const isEditable = (el: Element | null) => !!el && (['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName) || (el as HTMLElement).isContentEditable);
+
 /**
- * 作业栏：单号、类型、读写器与在线状态、统计；条码/手输兜底输入；模拟读取（仅演示/测试）；异常标签一键标记误读；取消作业。
+ * 作业栏：左侧单号、读写器、统计；右侧**唯一的主按钮**（确认，全部相符时高亮，焦点不在输入框时按回车即确认）。
+ * 有不符时才显示“还不能确认”的原因和“异常标签标为误读”；条码/手输兜底、模拟读取、取消作业收在下方次要区域。
  */
-export function SessionBar({ d, onChange, onClosed, fallbackLink, children }: {
-  d: Rec; onChange: (nd: Rec) => void; onClosed?: () => void; fallbackLink?: { to: string; text: string }; children?: ReactNode;
+export function SessionBar({ d, onChange, onClosed, fallbackLink, primary, readyText, children }: {
+  d: Rec; onChange: (nd: Rec) => void; onClosed?: () => void; fallbackLink?: { to: string; text: string }; primary?: PrimaryAction; children?: ReactNode;
+  /** 可以确认但有差异时的提示（如盘点有盘盈/盘亏），代替“全部相符” */
+  readyText?: string | null;
 }) {
   const opts = useRfidOptions();
   const [simOpen, setSimOpen] = useState(false);
+  const [showScan, setShowScan] = useState(false);
   const s = d.session;
   const open = s.status === 'OPEN';
   // 收货台读到的未登记标签是待发卡的新标签，不算异常
-  const errors = (d.items as Rec[]).filter((i) => !i.action && (i.level === 'error' || (s.session_type !== 'RECEIVE' && !i.known && !i.sn))).length;
+  const errors = (d.items as Rec[]).filter((i) => !i.action && (i.level === 'error' || (s.session_type !== 'RECEIVE' && s.session_type !== 'AUTO' && !i.known && !i.sn))).length;
+  const ready = open && !!primary && !primary.disabled && !primary.loading;
+  const pRef = useRef(primary);
+  pRef.current = primary;
+  useEffect(() => {
+    if (!ready) return;
+    const h = (e: KeyboardEvent) => {
+      if (e.key !== 'Enter' || e.repeat || isEditable(document.activeElement) || document.querySelector('.ant-modal-wrap')) return;
+      e.preventDefault();
+      pRef.current?.onClick();
+    };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [ready]);
   const manual = async (code: string) => {
     try {
       const r = await post(`/rfid/sessions/${s.id}/manual`, { code }, true);
@@ -231,44 +252,59 @@ export function SessionBar({ d, onChange, onClosed, fallbackLink, children }: {
     }
   };
   return (
-    <Card size="small" style={{ marginBottom: 12 }} styles={{ body: { padding: '10px 14px' } }}>
+    <Card size="small" style={{ marginBottom: 12, borderColor: ready ? '#52c41a' : undefined }} styles={{ body: { padding: '12px 16px' } }}>
       <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center' }}>
-        <Space size={8} wrap>
-          <Tag color={open ? 'processing' : s.status === 'CONFIRMED' ? 'success' : 'default'}>{s.status_text}</Tag>
-          <b>{s.type_text} {s.no}</b>
-          {s.context_no && <Typography.Text type="secondary">· {s.context_no}</Typography.Text>}
-        </Space>
-        <Space size={6}><WifiOutlined style={{ color: '#5b3cc4' }} />{d.reader?.name ?? s.reader_name}<OnlineBadge r={d.reader} /></Space>
-        <Space size={12} style={{ color: '#595959' }}>
-          <span>标签 <b>{d.summary.tags}</b></span>
-          <span>待处理 <b>{d.summary.pending}</b></span>
-          <span>读取 <b>{d.summary.reads}</b> 次</span>
-          {!!d.summary.unknown && <span style={{ color: '#d46b08' }}>{s.session_type === 'RECEIVE' ? '新标签' : '未登记'} <b>{d.summary.unknown}</b></span>}
-          {!!d.summary.ignored && <span>误读 <b>{d.summary.ignored}</b></span>}
-        </Space>
+        <div style={{ minWidth: 0 }}>
+          <Space size={8} wrap>
+            <Tag color={open ? 'processing' : s.status === 'CONFIRMED' ? 'success' : 'default'}>{s.status_text}</Tag>
+            <b style={{ fontSize: 16 }}>{s.type_text}{s.context_no ? ` · ${s.context_no}` : ''}</b>
+            <Typography.Text type="secondary">{s.no}</Typography.Text>
+          </Space>
+          <div style={{ marginTop: 4, color: '#595959' }}>
+            <Space size={12} wrap>
+              <span><WifiOutlined style={{ color: '#5b3cc4' }} /> {d.reader?.name ?? s.reader_name} <OnlineBadge r={d.reader} /></span>
+              <span>标签 <b>{d.summary.tags}</b></span>
+              <span>读取 <b>{d.summary.reads}</b> 次</span>
+              {!!d.summary.unknown && <span style={{ color: '#d46b08' }}>{s.session_type === 'RECEIVE' ? '新标签' : '未登记'} <b>{d.summary.unknown}</b></span>}
+              {!!d.summary.ignored && <span>误读 <b>{d.summary.ignored}</b></span>}
+            </Space>
+          </div>
+        </div>
         <div style={{ flex: 1 }} />
-        {open && opts?.simulate && <Button icon={<ExperimentOutlined />} onClick={() => setSimOpen(true)}>模拟读取</Button>}
-        {open && errors > 0 && (
-          <Button onClick={async () => onChange(await post(`/rfid/sessions/${s.id}/ignore`, { all_errors: true }))}>异常标签全部标记为误读（{errors}）</Button>
-        )}
-        {open && (
-          <Popconfirm title="取消这次作业？" description="不影响库存；已读到的原始记录保留。" okText="取消作业" cancelText="返回"
-            onConfirm={async () => { onChange(await post(`/rfid/sessions/${s.id}/cancel`, {})); onClosed?.(); }}>
-            <Button icon={<StopOutlined />}>取消作业</Button>
-          </Popconfirm>
+        {open && primary && (
+          <Tooltip title={ready ? '按回车键也可确认' : undefined}>
+            <Button type="primary" size="large" icon={<CheckOutlined />} disabled={primary.disabled} loading={primary.loading} onClick={primary.onClick}
+              style={{ height: 52, minWidth: 220, fontSize: 18, fontWeight: 600, ...(ready ? { background: '#389e0d', borderColor: '#389e0d' } : {}) }}>
+              {primary.text}
+            </Button>
+          </Tooltip>
         )}
       </div>
+      {open && !!d.blockers?.length && (
+        <Alert type="warning" showIcon style={{ marginTop: 10 }} message={<span><b>还不能确认：</b>{d.blockers.join('；')}</span>}
+          action={errors > 0 ? <Button size="small" onClick={async () => onChange(await post(`/rfid/sessions/${s.id}/ignore`, { all_errors: true }))}>把 {errors} 个异常标签标为误读</Button> : undefined} />
+      )}
+      {open && ready && (readyText
+        ? <Alert type="warning" showIcon style={{ marginTop: 10 }} message={`${readyText}（按回车或点右上角按钮）`} />
+        : <Alert type="success" showIcon style={{ marginTop: 10 }} message="全部相符，可以确认（按回车或点右上角按钮）" />)}
+      {children}
       {open && (
-        <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 10, flexWrap: 'wrap' }}>
-          <Typography.Text type="secondary" style={{ flex: 'none' }}>标签读不到？</Typography.Text>
-          <div style={{ flex: '1 1 360px', maxWidth: 520 }}>
-            <ScanInput size="middle" autoFocus={false} onScan={manual} placeholder="条码/手输兜底：扫序列号/UDI、批号，或输入标签上印的 EPC，回车" />
-          </div>
+        <div style={{ display: 'flex', gap: 14, alignItems: 'center', marginTop: 10, flexWrap: 'wrap', fontSize: 13 }}>
+          <a onClick={() => setShowScan((v) => !v)}><BarcodeOutlined /> 标签读不到？条码/手输</a>
+          {opts?.simulate && <a onClick={() => setSimOpen(true)}><ExperimentOutlined /> 模拟读取（演示）</a>}
           {fallbackLink && <Link to={fallbackLink.to}>{fallbackLink.text}</Link>}
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>页面每 1.5 秒自动刷新读取结果</Typography.Text>
+          <Popconfirm title="取消这次作业？" description="不影响库存；已读到的原始记录保留。" okText="取消作业" cancelText="返回"
+            onConfirm={async () => { onChange(await post(`/rfid/sessions/${s.id}/cancel`, {})); onClosed?.(); }}>
+            <a style={{ color: '#8c8c8c' }}><StopOutlined /> 取消作业</a>
+          </Popconfirm>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>读取结果每 1.5 秒自动刷新</Typography.Text>
+          {showScan && (
+            <div style={{ flex: '1 1 100%', maxWidth: 560 }}>
+              <ScanInput size="middle" onScan={manual} placeholder="扫序列号/UDI、批号，或输入标签上印的 EPC，回车" />
+            </div>
+          )}
         </div>
       )}
-      {children}
       {simOpen && <SimulateModal sessionId={s.id} readerId={s.reader_id} onClose={() => setSimOpen(false)} onDone={() => { setSimOpen(false); get(`/rfid/sessions/${s.id}`).then(onChange); }} />}
     </Card>
   );
@@ -296,7 +332,7 @@ export function SimulateModal({ sessionId, readerId, onClose, onDone }: { sessio
     get('/rfid/sim-candidates', { session_id: sessionId || undefined, reader_id: readerId }).then((x) => {
       setC(x);
       setSel((x.items as Rec[]).filter((i) => i.kind === 'expected').slice(0, x.gate ? 2 : 50).map((i) => i.epc));
-      if (x.blank) setBlank(2);
+      if (x.blank && !x.items.length) setBlank(2);
     });
   }, [sessionId, readerId]);
   const submit = async () => {
